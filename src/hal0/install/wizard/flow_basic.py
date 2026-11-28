@@ -15,7 +15,6 @@ from .facts import Disk, Facts
 from .flow_model import (
     DEFAULT_HOST,
     DEFAULT_PORT,
-    SIZED_MODEL,
     Outcome,
     Pick,
     Row,
@@ -45,6 +44,7 @@ from .flow_model import (
 _DOWNLOAD_MBIT = 100
 _NPU_JOB = "npu"
 _NO_DOWNLOADS = "nothing yet; models are added after install"
+_NO_CHAT_DOWNLOAD = "no chat model to download"
 _GPU_REASONS = {
     "no_device": "No graphics card was found on this box.",
     "no_kfd": "A graphics card was found, but its compute driver is not available.",
@@ -268,7 +268,7 @@ def review_rows(s: State) -> tuple[Row, ...]:
             "Installing",
             ", ".join(c.label for c in jobs if c.id != _NPU_JOB) or "only the model server",
         ),
-        make_row("downloads", "Downloads", ", ".join(t for t, _ in items) or _NO_DOWNLOADS),
+        make_row("downloads", "Downloads", ", ".join(t for t, _ in items) or _no_downloads(pick)),
     ]
     if total is not None:
         minutes = math.ceil(total * 8000 / _DOWNLOAD_MBIT / 60)
@@ -288,12 +288,17 @@ def review_rows(s: State) -> tuple[Row, ...]:
     return tuple(rows)
 
 
+def _no_downloads(pick: Pick | None) -> str:
+    """The downloads line when nothing has a size: say why no chat model is coming."""
+    return _NO_CHAT_DOWNLOAD if pick is not None and pick.outcome == "too_small" else _NO_DOWNLOADS
+
+
 def _model_text(s: State, doc: Document, pick: Pick | None) -> str:
     """What the review says about the chat model, for each way it can be set."""
     if pick is not None:
         if pick.auto:
             return f"{pick.label}, picked for this box"
-        if pick.label == SIZED_MODEL:
+        if pick.outcome == "unknown":
             return "picked for this box once hal0 has checked it"
         return pick.label
     if maybe_value(s, doc, "starter_model") == "auto":

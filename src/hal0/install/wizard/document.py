@@ -229,6 +229,28 @@ def _install_type(layers: Sequence[tuple[str, Document]]) -> tuple[str, str]:
     return "recommended", "preset"
 
 
+def _drop_gone_starter(catalog: Catalog, saved: Document, higher: Sequence[Document]) -> None:
+    """Forget a saved chat model that the model list no longer offers.
+
+    Only when no higher layer names the key, and only when the list has chat
+    models at all: an old choice must not stop an upgrade, but a choice the person
+    just made, gave or fixed is theirs to keep.
+    """
+    question = catalog.questions.get("starter_model")
+    if question is None:
+        return
+    key = question.answer_key
+    value = get(saved, key)
+    offered = {r.model for r in catalog.model_ladder if r.role == "starter"}
+    if not isinstance(value, str) or value in ("auto", "none") or not offered:
+        return
+    if value in offered or any(get(layer, key) is not None for layer in higher):
+        return
+    parent = get(saved, key.rpartition(".")[0]) if "." in key else saved
+    if isinstance(parent, dict):
+        parent.pop(key.rpartition(".")[2], None)
+
+
 def effective(
     catalog: Catalog,
     *,
@@ -250,6 +272,7 @@ def effective(
             hermes.pop("terminal_tool", None)
     chosen_layer = _layer_of(_chosen_items(chosen))
     over_layer = _layer_of([(o.key, o.value) for o in over])
+    _drop_gone_starter(catalog, saved_layer, (given_layer, chosen_layer, over_layer))
 
     install_type, source = _install_type(
         [

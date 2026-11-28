@@ -78,7 +78,8 @@ class State:
 
 DEFAULT_HOST = "hal0.local"
 DEFAULT_PORT = 8080
-SIZED_MODEL = "a chat model sized for this box"
+TOO_SMALL = "no larger chat model fits this box; the small assistant model will be used"
+UNKNOWN_SIZE = "a chat model; its size is shown before it downloads"
 
 
 def make_row(
@@ -179,6 +180,7 @@ class Pick(NamedTuple):
     label: str
     gb: float | None
     auto: bool
+    outcome: str = "fits"
 
 
 def fits_box(row: ModelRow, facts: Facts) -> bool:
@@ -196,6 +198,20 @@ def auto_row(s: State) -> ModelRow | None:
     )
 
 
+def auto_outcome(s: State) -> str | None:
+    """How the automatic pick turns out: `fits`, `too_small`, `unknown`, or None for no ladder.
+
+    `too_small` means the box is known not to run any starter row; `unknown` means
+    none fit but the usable GPU's memory is not known, so one still might.
+    """
+    if not any(r.role == "starter" for r in s.catalog.model_ladder):
+        return None
+    if auto_row(s) is not None:
+        return "fits"
+    known = s.facts.gpu_outcome != "usable" or s.facts.gpu_pool_gb is not None
+    return "too_small" if known else "unknown"
+
+
 def pick_model(s: State, doc: Document) -> Pick | None:
     starter = maybe_value(s, doc, "starter_model")
     ladder = [r for r in s.catalog.model_ladder if r.role == "starter"]
@@ -203,11 +219,11 @@ def pick_model(s: State, doc: Document) -> Pick | None:
         return None
     if starter == "auto":
         row = auto_row(s)
-        return (
-            Pick(SIZED_MODEL, None, False)
-            if row is None
-            else Pick(row.label, row.download_gb, True)
-        )
+        if row is not None:
+            return Pick(row.label, row.download_gb, True)
+        if auto_outcome(s) == "too_small":
+            return Pick(TOO_SMALL, None, False, "too_small")
+        return Pick(UNKNOWN_SIZE, None, False, "unknown")
     named = next((r for r in ladder if r.model == starter), None)
     if named is None:
         return Pick(str(starter), None, False)
@@ -253,7 +269,7 @@ def download_items(s: State, doc: Document) -> list[tuple[str, float | None]]:
         if c.download_gb is not None
     ]
     pick = pick_model(s, doc)
-    if pick is not None:
+    if pick is not None and pick.outcome != "too_small":
         text = pick.label if pick.gb is None else f"{pick.label} ({fmt_gb(pick.gb)} GB)"
         items.append((text, pick.gb))
     return items

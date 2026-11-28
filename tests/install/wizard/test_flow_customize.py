@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import json
 from dataclasses import replace
+from pathlib import Path
 
 import pytest
 
-from hal0.install.wizard.catalog import Catalog, ModelRow, Option
+from hal0.install.wizard.catalog import Catalog, ModelRow, Option, load_catalog
 from hal0.install.wizard.document import Override
 from hal0.install.wizard.facts import Facts, load_facts
 from hal0.install.wizard.flow import (
@@ -393,8 +394,8 @@ def test_the_auto_row_names_the_expected_pick_or_says_it_is_not_known_yet(
 ) -> None:
     fits = view(_models(ladder_catalog, big_pool_facts)).rows[0]
     assert fits.detail == "Small (2 GB)"
-    nothing = replace(small_pool_facts, ram_gb=None)
-    none_fit = view(_models(ladder_catalog, nothing)).rows[0]
+    unknown = replace(small_pool_facts, gpu_pool_gb=None, ram_gb=None)
+    none_fit = view(_models(ladder_catalog, unknown)).rows[0]
     assert none_fit.detail == "chosen after hal0 has checked this box"
 
 
@@ -633,3 +634,65 @@ def test_a_fixed_recommended_set_marks_the_recommended_row(
     assert [r.id for r in v.rows] == ["recommended", "img-1", "img-2"]
     assert (v.rows[0].state, v.rows[0].note) == ("fixed", "set by HAL0_IMAGE_MODELS")
     assert v.rows[1].note == ""
+
+
+# ------------------------------------------ what auto means when no model fits
+
+_AUTO_DETAIL = {
+    "too_small": "no larger chat model fits this box; the small assistant model will be used",
+    "unknown": "chosen after hal0 has checked this box",
+}
+
+
+def test_the_auto_row_when_a_row_fits_names_the_pick_and_its_size(
+    ladder_catalog: Catalog, usable_facts: Facts
+) -> None:
+    facts = replace(usable_facts, gpu_pool_gb=32.0)
+    assert view(_models(ladder_catalog, facts)).rows[0].detail == "Small (2 GB)"
+
+
+def test_the_auto_row_when_the_box_is_known_not_to_run_any_row(
+    ladder_catalog: Catalog, usable_facts: Facts
+) -> None:
+    facts = replace(usable_facts, gpu_pool_gb=8.0, ram_gb=None)
+    assert view(_models(ladder_catalog, facts)).rows[0].detail == _AUTO_DETAIL["too_small"]
+
+
+def test_the_auto_row_with_no_usable_gpu_and_no_row_that_fits(
+    ladder_catalog: Catalog, consent_facts: Facts
+) -> None:
+    facts = replace(consent_facts, ram_gb=None)
+    over = [Override("hardware.allow_cpu_only", True, "HAL0_ALLOW_CPU_ONLY")]
+    rows = view(_models(ladder_catalog, facts, over=over)).rows
+    assert rows[0].detail == _AUTO_DETAIL["too_small"]
+
+
+def test_the_auto_row_when_the_memory_is_not_known(
+    ladder_catalog: Catalog, usable_facts: Facts
+) -> None:
+    facts = replace(usable_facts, gpu_pool_gb=None, ram_gb=None)
+    assert view(_models(ladder_catalog, facts)).rows[0].detail == _AUTO_DETAIL["unknown"]
+
+
+def test_a_brain_row_is_in_the_ladder_but_offered_on_no_screen(
+    catalog_path: Path, tmp_path: Path, big_pool_facts: Facts
+) -> None:
+    rows = [
+        {"role": "starter", "model": "s-1", "label": "S", "download_gb": 5, "min_gpu_pool_gb": 8},
+        {"role": "brain", "model": "b-1", "label": "B", "download_gb": 20, "min_gpu_pool_gb": 32},
+        {"role": "image", "model": "i-1", "label": "I", "download_gb": 9},
+    ]
+    models = tmp_path / "m.json"
+    models.write_text(json.dumps({"version": 1, "model_ladder": rows}))
+    catalog = load_catalog(catalog_path, models)
+    assert any(r.model == "b-1" for r in catalog.model_ladder)
+    s = custom(catalog, big_pool_facts, given=_IMAGES_ON)
+    offered: set[str] = set()
+    for _ in range(12):
+        v = view(s)
+        offered |= {r.id for r in v.rows}
+        if v.screen is Screen.REVIEW:
+            break
+        s = press(s, "ENTER")
+    assert {"s-1", "i-1"} <= offered
+    assert "b-1" not in offered

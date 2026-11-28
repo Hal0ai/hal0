@@ -149,3 +149,38 @@ def test_extra_keys_on_a_model_row_are_ignored(catalog_path: Path, tmp_path: Pat
     models.write_text(json.dumps({"version": 1, "model_ladder": [row]}))
     loaded = load_catalog(catalog_path, models).model_ladder
     assert [(r.model, r.label) for r in loaded] == [("x", "X")]
+
+
+def test_the_generated_models_file_shape_loads(catalog_path: Path, tmp_path: Path) -> None:
+    starter = {
+        "role": "starter",
+        "model": "s-1",
+        "label": "S",
+        "download_gb": 5.5,
+        "min_gpu_pool_gb": 8,
+    }
+    brain = {
+        "role": "brain",
+        "model": "b-1",
+        "label": "B",
+        "download_gb": 20,
+        "min_gpu_pool_gb": 32,
+    }
+    image = {"role": "image", "model": "i-1", "label": "I", "download_gb": 9}
+    models = tmp_path / "m.json"
+    models.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "generated_from": ["a.toml", "b.toml"],
+                "model_ladder": [starter, brain, image],
+            }
+        )
+    )
+    catalog = load_catalog(catalog_path, models)
+    assert [r.role for r in catalog.model_ladder] == ["starter", "brain", "image"]
+    for row in catalog.model_ladder:
+        assert row.min_ram_gb is None
+        assert row.lane == ""
+        assert row.needs_account is False
+    assert any(r.role == "brain" for r in catalog.model_ladder)

@@ -18,8 +18,10 @@ from .flow_basic import validate_folder
 from .flow_model import (
     DEFAULT_HOST,
     DEFAULT_PORT,
+    TOO_SMALL,
     Row,
     State,
+    auto_outcome,
     auto_row,
     disk_of,
     effective_doc,
@@ -131,13 +133,11 @@ def _extra_row(s: State, q: Question, value: str, fixed_note: str | None) -> Row
     detail = option.help
     if value == "auto":
         pick = auto_row(s)
-        detail = (
-            _AFTER_CHECK
-            if pick is None
-            else pick.label
-            if pick.download_gb is None
-            else f"{pick.label} ({fmt_gb(pick.download_gb)} GB)"
-        )
+        if pick is not None:
+            size = "" if pick.download_gb is None else f" ({fmt_gb(pick.download_gb)} GB)"
+            detail = pick.label + size
+        else:
+            detail = TOO_SMALL if auto_outcome(s) == "too_small" else _AFTER_CHECK
     state, note = ("open", "") if fixed_note is None else ("fixed", fixed_note)
     return make_row(value, option.label, detail, "choice", value, state, note)
 

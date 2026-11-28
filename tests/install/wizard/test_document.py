@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import json
 import stat
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
-from hal0.install.wizard.catalog import Catalog
+from hal0.install.wizard.catalog import Catalog, ModelRow
 from hal0.install.wizard.document import (
     DocumentError,
     Override,
@@ -637,3 +638,57 @@ def test_a_deeply_nested_file_is_a_document_error(tmp_path: Path) -> None:
     p.write_text("[" * 200000)
     with pytest.raises(DocumentError, match=r"a\.json"):
         load_document(p)
+
+
+# ------------------------------------------------- an old saved model choice
+
+
+def _starter_catalog(catalog: Catalog, *models: str) -> Catalog:
+    rows = tuple(ModelRow("starter", m, m.title(), "cpu", 1.0, None, None, False) for m in models)
+    return replace(catalog, model_ladder=rows)
+
+
+def _starter(catalog: Catalog, **layers: object) -> object:
+    layers = {"chosen": {}, "saved": None, "given": None, "over": [], **layers}
+    doc = effective(catalog, hal0_version="v", now=NOW, **layers)  # type: ignore[arg-type]
+    return get(doc, "models.starter")
+
+
+def test_a_saved_model_that_is_no_longer_offered_is_dropped(catalog: Catalog) -> None:
+    ladder = _starter_catalog(catalog, "new-1")
+    assert _starter(ladder, saved={"models": {"starter": "old-1"}}) == "auto"
+
+
+def test_a_saved_model_that_is_still_offered_is_kept(catalog: Catalog) -> None:
+    ladder = _starter_catalog(catalog, "new-1", "new-2")
+    assert _starter(ladder, saved={"models": {"starter": "new-2"}}) == "new-2"
+
+
+@pytest.mark.parametrize("value", ["auto", "none"])
+def test_a_saved_auto_or_none_is_kept(catalog: Catalog, value: str) -> None:
+    ladder = _starter_catalog(catalog, "new-1")
+    assert _starter(ladder, saved={"models": {"starter": value}}) == value
+
+
+def test_a_saved_model_is_kept_when_there_is_no_ladder(catalog: Catalog) -> None:
+    assert _starter(catalog, saved={"models": {"starter": "old-1"}}) == "old-1"
+
+
+def test_a_given_model_that_is_not_offered_passes_through(catalog: Catalog) -> None:
+    ladder = _starter_catalog(catalog, "new-1")
+    saved = {"models": {"starter": "old-1"}}
+    assert _starter(ladder, given={"models": {"starter": "mine-1"}}) == "mine-1"
+    assert _starter(ladder, saved=saved, given={"models": {"starter": "mine-1"}}) == "mine-1"
+
+
+def test_a_chosen_model_that_is_not_offered_passes_through(catalog: Catalog) -> None:
+    ladder = _starter_catalog(catalog, "new-1")
+    saved = {"models": {"starter": "old-1"}}
+    assert _starter(ladder, saved=saved, chosen={"models.starter": "mine-1"}) == "mine-1"
+
+
+def test_an_overridden_model_that_is_not_offered_passes_through(catalog: Catalog) -> None:
+    ladder = _starter_catalog(catalog, "new-1")
+    saved = {"models": {"starter": "old-1"}}
+    over = [Override("models.starter", "mine-1", "HAL0_AGENT_MODEL")]
+    assert _starter(ladder, saved=saved, over=over) == "mine-1"

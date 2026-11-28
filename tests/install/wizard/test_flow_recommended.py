@@ -256,11 +256,59 @@ def test_auto_takes_the_first_row_that_fits(ladder_catalog: Catalog, usable_fact
     assert rows["downloads"].detail == "Small (2 GB)"
 
 
-def test_auto_with_nothing_that_fits_says_so(ladder_catalog: Catalog, usable_facts: Facts) -> None:
-    facts = Facts(**{**usable_facts.__dict__, "gpu_pool_gb": None, "ram_gb": None})
-    rows = {r.id: r for r in view(run(start(ladder_catalog, facts), "ENTER", "ENTER")).rows}
-    assert rows["downloads"].detail == "a chat model sized for this box"
-    assert "total" not in rows
+_TOO_SMALL = "no larger chat model fits this box; the small assistant model will be used"
+_FACTS_FOR = {
+    "fits": {"gpu_pool_gb": 32.0},
+    "too_small": {"gpu_pool_gb": 8.0, "ram_gb": None},
+    "unknown": {"gpu_pool_gb": None, "ram_gb": None},
+}
+_REVIEW = {
+    "fits": ("Small (2 GB)", "Small, picked for this box"),
+    "too_small": ("no chat model to download", _TOO_SMALL),
+    "unknown": (
+        "a chat model; its size is shown before it downloads",
+        "picked for this box once hal0 has checked it",
+    ),
+}
+
+
+@pytest.mark.parametrize("case", ["fits", "too_small", "unknown"])
+def test_the_review_says_what_auto_means_for_each_way_a_pick_can_turn_out(
+    ladder_catalog: Catalog, usable_facts: Facts, case: str
+) -> None:
+    facts = replace(usable_facts, **_FACTS_FOR[case])
+    rows = {r.id: r for r in _review(ladder_catalog, facts)}
+    downloads, model = _REVIEW[case]
+    assert rows["downloads"].detail == downloads
+    assert rows["model"].detail == model
+    assert ("total" in rows) is (case == "fits")
+
+
+def test_no_usable_graphics_card_and_no_row_that_fits_is_too_small(
+    ladder_catalog: Catalog, consent_facts: Facts
+) -> None:
+    facts = replace(consent_facts, ram_gb=None)
+    over = [Override("hardware.allow_cpu_only", True, "HAL0_ALLOW_CPU_ONLY")]
+    rows = {
+        r.id: r
+        for r in view(run(start(ladder_catalog, facts, over=over), "ENTER", "ENTER", "ENTER")).rows
+    }
+    assert rows["model"].detail == _TOO_SMALL
+    assert rows["downloads"].detail == "no chat model to download"
+
+
+def test_too_small_leaves_the_other_downloads_and_their_total_alone(
+    ladder_catalog: Catalog, usable_facts: Facts
+) -> None:
+    sized = tuple(
+        replace(c, download_gb=3.0) if c.id == "openwebui" else c for c in ladder_catalog.components
+    )
+    catalog = replace(ladder_catalog, components=sized)
+    facts = replace(usable_facts, **_FACTS_FOR["too_small"])
+    rows = {r.id: r for r in _review(catalog, facts)}
+    assert rows["downloads"].detail == "Chat in your browser (Open WebUI) (3 GB)"
+    assert rows["total"].detail.startswith("3 GB")
+    assert rows["model"].detail == _TOO_SMALL
 
 
 def test_save_copy_path_is_exposed_but_never_reaches_the_document(
