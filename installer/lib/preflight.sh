@@ -1289,8 +1289,9 @@ preflight_gpu() {
             [[ "${gate}" == "1" ]] && return "${HAL0_GPU_RC_NO_DEVICE}"
         else
             warn "gpu: no /dev/dri/renderD* — no GPU driver bound (CPU-only install?)"
-            warn "  AMD: check 'lspci -nnk' shows 'Kernel driver in use: amdgpu'; very new"
-            warn "  silicon (Strix Halo) needs kernel >= 6.14 + current firmware."
+            warn "  AMD: check 'lspci -nnk' shows 'Kernel driver in use: amdgpu'. Strix Halo needs"
+            warn "  current firmware and a kernel with AMD's KFD fixes: 6.18.4 or newer, or on"
+            warn "  Ubuntu 24.04 the HWE kernel 6.17.0-19.19~24.04.2+ or the OEM kernel 6.14.0-1018+."
             # Bare-metal CPU box → proceed silently even when gated.
         fi
         return 0
