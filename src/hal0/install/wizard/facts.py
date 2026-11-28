@@ -119,7 +119,7 @@ def _read(path: Path) -> Mapping[str, Any]:
         raise FactsError(f"facts file {path} cannot be read: {exc.__class__.__name__}") from None
     try:
         data = json.loads(text)
-    except ValueError:
+    except (ValueError, RecursionError):
         raise FactsError(f"facts file {path} is not JSON") from None
     if not isinstance(data, dict):
         raise FactsError(f"facts file {path} is not a JSON object")

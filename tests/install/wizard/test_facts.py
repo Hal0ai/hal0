@@ -120,6 +120,13 @@ def test_not_json_is_a_facts_error(tmp_path: Path) -> None:
         load_facts(path, disks=[], ram_gb=None)
 
 
+def test_deeply_nested_json_is_a_facts_error(tmp_path: Path) -> None:
+    path = tmp_path / "facts.json"
+    path.write_text("[" * 200000)
+    with pytest.raises(FactsError, match="not JSON"):
+        load_facts(path, disks=[], ram_gb=None)
+
+
 def test_not_an_object_is_a_facts_error(tmp_path: Path) -> None:
     with pytest.raises(FactsError, match="not a JSON object"):
         load_facts(write(tmp_path, [1, 2]), disks=[], ram_gb=None)
