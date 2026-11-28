@@ -63,8 +63,11 @@ def local_paths(text: str) -> list[str]:
 
 
 def systemctl_user(text: str) -> list[str]:
-    """``systemctl --user`` invocations: hal0 installs system units, never user units."""
-    return [match.group(0) for match in _SYSTEMCTL_USER.finditer(text)]  # also journalctl
+    """``systemctl --user`` invocations: hal0 installs system units, never user units.
+
+    The pattern also matches ``journalctl --user``.
+    """
+    return [match.group(0) for match in _SYSTEMCTL_USER.finditer(text)]
 
 
 def foreign_addresses(text: str) -> list[str]:

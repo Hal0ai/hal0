@@ -29,18 +29,22 @@ per agent type in `src/hal0/cli/agent_shim.py`).
   `sudo chown hal0:hal0 <path from the log>`. Name the exact path; do not suggest a `find` over the
   whole Hermes home.
 - Drift in the Hermes home directory itself or the other Hermes paths in hal0's ownership table:
-  `sudo hal0 doctor perms --fix`. It prompts before changing anything (the person can add `--force`
+  `sudo hal0 doctor perms --fix`. It applies every drifted row in the whole ownership table, not
+  only the Hermes rows, and sets the mode as well as the owner and group. It needs root, it skips a
+  path that does not exist, and it prompts before changing anything (the person can add `--force`
   to skip the prompt). For Hermes the table covers the `HERMES_HOME` directory (not the files
   inside it), its `plugins` directories, `/var/lib/hal0/hermes` and `/var/lib/hal0/hermes/python`
   (top level only), and the files `provision.json` and `venv.pin` under
-  `/var/lib/hal0/state/agents/hermes`. It does not recurse into the Hermes venv, so a root-owned file inside the venv
-  or inside the Hermes home gets the single-file `chown` above. You do not have root: the person
-  runs or approves these commands.
-- `sudo hal0 agent reprovision hermes --repair` is not an ownership fix. As root it runs the
-  provisioning as `hal0`, and the step that re-owns the Hermes home and venv is skipped when the
-  effective user is not root. It forces a fresh release build and restarts the agent and the
-  gateway, so tell the person your own session will drop (see `../SKILL.md`) if they run it for
-  another reason.
+  `/var/lib/hal0/state/agents/hermes`. The table has no row for the Hermes venv or for
+  `config.yaml`: the audit reports them, but `--fix` cannot change them. The shipped plugin trees
+  are covered at every depth, directories only, never the files inside them. So a root-owned file
+  inside the venv or inside the Hermes home gets the single-file `chown` above. You do not have
+  root: the person runs or approves these commands.
+- `sudo hal0 agent reprovision hermes --repair` does not re-own the Hermes home or the contents of
+  the venv. Its root part re-owns only the parent directories, the uv trees, a pre-layout venv and
+  the plugin trees, and then it runs the provisioning as `hal0`. It forces a fresh release build and
+  restarts the agent and the gateway, so tell the person your own session will drop (see
+  `../SKILL.md`) if they run it for another reason.
 
 Do not start `hermes dashboard` yourself: `hal0-agent@hermes` owns it.
 
