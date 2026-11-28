@@ -50,13 +50,14 @@ def _fragment() -> str:
 def run_argloop():
     script = _PREAMBLE + _fragment() + _TAIL
 
-    def run(args, env=None):
+    def run(args, env=None, *, returncode=0):
         proc = subprocess.run(
             ["bash", "-c", script, "bash", *args],
             env={"PATH": os.environ["PATH"], **(env or {})},
             capture_output=True,
             text=True,
         )
+        assert proc.returncode == returncode, proc.stdout + proc.stderr
         out = {}
         for line in proc.stdout.splitlines():
             if line.startswith("ENV:"):
@@ -84,7 +85,6 @@ def run_argloop():
 )
 def test_flag_exports_only_its_knobs(run_argloop, flag, expected):
     env = run_argloop([flag])
-    assert run_argloop.proc.returncode == 0, run_argloop.proc.stderr
     assert env == expected
 
 
@@ -114,9 +114,8 @@ def test_bare_with_no_start_still_exports(run_argloop):
 
 
 def test_unknown_flag_stops_the_run(run_argloop):
-    env = run_argloop(["--bogus"])
+    env = run_argloop(["--bogus"], returncode=1)
     proc = run_argloop.proc
-    assert proc.returncode == 1
     assert "ERR: unknown flag: --bogus (run with --help for the list)" in proc.stderr
     assert "ignored" not in proc.stdout + proc.stderr
     assert env == {}

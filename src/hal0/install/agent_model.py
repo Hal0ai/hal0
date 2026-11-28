@@ -20,13 +20,13 @@ upgrade, until an operator picks something.
 This module is the bridge, and the shape of it is the whole point:
 
 **Opt-in, size disclosed, default SKIP.** Unlike the brain pull (which is
-unconditional and ~1-3 GB), the agent anchor is about 18.5 GB. install.sh asks
-once, on a terminal only, printing the exact size first, and Enter means no.
+unconditional and ~1-3 GB), the agent anchor is about 18.5 GB. The setup
+screens ask once, printing the exact size first, and the default answer is no.
 
-**A headless install must never block and never pull.** The prompt sits behind
-the same ``_interactive`` gate as the model-store and HF-token questions, so
-``curl | bash``, ``ssh host 'bash install.sh'`` and ``HAL0_NONINTERACTIVE=1``
-all take the skip path without asking. ``HAL0_PULL_AGENT_MODEL=1`` is the
+**A headless install must never block and never pull.** install.sh asks
+nothing itself (the setup screens ask), so ``curl | bash``,
+``ssh host 'bash install.sh'`` and ``HAL0_NONINTERACTIVE=1`` all take the skip
+path. ``HAL0_PULL_AGENT_MODEL=1`` is the
 explicit unattended opt-in for automation that genuinely wants the bytes.
 
 **Never fatal.** Same posture as the brain pull (ruling 7): a declined,

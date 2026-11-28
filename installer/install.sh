@@ -63,6 +63,20 @@ umask 022
 # shellcheck source=lib/ui.sh
 source "$(dirname "${BASH_SOURCE[0]}")/lib/ui.sh"
 
+# The release tree this script runs from, and the first check: the setup screens
+# are part of it, and a tree without them is a broken download. Before this
+# point the script has only set its shell options, set the umask and sourced
+# ui.sh; this block sources answers.sh (which only defines functions and
+# variables) and then, on an incomplete tree, prints one line and exits 1. That
+# is ahead of the install log, so nothing is created and nothing is changed.
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=lib/answers.sh
+source "$(dirname "${BASH_SOURCE[0]}")/lib/answers.sh"
+if ! hal0_wizard_present 2>/dev/null; then
+    err "this release tree is incomplete: the setup screens are missing (src/hal0/install/wizard/__main__.py, installer/manifests/setup-catalog.json)"
+    exit 1
+fi
+
 # Tee'd install log (installer/lib/logging.sh) — every line this script and
 # every command it runs prints from here on also lands in HAL0_INSTALL_LOG,
 # so a failed or partial install leaves forensic evidence on disk. Sourced
@@ -101,13 +115,11 @@ source "$(dirname "${BASH_SOURCE[0]}")/lib/distro.sh"
 # shellcheck source=lib/preflight.sh
 source "$(dirname "${BASH_SOURCE[0]}")/lib/preflight.sh"
 
-# Pre-flight detection facts (the facts file a wizard reads) and the one place
-# answers enter the install (hal0_collect_answers). Both come after
-# preflight.sh because they call its detection helpers.
+# Pre-flight detection facts (the facts file a wizard reads). It comes after
+# preflight.sh because it calls its detection helpers. (answers.sh, the one
+# place answers enter the install, is sourced above, ahead of the log.)
 # shellcheck source=lib/facts.sh
 source "$(dirname "${BASH_SOURCE[0]}")/lib/facts.sh"
-# shellcheck source=lib/answers.sh
-source "$(dirname "${BASH_SOURCE[0]}")/lib/answers.sh"
 
 # Non-interactive apt for every apt-get call in this installer (FLM
 # runtime libs, FLM .deb) — without this a debconf prompt can hang a
@@ -199,15 +211,6 @@ gateway_install_note() {
 
 DEV_MODE=0
 NO_START=0
-# The release tree this script runs from. The setup screens are part of it: a
-# tree without them is a broken download, and the installer stops here, before
-# it reads a flag or changes anything.
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-if ! hal0_wizard_present 2>/dev/null; then
-    err "this release tree is incomplete: the setup screens are missing (src/hal0/install/wizard/__main__.py, installer/manifests/setup-catalog.json)"
-    exit 1
-fi
-
 # ROCmFP4 + MTP note: the old `--rocmfp4` power pack (a host-side fork
 # binary wired into the retired daemon runtime) is gone. FP4/MTP now
 # ships as container profiles (`rocm` / `rocm-mtp` in

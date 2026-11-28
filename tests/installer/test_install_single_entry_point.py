@@ -180,11 +180,13 @@ def test_no_prompt_helper_is_left_in_install_sh(install_sh_text: str) -> None:
     assert "/dev/tty" not in block
 
 
-def test_bootstrap_pipes_stdin_so_the_gate_can_do_its_job() -> None:
-    """bootstrap.sh's stdin contract is what makes ``[[ -t 0 ]]`` correct.
+def test_bootstrap_hands_over_to_install_sh_with_exec() -> None:
+    """bootstrap.sh replaces itself with install.sh (``exec bash``).
 
-    It forwards stdin to install.sh, so a downloaded ``sudo bash install.sh``
-    can prompt while ``curl | bash`` (stdin = the script pipe) cannot.
+    The handover keeps the caller's stdin and terminal as they are, so the setup
+    screens that install.sh starts see the same terminal a direct
+    ``sudo bash install.sh`` would. (It once also fed an ``[[ -t 0 ]]`` prompt
+    gate in install.sh; that gate is gone, the handover is what remains.)
     """
     text = (_REPO_ROOT / "installer" / "bootstrap.sh").read_text(encoding="utf-8")
     assert "exec bash " in text and "installer/install.sh" in text

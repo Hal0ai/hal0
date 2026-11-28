@@ -16,8 +16,8 @@ none. The default answer is none.
 so the number an operator consents to is the number that downloads and ``install.sh`` never
 hardcodes one. A model already on disk says so instead of quoting a download.
 
-**A headless install never blocks and never pulls.** The prompt sits behind install.sh's
-``_interactive`` gate. ``HAL0_IMAGE_MODELS`` is the explicit unattended opt-in.
+**A headless install never blocks and never pulls.** install.sh asks
+nothing itself (the setup screens ask). ``HAL0_IMAGE_MODELS`` is the explicit opt-in.
 
 **Never fatal.** :func:`main` never raises (install.sh runs under ``set -euo pipefail``). A
 failed model is reported and the install carries on.
