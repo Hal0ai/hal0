@@ -483,7 +483,7 @@ def test_rejects_shell_metacharacters(tmp_path: Path, bad: str, section: dict) -
 
 
 def test_control_characters_rejected_everywhere(tmp_path: Path) -> None:
-    for text in ("a\x1b[0m", "a\x7fb", "a\u0085b", "a b"):
+    for text in ("a\x1b[0m", "a\x7fb", "a\u0085b", "a\u2028b"):
         doc = {"version": 1, "model_store": {"path": "/mnt/" + text}}
         proc = run(doc, tmp_path)
         assert proc.returncode == 2 and proc.stdout == ""
@@ -604,7 +604,7 @@ def test_only_allow_listed_names_are_printed(tmp_path: Path) -> None:
     names = {ln.split("=", 1)[0] for ln in lines(run(FULL, tmp_path, manifest=_manifest(tmp_path)))}
     src = READER.read_text(encoding="utf-8")
     ns: dict = {}
-    exec(compile(src.split("MAX_BYTES")[0], str(READER), "exec"), ns)  # noqa: S102
+    exec(compile(src.split("MAX_BYTES")[0], str(READER), "exec"), ns)
     assert names <= set(ns["ALLOWED_NAMES"])
 
 
@@ -861,7 +861,8 @@ def test_other_url_messages_echo_scheme_and_host_only(tmp_path: Path) -> None:
     proc = run(
         {"version": 1, "network": {"public_url": "ftp://x.example.com:21/a/b?c=d"}}, tmp_path
     )
-    assert "ftp://x.example.com:21" in proc.stderr
+    expected = "error: network.public_url: 'ftp://x.example.com:21' must use http or https"
+    assert [line for line in proc.stderr.splitlines() if line == expected] == [expected]
     assert "/a/b" not in proc.stderr and "c=d" not in proc.stderr
 
 
@@ -1135,7 +1136,7 @@ def test_slot_messages_never_echo_a_nested_value(tmp_path: Path, key: str) -> No
 
 
 def _reader_module():
-    import importlib.util  # noqa: PLC0415
+    import importlib.util
 
     spec = importlib.util.spec_from_file_location("answers_reader_under_test", READER)
     assert spec and spec.loader
@@ -1258,7 +1259,7 @@ def _every_key() -> list[tuple[str, ...]]:
 def _doc_with(path: tuple, value: object) -> dict:
     doc: dict = {"version": 1}
     node: object = doc
-    for step, nxt in zip(path, [*path[1:], None]):
+    for step, nxt in zip(path, [*path[1:], None], strict=True):
         container: object = [] if isinstance(nxt, int) else {}
         if isinstance(node, dict):
             if nxt is None:
@@ -1328,7 +1329,7 @@ def test_the_normalised_path_is_checked_too(tmp_path: Path) -> None:
     assert "system location" in proc.stderr
 
 
-@pytest.mark.parametrize("blank", ["", " ", "  ", "\t", " ", "  "])
+@pytest.mark.parametrize("blank", ["", " ", "  ", "\t", "\u00a0", "\u2003\u2003"])
 def test_a_blank_public_url_is_an_error(tmp_path: Path, blank: str) -> None:
     proc = run({"version": 1, "network": {"public_url": blank}}, tmp_path)
     # \t and the Unicode spaces are control/format text as well; any error will do
@@ -1413,8 +1414,7 @@ def _no_disk_for(monkeypatch, reader, roots: tuple[str, ...]) -> list[str]:
             if any(
                 text == root
                 or text.startswith(root + "/")
-                or root.startswith(text + "/")
-                and text not in ("", "/")
+                or (root.startswith(text + "/") and text not in ("", "/"))
                 for root in roots
             ):
                 seen.append(f"{name}({text})")
@@ -1488,7 +1488,15 @@ def test_the_reader_source_has_no_filesystem_probe_left() -> None:
 
 
 @pytest.mark.parametrize(
-    "bad", ["/mnt/café", "/mnt/١٢", "/mnt/ａ", "/mnt/a b", "/mnt/models\n", "/mnt/x y"]
+    "bad",
+    [
+        "/mnt/café",
+        "/mnt/\u0661\u0662",
+        "/mnt/\uff41",
+        "/mnt/a\u2028b",
+        "/mnt/models\n",
+        "/mnt/x\u00a0y",
+    ],
 )
 def test_non_ascii_letters_and_a_trailing_newline_are_refused(tmp_path: Path, bad: str) -> None:
     for key in _STORE_KEYS:

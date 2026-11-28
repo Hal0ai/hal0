@@ -385,7 +385,7 @@ def test_a_name_printed_twice_fails_the_apply_and_exports_nothing(
         "/mnt/a%b",
         "/mnt/a#b",
         "/mnt/a!b",
-        "/mnt/١",
+        "/mnt/\u0661",
     ],
 )
 def test_a_folder_path_outside_the_plain_ascii_set_fails_the_apply(

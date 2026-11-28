@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import json
 import os
-import stat
 import subprocess
 import sys
 from pathlib import Path
@@ -1030,7 +1029,7 @@ echo DONE
         proc = subprocess.run(["bash", "-c", script], capture_output=True, text=True, check=False)
         assert expect in proc.stdout, proc.stdout + proc.stderr
         if expect == "MKDIR":
-            assert f"MKDIR -p" in proc.stdout and store in proc.stdout and "DONE" in proc.stdout
+            assert "MKDIR -p" in proc.stdout and store in proc.stdout and "DONE" in proc.stdout
 
 
 @pytest.mark.parametrize("reason", ["chosen", "saved"])
