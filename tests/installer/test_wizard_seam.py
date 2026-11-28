@@ -39,8 +39,11 @@ argv = sys.argv[1:]
 def opt(name):
     return argv[argv.index(name) + 1] if name in argv[: argv.index("--")] else None
 out, secret, chosen = opt("--out"), opt("--secret-out"), opt("--chosen-folder-out")
+shown = opt("--screens-shown-out")
 record = {
     "argv": argv,
+    "shown_out": shown,
+    "shown_existed": bool(shown) and os.path.lexists(shown),
     "isolated": bool(sys.flags.isolated),
     "chosen_existed": bool(chosen) and os.path.lexists(chosen),
     "dir_mode": oct(os.stat(os.path.dirname(out)).st_mode & 0o7777),
@@ -71,6 +74,8 @@ if secret:
     write(secret, "STUB_SECRET")
 if chosen:
     write(chosen, "STUB_CHOSEN")
+if shown:
+    write(shown, "STUB_SHOWN")
 if "STUB_SLEEP" in os.environ:
     import signal, time
     signal.signal(signal.SIGINT, signal.SIG_DFL)  # no handler of its own yet
@@ -204,6 +209,13 @@ echo "LEFT=$(ls -A "{tmp_path}/prefix/run/hal0-install" 2>/dev/null | tr '\\n' '
         env={"PATH": os.environ["PATH"], "HOME": str(tmp_path), **(env or {})},
         cwd=tmp_path,
     )
+
+
+def _exported(proc: subprocess.CompletedProcess[str]) -> list[str]:
+    """The names the document set, from the EXPORTED line of a _collect run."""
+    # bash joins the array with IFS, which the script sets to a newline
+    head = proc.stdout.index("EXPORTED=") + len("EXPORTED=")
+    return proc.stdout[head : proc.stdout.index("\nTERMINAL=", head)].split()
 
 
 def _state(proc: subprocess.CompletedProcess[str]) -> dict[str, str]:
@@ -343,6 +355,8 @@ def test_command_line_matches_contract(tmp_path: Path, stub: dict[str, str]) -> 
         f"{work}/hf-token.env",
         "--chosen-folder-out",
         f"{work}/chosen-folder",
+        "--screens-shown-out",
+        f"{work}/screens-shown",
         "--hal0-version",
         "9.9.9",
         "--saved",
@@ -654,6 +668,170 @@ def test_terminal_tool_from_a_given_document_stays_off(
     assert state["RC"] == "0", proc.stdout + proc.stderr
     assert state["APPLIED"] == "1" and state["RAN"] == "1" and state["ORIGIN"] == "file"
     assert state["TERMINAL"] == ""
+
+
+# ── the terminal tool after a person confirmed the review screen ────────────
+
+_TERMINAL_OFF = json.dumps({"version": 1, "apps": {"hermes": {"enabled": True}}})
+_TERMINAL_ON = json.dumps(
+    {"version": 1, "apps": {"hermes": {"enabled": True, "terminal_tool": True}}}
+)
+
+
+def test_the_marker_makes_the_reader_turn_the_terminal_tool_off(
+    tmp_path: Path, stub: dict[str, str]
+) -> None:
+    proc = _collect(tmp_path, {**stub, "STUB_DOC": _TERMINAL_OFF, "STUB_SHOWN": "shown\n"})
+    state = _state(proc)
+    assert state["RC"] == "0", proc.stdout + proc.stderr
+    assert state["ORIGIN"] == "wizard" and state["TERMINAL"] == "0"
+    assert "HAL0_HERMES_TERMINAL" in _exported(proc)
+    assert "WARN" not in proc.stderr
+    assert state["LEFT"] == ""
+    (record,) = _records(tmp_path)
+    work = Path(record["shown_out"])
+    assert work.name == "screens-shown"
+    assert record["shown_existed"] is False
+    assert not work.exists()
+
+
+def test_the_marker_with_the_tool_ticked_keeps_it_on(tmp_path: Path, stub: dict[str, str]) -> None:
+    proc = _collect(tmp_path, {**stub, "STUB_DOC": _TERMINAL_ON, "STUB_SHOWN": "shown\n"})
+    state = _state(proc)
+    assert state["RC"] == "0" and state["TERMINAL"] == "1", proc.stdout + proc.stderr
+
+
+def test_no_marker_leaves_the_terminal_tool_alone(tmp_path: Path, stub: dict[str, str]) -> None:
+    proc = _collect(tmp_path, {**stub, "STUB_DOC": _TERMINAL_OFF})
+    state = _state(proc)
+    assert state["RC"] == "0" and state["TERMINAL"] == "", proc.stdout + proc.stderr
+    assert "HAL0_HERMES_TERMINAL" not in _exported(proc)
+    assert "WARN" not in proc.stderr
+    assert state["LEFT"] == ""
+    (record,) = _records(tmp_path)
+    assert record["shown_out"].endswith("/screens-shown")  # offered to the wizard, not written
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        b"other\n",
+        b"Shown\n",
+        b"shown",
+        b"shown\n\n",
+        b"shown\nshown\n",
+        b"shown\nextra\n",
+        b"sho\x00wn\n",
+        b"shown\x00",
+        b"shown\n\x00",
+        b"shown \n",
+        b"shown\r\n",
+        b"\n",
+        b"",
+    ],
+    ids=lambda raw: raw.hex() or "empty",
+)
+def test_a_malformed_marker_counts_as_no_screens_and_warns_once(
+    tmp_path: Path, stub: dict[str, str], raw: bytes
+) -> None:
+    proc = _collect(tmp_path, {**stub, "STUB_DOC": _TERMINAL_OFF, "STUB_SHOWN_HEX": raw.hex()})
+    state = _state(proc)
+    assert state["RC"] == "0" and state["APPLIED"] == "1", proc.stdout + proc.stderr
+    assert state["TERMINAL"] == ""
+    assert proc.stderr.count("WARN") == 1 and "screens" in proc.stderr, proc.stderr
+    assert state["LEFT"] == ""
+
+
+@pytest.mark.parametrize("rc", ["10", "70", "2", "11", "130", "3"])
+def test_a_marker_beside_a_failed_wizard_is_ignored(
+    tmp_path: Path, stub: dict[str, str], rc: str
+) -> None:
+    proc = _collect(
+        tmp_path,
+        {**stub, "STUB_DOC": _TERMINAL_OFF, "STUB_SHOWN": "shown\n", "STUB_RC": rc},
+    )
+    state = _state(proc)
+    assert state["RC"] != "0" and state["APPLIED"] == "0" and state["TERMINAL"] == ""
+    assert state["LEFT"] == ""
+
+
+def test_the_marker_is_ignored_without_screens(tmp_path: Path, stub: dict[str, str]) -> None:
+    base = {**stub, "STUB_DOC": _TERMINAL_OFF, "STUB_SHOWN": "shown\n"}
+    proc = _collect(tmp_path, {**base, "HAL0_NONINTERACTIVE": "1"})
+    state = _state(proc)
+    assert state["RC"] == "0" and state["TERMINAL"] == "", proc.stdout + proc.stderr
+    assert "WARN" not in proc.stderr and state["LEFT"] == ""
+    given = tmp_path / "given.json"
+    given.write_text(_TERMINAL_OFF, encoding="utf-8")
+    proc = _collect(tmp_path, {**base, "HAL0_ANSWERS_FILE": str(given)})
+    state = _state(proc)
+    assert state["RC"] == "0" and state["ORIGIN"] == "file" and state["TERMINAL"] == ""
+    assert "WARN" not in proc.stderr and state["LEFT"] == ""
+
+
+def test_the_marker_on_a_run_that_skips_hermes_still_says_off(
+    tmp_path: Path, stub: dict[str, str]
+) -> None:
+    # The reader's rule holds on a run that does not provision Hermes. That the
+    # installer then does nothing with the answer is pinned on the consumer side
+    # (tests/installer/test_hermes_terminal_apply.py: HAL0_SKIP_HERMES=1 runs
+    # nothing), not only here on the export.
+    doc = json.dumps({"version": 1, "apps": {"hermes": {"enabled": False}}})
+    proc = _collect(tmp_path, {**stub, "STUB_DOC": doc, "STUB_SHOWN": "shown\n"})
+    state = _state(proc)
+    assert state["RC"] == "0" and state["TERMINAL"] == "0", proc.stdout + proc.stderr
+    assert "HAL0_SKIP_HERMES" in _exported(proc)
+
+
+def test_the_documents_off_says_so_when_it_replaces_an_inherited_answer(
+    tmp_path: Path, stub: dict[str, str]
+) -> None:
+    proc = _collect(
+        tmp_path,
+        {**stub, "STUB_DOC": _TERMINAL_OFF, "STUB_SHOWN": "shown\n", "HAL0_HERMES_TERMINAL": "1"},
+    )
+    state = _state(proc)
+    assert state["RC"] == "0" and state["TERMINAL"] == "0", proc.stdout + proc.stderr
+    lines = [ln for ln in proc.stdout.splitlines() if "replaces the HAL0_HERMES_TERMINAL" in ln]
+    assert len(lines) == 1, proc.stdout
+    assert (
+        lines[0].startswith("INFO:") and "HAL0_HERMES_TERMINAL=1 from the environment" in lines[0]
+    )
+
+
+def test_no_replacement_line_without_an_inherited_answer(
+    tmp_path: Path, stub: dict[str, str]
+) -> None:
+    proc = _collect(tmp_path, {**stub, "STUB_DOC": _TERMINAL_OFF, "STUB_SHOWN": "shown\n"})
+    assert "replaces the HAL0_HERMES_TERMINAL" not in proc.stdout, proc.stdout
+
+
+def test_hermes_terminal_has_two_readers_on_an_install() -> None:
+    # `hal0 agent install hermes` (box without Hermes) and, on a box that
+    # already has it, `hal0 agent reprovision hermes` after the apply block.
+    # Both stay behind the HAL0_SKIP_HERMES check.
+    call = '"${HAL0_BIN}" agent install hermes "${_hermes_install_args'
+    assert TEXT.count(call) == 1
+    head = TEXT.rindex(
+        'if [[ -f "${AGENT_UNIT_DST}" && ! -x "/var/lib/hal0/venvs/hermes/bin/hermes" ]]; then',
+        0,
+        TEXT.index(call),
+    )
+    skip = TEXT.index('if [[ "${HAL0_SKIP_HERMES:-0}" -eq 1 ]]; then', head)
+    assert head < skip < TEXT.index(call)
+    assert TEXT.index(call) - skip < 6000
+    apply_call = '"${HAL0_BIN}" agent reprovision hermes'
+    assert TEXT.count(apply_call) == 1
+    apply_head = TEXT.rindex('"${_hermes_was_provisioned}" -eq 1', 0, TEXT.index(apply_call))
+    assert TEXT.index(call) < apply_head
+    assert '"${HAL0_SKIP_HERMES:-0}" -ne 1' in TEXT[apply_head : TEXT.index(apply_call)]
+
+
+def test_usage_text_does_not_say_an_unattended_run_never_enables_the_terminal_tool() -> None:
+    usage = " ".join(_slice("--help|-h)", "exit 0").split())
+    assert "non-interactive install never enables it" not in usage
+    assert "HAL0_HERMES_TERMINAL=1" in usage
+    assert "unattended" in usage
 
 
 def test_exit_0_without_a_document_stops(tmp_path: Path, stub: dict[str, str]) -> None:
