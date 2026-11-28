@@ -69,9 +69,9 @@ hal0_answers_python() {
 
 # Sets store_arg (the caller's local array) to `--default-store ${VAR_DIR}/models`
 # when VAR_DIR is known, else to nothing (the reader then assumes the standard
-# /var/lib/hal0/models). The reader's "inside the default store" exception
-# follows what the installer will create, so a --dev prefix works. Never taken
-# from the document.
+# /var/lib/hal0/models). The reader's "inside the default store" rules follow
+# what the installer will create, so a --dev prefix works. Never taken from the
+# document.
 _hal0_default_store_arg() {
     store_arg=()
     if [[ -n "${VAR_DIR:-}" ]]; then
@@ -80,12 +80,17 @@ _hal0_default_store_arg() {
 }
 
 # Apply the answers document at PATH; ORIGIN is `file` or `wizard`.
-# Runs the reader (${PY} -I, standard library only), then exports what it
+# Runs the reader ONCE (${PY} -I, standard library only), then exports what it
 # printed. All-or-nothing: every line is checked against the allow-list and
 # collected first; nothing is exported unless every line passed. Values are
 # data: they only ever reach `export "NAME=value"` for a vetted NAME.
+# The reader's last line is `#saved <base64>`, the saved form of the same
+# document from the same read; it is kept (not exported) in HAL0_ANSWERS_SAVED
+# for hal0_save_answers, so the copy kept can never differ from what was
+# applied. A missing, second or malformed `#saved` line, or any line after it,
+# fails the apply.
 # Returns 0 on success, the reader's status (2) with its messages on stderr
-# when it rejects the document, or 1 for a name off the list.
+# when it rejects the document, or 1 for anything the reader should not print.
 hal0_apply_answers() {
     local path="${1:-}" origin="${2:-file}"
     # Names exported by this call (empty until it succeeds); install.sh reads it
@@ -119,12 +124,22 @@ hal0_apply_answers() {
     fi
 
     local -a names=() values=()
-    local line name value known allowed
-    export -n output line value names values  # see _hal0_prepare_saved_answers
+    local line name value known allowed saved="" saved_seen=0
+    # A local keeps the export attribute of a same-named variable in the
+    # environment; these hold document text and must not reach child processes.
+    export -n output line name value names values saved
     # IFS='=' read drops one trailing '=' from the last field (a path ending in
     # '=' would lose it), so read whole lines and split at the first '='.
     while IFS= read -r line; do
-        [[ -n "${line}" ]] || continue
+        if [[ "${saved_seen}" -eq 1 ]]; then
+            echo "error: the answers reader printed a line after the saved form" >&2
+            return 1
+        fi
+        if [[ "${line}" == "#saved "* ]]; then
+            saved="${line#"#saved "}"
+            saved_seen=1
+            continue
+        fi
         if [[ "${line}" != *=* ]]; then
             echo "error: the answers reader produced a malformed line" >&2
             return 1
@@ -149,6 +164,13 @@ hal0_apply_answers() {
         names+=("${name}")
         values+=("${value}")
     done <<<"${output}"
+    # The saved form: standard base64 on one line, and it must decode.
+    if [[ "${saved_seen}" -ne 1 || -z "${saved}" \
+        || "${saved}" == *[!ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=]* ]] \
+        || ! printf '%s' "${saved}" | base64 -d >/dev/null 2>&1; then
+        echo "error: the answers reader did not print a usable saved form" >&2
+        return 1
+    fi
 
     local i
     HAL0_ANSWERS_EXPORTED=()
@@ -156,9 +178,9 @@ hal0_apply_answers() {
         export "${names[i]}=${values[i]}"
         HAL0_ANSWERS_EXPORTED+=("${names[i]}")
     done
+    HAL0_ANSWERS_SAVED="${saved}"
     # shellcheck disable=SC2034 # read by install.sh, which sources this file
     HAL0_ANSWERS_APPLIED=1
-    _hal0_prepare_saved_answers "${path}"
     return 0
 }
 
@@ -187,54 +209,21 @@ hal0_collect_answers() {
 
 # Keep a copy of the applied document at ${HAL0_SAVED_ANSWERS_FILE}
 # (${VAR_DIR}/secrets/install-answers.json, SECRETS_DIR in install.sh) so a
-# later run can start from the same choices. The saved form is produced once,
-# at apply time (_hal0_prepare_saved_answers), so the file written at the end
-# is what was applied even if the document changed or went away meanwhile. The
-# reader emits it without the huggingface section, without
-# apps.hermes.terminal_tool and without unknown keys; `nofollow write` creates
-# it root:root 0600 (random O_EXCL temp file, fchmod before rename), so it is
-# never wider than 0600. The install has already succeeded: nothing here may
-# fail it.
+# later run can start from the same choices. The saved form comes from the
+# apply run itself (its `#saved` line, kept base64 in HAL0_ANSWERS_SAVED), so
+# the file written at the end is what was applied even if the document changed
+# or went away meanwhile. The reader emits it without the huggingface section,
+# without apps.hermes.terminal_tool and without unknown keys; `nofollow write`
+# creates it root:root 0600 (random O_EXCL temp file, fchmod before rename), so
+# it is never wider than 0600. The install has already succeeded: nothing here
+# may fail it.
 HAL0_ANSWERS_SAVED=""
 
 _hal0_answers_warn() {
     if declare -F warn >/dev/null 2>&1; then warn "$*"; else echo "warning: $*" >&2; fi
 }
 
-# Produce the saved form of the document at PATH into HAL0_ANSWERS_SAVED.
-# Standard output alone is the saved form. Standard error is kept apart: a
-# diagnostic printed by the interpreter must never end up inside the saved file.
-# It is dropped on success; on failure its first line goes into the one warning.
-# On failure: nothing saved at the end. Always returns 0.
-_hal0_prepare_saved_answers() {
-    local path="${1:-}" out rc=0 py="${_HAL0_ANSWERS_PY:-}" err_file err=""
-    local -a store_arg=()
-    _hal0_default_store_arg
-    # A local keeps the export attribute of a same-named variable in the
-    # environment; these hold document text and must not reach child processes.
-    export -n out err
-    HAL0_ANSWERS_SAVED=""
-    [[ -n "${py}" ]] || py="$(hal0_answers_python)" || py=""
-    if [[ -z "${py}" ]]; then
-        _hal0_answers_warn "could not prepare a copy of the answers document to keep: no Python 3.10 or newer"
-        return 0
-    fi
-    err_file="$(mktemp 2>/dev/null)" || err_file=/dev/null
-    out="$("${py}" -I "${_HAL0_ANSWERS_READER}" "${store_arg[@]+"${store_arg[@]}"}" \
-        --emit-saved "${path}" 2>"${err_file}")" || rc=$?
-    if [[ "${err_file}" != /dev/null ]]; then
-        IFS= read -r err <"${err_file}" || true
-        rm -f -- "${err_file}"
-    fi
-    if [[ "${rc}" -ne 0 || -z "${out}" ]]; then
-        _hal0_answers_warn "could not prepare a copy of the answers document to keep: ${err:-no reason given}"
-        return 0
-    fi
-    HAL0_ANSWERS_SAVED="${out}"
-    return 0
-}
-
-# Write the copy prepared at apply time. Does not read the document again.
+# Write the copy taken at apply time. Does not read the document again.
 # The directory is root-only (0700, root-owned: `nofollow dir --expect root`
 # refuses one the hal0 account owns or swapped in), made here if it does not
 # exist yet (--dev installs create it only for a Hugging Face token). The file
@@ -252,7 +241,8 @@ hal0_save_answers() {
         _hal0_answers_warn "could not keep the answers document: ${file%/*} is not a root-owned directory"
         return 0
     fi
-    if ! printf '%s\n' "${HAL0_ANSWERS_SAVED}" \
+    # The payload was checked to decode when it was applied.
+    if ! printf '%s' "${HAL0_ANSWERS_SAVED}" | base64 -d \
         | nofollow write --owner root:root --mode 0600 --require-trusted-dir "${file}"; then
         _hal0_answers_warn "could not write ${file}; any earlier saved copy was left as it was"
     fi

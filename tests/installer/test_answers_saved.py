@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import os
 import subprocess
@@ -128,15 +129,14 @@ def test_saved_form_is_taken_at_apply_time(tmp_path: Path) -> None:
     assert json.loads((tmp_path / "nofollow.body").read_text(encoding="utf-8"))["version"] == 1
 
 
-def test_prepare_failure_warns_once_and_saves_nothing(tmp_path: Path) -> None:
-    doc = _doc(tmp_path, DOC)
+def test_a_reader_without_a_saved_form_fails_the_apply_and_saves_nothing(tmp_path: Path) -> None:
+    fake = _fake_reader(tmp_path, "print('HAL0_PORT=9000')\n")
     proc = _bash(
-        f'_hal0_prepare_saved_answers "/nonexistent/x.json"; HAL0_ANSWERS_APPLIED=1; '
-        f'hal0_save_answers; echo rc=$?; echo "saved=[$HAL0_ANSWERS_SAVED]"; : "{doc}"',
+        f'_HAL0_ANSWERS_READER="{fake}"; hal0_apply_answers /x/doc.json file; echo rc=$?; '
+        'hal0_save_answers; echo "saved=[$HAL0_ANSWERS_SAVED] port=${HAL0_PORT:-unset}"',
         tmp_path,
     )
-    assert "rc=0" in proc.stdout and "saved=[]" in proc.stdout
-    assert proc.stderr.count("WARN") == 1 and "cannot read" in proc.stderr
+    assert proc.stdout.splitlines() == ["rc=1", "saved=[] port=unset"], proc.stderr
     assert not (tmp_path / "nofollow.args").exists()
 
 
@@ -217,7 +217,7 @@ bash -c 'echo "child:[${{HAL0_ANSWERS_SAVED:-}}]"'
     assert "hf_secret_value" not in proc.stdout
 
 
-# ── the saved form is standard output alone ─────────────────────────────────
+# ── the saved form is the apply run's `#saved` line, decoded ────────────────
 
 
 def _fake_reader(tmp_path: Path, body: str) -> Path:
@@ -226,57 +226,64 @@ def _fake_reader(tmp_path: Path, body: str) -> Path:
     return fake
 
 
-def test_interpreter_diagnostics_never_enter_the_saved_file(tmp_path: Path) -> None:
+def test_the_saved_file_is_exactly_the_decoded_payload(tmp_path: Path) -> None:
+    payload = '{\n  "version": 1,\n  "note": "caf\u00e9 = \\\\ \\"q\\""\n}\n'.encode("utf-8")
+    line = "#saved " + base64.b64encode(payload).decode()
     fake = _fake_reader(
         tmp_path,
         "import sys\n"
         "sys.stderr.write('DeprecationWarning: something noisy\\n')\n"
-        "sys.stdout.write('{\"version\": 1}\\n')\n",
+        f"print('HAL0_PORT=9000')\nprint({line!r})\n",
     )
     proc = _bash(
-        f'_HAL0_ANSWERS_READER="{fake}"; _hal0_prepare_saved_answers /x/doc.json; '
-        'printf "[%s]" "$HAL0_ANSWERS_SAVED"',
+        f'_HAL0_ANSWERS_READER="{fake}"; HAL0_ANSWERS_FILE=/x/doc.json; hal0_collect_answers; '
+        'echo rc=$?; hal0_save_answers',
         tmp_path,
     )
-    assert proc.stdout == '[{"version": 1}]', proc.stderr
-    assert "WARN" not in proc.stderr and "DeprecationWarning" not in proc.stderr
+    assert "rc=0" in proc.stdout, proc.stderr
+    assert (tmp_path / "nofollow.body").read_bytes() == payload
+    assert "WARN" not in proc.stderr
 
 
-def test_failure_warning_uses_the_first_line_of_standard_error(tmp_path: Path) -> None:
-    fake = _fake_reader(
-        tmp_path,
-        "import sys\nsys.stderr.write('error: first reason\\nsecond line\\n')\nsys.exit(2)\n",
-    )
+def test_the_real_reader_saved_line_and_the_saved_file_agree(tmp_path: Path) -> None:
+    doc = _doc(tmp_path, DOC)
     proc = _bash(
-        f'_HAL0_ANSWERS_READER="{fake}"; _hal0_prepare_saved_answers /x/doc.json; '
-        'echo "saved=[$HAL0_ANSWERS_SAVED]"',
+        f'HAL0_ANSWERS_FILE="{doc}"; hal0_collect_answers; '
+        f'printf "%s" "$HAL0_ANSWERS_SAVED" >"{tmp_path}/b64"; hal0_save_answers',
         tmp_path,
     )
-    assert "saved=[]" in proc.stdout
-    assert proc.stderr.count("WARN") == 1
-    assert "first reason" in proc.stderr and "second line" not in proc.stderr
+    assert proc.returncode == 0, proc.stderr
+    payload = base64.b64decode((tmp_path / "b64").read_text(encoding="ascii"), validate=True)
+    assert (tmp_path / "nofollow.body").read_bytes() == payload
+    emitted = subprocess.run([sys.executable, "-I", str(READER), "--emit-saved", str(doc)],
+                             capture_output=True, check=False)
+    assert emitted.returncode == 0 and emitted.stdout == payload
 
 
-def test_standard_output_on_failure_is_not_saved_or_quoted(tmp_path: Path) -> None:
+def test_a_rejected_document_leaves_nothing_to_save(tmp_path: Path) -> None:
     fake = _fake_reader(
         tmp_path,
         "import sys\nsys.stdout.write('{\"partial\": true}\\n')\nsys.stderr.write('error: bad\\n')\nsys.exit(2)\n",
     )
     proc = _bash(
-        f'_HAL0_ANSWERS_READER="{fake}"; _hal0_prepare_saved_answers /x/doc.json; '
-        'echo "saved=[$HAL0_ANSWERS_SAVED]"',
+        f'_HAL0_ANSWERS_READER="{fake}"; hal0_apply_answers /x/doc.json file; echo rc=$?; '
+        'HAL0_ANSWERS_APPLIED=1; hal0_save_answers; echo "saved=[$HAL0_ANSWERS_SAVED]"',
         tmp_path,
     )
-    assert "saved=[]" in proc.stdout and "partial" not in proc.stderr
+    assert proc.stdout.splitlines() == ["rc=2", "saved=[]"]
+    assert "partial" not in proc.stderr
+    assert not (tmp_path / "nofollow.args").exists()
 
 
 def test_locals_named_like_inherited_exports_do_not_carry_the_document(tmp_path: Path) -> None:
     # `local out` keeps the export attribute of an environment variable `out`,
-    # so the saved form would reach every child process started afterwards.
+    # so the saved form would reach every child process started afterwards. The
+    # spy stands in for `base64`, which the apply run starts after the locals
+    # hold the document's values and its saved form.
     doc = _doc(tmp_path, DOC)
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
-    spy = bin_dir / "rm"
+    spy = bin_dir / "base64"
     spy.write_text(f'#!/bin/bash\nenv >"{tmp_path}/child.env"\n', encoding="utf-8")
     spy.chmod(0o755)
     full = f"""
@@ -288,10 +295,11 @@ source "{ANSWERS_SH}"
 HAL0_ANSWERS_FILE="{doc}"
 hal0_collect_answers
 """
-    env = {"PATH": os.environ["PATH"], "out": "x", "err": "x", "output": "x", "line": "x",
-           "value": "x", "names": "x", "values": "x"}
+    env = {"PATH": os.environ["PATH"], "output": "x", "line": "x", "name": "x",
+           "value": "x", "names": "x", "values": "x", "saved": "x"}
     subprocess.run(["bash", "-c", full], capture_output=True, text=True, check=False, cwd=tmp_path, env=env)
     dump = (tmp_path / "child.env").read_text(encoding="utf-8")
     assert '"version"' not in dump and "HAL0_NONINTERACTIVE" not in dump.replace("HAL0_NONINTERACTIVE=1", "")
-    for name in ("out", "err", "output", "line", "value", "names", "values"):
+    assert "#saved" not in dump and "ewog" not in dump  # nor the base64 of '{\n'
+    for name in ("output", "line", "name", "value", "names", "values", "saved"):
         assert f"\n{name}=x\n" in "\n" + dump  # the inherited value, not ours

@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import re
 import subprocess
 import sys
 from pathlib import Path
+
+import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
 ANSWERS_SH = ROOT / "installer" / "lib" / "answers.sh"
@@ -31,6 +34,17 @@ def _doc(tmp_path: Path, doc: dict) -> Path:
     path = tmp_path / "answers.json"
     path.write_text(json.dumps(doc), encoding="utf-8")
     return path
+
+
+SAVED = "#saved " + base64.b64encode(b'{"version": 1}\n').decode()
+
+
+def _fake(tmp_path: Path, *out: str) -> Path:
+    """A stand-in reader that prints exactly the lines OUT and exits 0."""
+    fake = tmp_path / "fake_reader.py"
+    fake.write_text("import sys\nsys.stdout.write(" + repr("".join(f"{x}\n" for x in out)) + ")\n",
+                    encoding="utf-8")
+    return fake
 
 
 def test_exports_listed_names(tmp_path: Path) -> None:
@@ -72,23 +86,22 @@ def test_terminal_name_refused_for_file_origin(tmp_path: Path) -> None:
 
 def test_value_with_spaces_and_equals_survives(tmp_path: Path) -> None:
     path = "/mnt/my models/a=b"
-    doc = _doc(tmp_path, {"version": 1, "model_store": {"path": path, "flm_path": "/m/x="}})
+    doc = _doc(tmp_path, {"version": 1, "model_store": {"path": path, "flm_path": f"{path}/x="}})
     proc = _bash(
         f'hal0_apply_answers "{doc}" file; printf "[%s]\\n[%s]\\n" "$HAL0_MODELS_DIR" '
         '"$HAL0_FLM_MODELS_DIR"',
         tmp_path,
     )
-    assert proc.stdout.splitlines() == [f"[{path}]", "[/m/x=]"], proc.stderr
+    assert proc.stdout.splitlines() == [f"[{path}]", f"[{path}/x=]"], proc.stderr
 
 
 def test_shell_syntax_in_value_is_data(tmp_path: Path) -> None:
     # Even if a reader let such a value through, bash only ever exports it.
     marker = tmp_path / "pwned"
-    value = f"/mnt/$(touch {marker})`touch {marker}`;\"'*"
-    fake = tmp_path / "fake_reader.py"
-    fake.write_text(f"print('HAL0_MODELS_DIR=' + {value!r})\n", encoding="utf-8")
+    value = f"https://x/$(touch {marker})`touch {marker}`;\"'*"
+    fake = _fake(tmp_path, f"HAL0_PUBLIC_URL={value}", SAVED)
     proc = _bash(
-        'hal0_apply_answers /x/doc.json file; printf "%s" "$HAL0_MODELS_DIR"',
+        'hal0_apply_answers /x/doc.json file; printf "%s" "$HAL0_PUBLIC_URL"',
         tmp_path,
         reader=fake,
     )
@@ -238,13 +251,14 @@ def _argv_reader(tmp_path: Path) -> Path:
     fake.write_text(
         "import sys\n"
         f"open({str(tmp_path / 'argv.txt')!r}, 'a').write(repr(sys.argv[1:]) + '\\n')\n"
-        "print('HAL0_PORT=1234')\n",
+        "print('HAL0_PORT=1234')\n"
+        f"print({SAVED!r})\n",
         encoding="utf-8",
     )
     return fake
 
 
-def test_apply_and_save_pass_the_default_store_from_var_dir(tmp_path: Path) -> None:
+def test_the_reader_runs_once_with_the_default_store_from_var_dir(tmp_path: Path) -> None:
     fake = _argv_reader(tmp_path)
     proc = _bash(
         f'VAR_DIR="{tmp_path}/dev/var"; hal0_apply_answers /x/doc.json file; echo "rc=$?"',
@@ -253,10 +267,9 @@ def test_apply_and_save_pass_the_default_store_from_var_dir(tmp_path: Path) -> N
     )
     assert proc.stdout.splitlines() == ["rc=0"], proc.stderr
     calls = (tmp_path / "argv.txt").read_text(encoding="utf-8").splitlines()
-    assert len(calls) == 2  # the apply run and the save-form run
+    assert len(calls) == 1  # one read, one run: the saved form comes from the same run
     store = f"{tmp_path}/dev/var/models"
     assert eval(calls[0]) == ["--origin", "file", "--default-store", store, "--", "/x/doc.json"]
-    assert eval(calls[1]) == ["--default-store", store, "--emit-saved", "/x/doc.json"]
 
 
 def test_without_var_dir_the_reader_keeps_its_own_default(tmp_path: Path) -> None:
@@ -267,3 +280,44 @@ def test_without_var_dir_the_reader_keeps_its_own_default(tmp_path: Path) -> Non
     calls = (tmp_path / "argv.txt").read_text(encoding="utf-8").splitlines()
     assert all("--default-store" not in call for call in calls)
 
+
+
+# ── one read, one run: the `#saved` line ────────────────────────────────────
+
+
+_CHECK = ('hal0_apply_answers /x/doc.json file; echo "rc=$?"; '
+          'echo "port=${HAL0_PORT:-unset} n=${#HAL0_ANSWERS_EXPORTED[@]} saved=[${HAL0_ANSWERS_SAVED}]"')
+
+
+def test_the_saved_line_is_kept_and_not_exported(tmp_path: Path) -> None:
+    fake = _fake(tmp_path, "HAL0_PORT=1234", SAVED)
+    proc = _bash(_CHECK + "; bash -c 'echo \"child:[${HAL0_ANSWERS_SAVED:-}]\"'", tmp_path, reader=fake)
+    payload = SAVED[len("#saved "):]
+    assert proc.stdout.splitlines() == ["rc=0", f"port=1234 n=1 saved=[{payload}]", "child:[]"], proc.stderr
+
+
+@pytest.mark.parametrize("out", [
+    ("HAL0_PORT=1234",),                          # no saved form at all
+    ("HAL0_PORT=1234", SAVED, SAVED),             # a second #saved line
+    ("HAL0_PORT=1234", SAVED, "HAL0_SKIP_PI=1"),  # anything after it
+    (SAVED, "HAL0_PORT=1234"),
+    ("HAL0_PORT=1234", "#saved "),                # empty payload
+    ("HAL0_PORT=1234", "#saved not*base64!"),     # not base64 characters
+    ("HAL0_PORT=1234", "#saved QUJD="),           # base64 characters that do not decode
+    ("HAL0_PORT=1234", "#savedQUJD"),             # not the prefix: a malformed line
+    ("HAL0_PORT=1234", "", SAVED),                # an empty line
+    ("HAL0_PORT=1234", "# comment", SAVED),
+])
+def test_a_bad_saved_protocol_fails_the_apply_and_exports_nothing(tmp_path: Path,
+                                                                 out: tuple[str, ...]) -> None:
+    proc = _bash(_CHECK, tmp_path, reader=_fake(tmp_path, *out))
+    assert proc.stdout.splitlines() == ["rc=1", "port=unset n=0 saved=[]"], (out, proc.stderr)
+    assert proc.stderr.count("error:") == 1
+
+
+def test_a_real_document_carries_its_saved_form(tmp_path: Path) -> None:
+    doc = _doc(tmp_path, {"version": 1, "network": {"port": 9000},
+                          "huggingface": {"token": "hf_secret"}})
+    proc = _bash(f'hal0_apply_answers "{doc}" file; printf "%s" "$HAL0_ANSWERS_SAVED"', tmp_path)
+    saved = json.loads(base64.b64decode(proc.stdout, validate=True))
+    assert saved == {"version": 1, "network": {"port": 9000}}

@@ -6,14 +6,28 @@ Usage:  python3 -I answers_reader.py --origin wizard|file [--default-store PATH]
 Runs as root, before hal0's package is installed: standard library only, one
 file, Python 3.10 or newer. The document is data. This program never evaluates
 any of it; it validates every value against a fixed pattern, then prints one
-`NAME=value` line per variable to set, in ALLOWED_NAMES order, and nothing else.
+`NAME=value` line per variable to set, in ALLOWED_NAMES order.
+
+The apply run ends with exactly one more line, `#saved <base64>`, and prints
+nothing else: the saved
+form of the document (what is kept after the install), standard base64 on one
+line, produced from the same read as the variables. `--emit-saved DOCUMENT`
+prints that saved form alone, as JSON (for tests and tools).
+
+The two folder paths (model_store.path, model_store.flm_path) are checked by
+their text alone: this program never looks at the filesystem for them, and
+everything it prints is text it validated, never something read from disk.
+Whether root may create or use a folder there is decided by the installer's
+sinks (installer/install.sh), through the `nofollow` helper.
 
 Exit 0: lines printed. Exit 2: nothing on standard output, one line per problem
-on standard error. Validation finishes before the first byte is printed.
+on standard error (at most MAX_MESSAGES of each kind, then a count).
+Validation finishes before the first byte is printed.
 """
 
 from __future__ import annotations
 
+import base64
 import errno
 import ipaddress
 import json
@@ -54,20 +68,24 @@ ALLOWED_NAMES = (
 
 MAX_BYTES = 1024 * 1024
 MAX_PATH = 4096
+MAX_MESSAGES = 20  # per kind (warnings, errors); the rest are counted
 ORIGINS = ("wizard", "file")
 
 _ID = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
 _DNS_LABEL = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$")
 # A models directory: absolute, and only characters that are inert in a shell
 # and in a systemd unit or env file. Spaces and '=' are fine (they are data);
-# $ ` " ' \\ ; & | < > ( ) * ? ! # { } [ ] are not.
-_FS_PATH = re.compile(r"^/[\w.+@,:~= /-]*$")
+# $ ` " ' \\ ; & | < > ( ) * ? ! # { } [ ] are not. ASCII only (re.ASCII: \w
+# is A-Za-z0-9_), and always used with fullmatch, so a trailing newline cannot
+# slip past a `$`. installer/lib/answers.sh holds the same set as a backstop.
+_FS_PATH = re.compile(r"/[\w.+@,:~= /-]*", re.ASCII)
 _URL_PATH = re.compile(r"^[A-Za-z0-9._~/%-]*$")
 
 # Trees a model store may never be, or sit inside, because the installer (as
 # root) creates it and hands it to the hal0 service account. A store there
-# would make a system tree writable by that account. Checked against the path
-# as written AND against its real path, so a link into one of them is caught.
+# would make a system tree writable by that account. Compared by NAME only, on
+# the normalised text: a link or a second mount is the installer's sink's
+# business (it refuses anything outside folders only root can change).
 DENIED_TREES = (
     "/etc",  # system configuration: root-owned files that run as root
     "/usr", "/bin", "/sbin",  # programs and libraries root executes
@@ -349,193 +367,115 @@ def _bool(obj: dict[str, Any], key: str, where: str, problems: _Problems) -> boo
     return value
 
 
-def _abs_path(obj: dict[str, Any], key: str, where: str, problems: _Problems,
-              *, default_store: str = DEFAULT_STORE) -> str | None:
+def _normal(path: str) -> str:
+    """The lexical normal form of an absolute path: no filesystem access.
+
+    os.path.normpath removes doubled slashes, `.` parts and a trailing slash
+    (callers have already refused `..`). POSIX lets it keep exactly two leading
+    slashes; they are folded to one, or `//etc` would not compare equal to /etc.
+    """
+    norm = os.path.normpath(path)
+    if norm.startswith("//"):
+        norm = "/" + norm.lstrip("/")
+    return norm
+
+
+def _parts(path: str) -> list[str]:
+    return [part for part in path.split("/") if part]
+
+
+def _inside(path: str, tree: str, *, strictly: bool = False) -> bool:
+    """`path` is `tree` or below it, comparing normalised components."""
+    have, want = _parts(path), _parts(tree)
+    if strictly and len(have) <= len(want):
+        return False
+    return have[: len(want)] == want
+
+
+def _path_text_ok(value: str) -> bool:
+    return (
+        value.startswith("/")
+        and len(value) <= MAX_PATH
+        and _FS_PATH.fullmatch(value) is not None
+        and ".." not in value.split("/")
+    )
+
+
+def _path_text(obj: dict[str, Any], key: str, where: str,
+               problems: _Problems) -> tuple[bool, str | None]:
+    """(given, normalised text) of a folder path; the text is None after an error.
+
+    Purely lexical: the value is checked as text, normalised, and the normal
+    form is checked again by the same rules. Nothing on disk is looked at.
+    """
     value = obj.get(key)
     if value is None:
-        return None
+        return False, None
     full = f"{where}.{key}"
     if not isinstance(value, str) or not value.startswith("/"):
         problems.error(f"{full}: must be an absolute path (start with /)")
-        return None
+        return True, None
     if len(value) > MAX_PATH:
         problems.error(f"{full}: is longer than {MAX_PATH} characters")
-        return None
-    if not _FS_PATH.match(value):
+        return True, None
+    if _FS_PATH.fullmatch(value) is None:
         problems.error(
-            f"{full}: {_q(value)} has characters other than letters, digits, space "
+            f"{full}: {_q(value)} has characters other than ASCII letters, digits, space "
             "and . _ + @ , : ~ = / -"
         )
-        return None
+        return True, None
     if ".." in value.split("/"):
         problems.error(f"{full}: must not contain a '..' segment")
-        return None
-    # Exported and saved in the canonical form: the one _safe_location checked.
-    return _safe_location(value, full, problems, default_store=default_store)
+        return True, None
+    norm = _normal(value)
+    if not _path_text_ok(norm):  # cannot happen for a value that passed above
+        problems.error(f"{full}: {_q(value)} is not a usable path")
+        return True, None
+    return True, norm
 
 
-def _inside(path: str, tree: str) -> bool:
-    return path == tree or path.startswith(tree + "/")
-
-
-def _normal(path: str) -> str:
-    return "/" + "/".join(part for part in path.split("/") if part not in ("", "."))
-
-
-def _identity(path: str) -> tuple[int, int] | None:
-    """(device, inode) of what `path` names, or None when it cannot be looked at."""
-    try:
-        info = os.stat(path)
-    except (OSError, ValueError):
-        return None
-    return (info.st_dev, info.st_ino)
-
-
-def _denied_by_identity(norm: str, trees: tuple[str, ...] | None = None) -> str | None:
-    """The denied tree that `norm` or one of its existing ancestors IS, or None.
-
-    realpath does not see a bind mount or a second mount of the same filesystem,
-    so a second name for /etc passes the name checks. Comparing (device, inode)
-    of every existing ancestor, from the first folder below / down to the
-    deepest one that exists, with those of the denied trees that exist on this
-    box catches it. The name checks stay as they are.
-    """
-    ids: dict[tuple[int, int], str] = {}
-    for tree in DENIED_TREES if trees is None else trees:
-        ident = _identity(tree)
-        if ident is not None:
-            ids.setdefault(ident, tree)
-    if not ids:
-        return None
-    walk = ""
-    for part in [p for p in norm.split("/") if p]:
-        walk = f"{walk}/{part}"
-        ident = _identity(walk)
-        if ident is None:
-            break
-        if ident in ids:
-            return ids[ident]
-    return None
-
-
-def _root_uid() -> int:
-    """The uid that counts as root for the ancestor rule: 0.
-
-    HAL0_ANSWERS_TEST_ROOT_UID is a test seam (tests cannot make root-owned
-    directories). It is read from the environment only, never from a document;
-    anything that is not a plain number leaves it at 0.
-    """
-    raw = os.environ.get("HAL0_ANSWERS_TEST_ROOT_UID", "")
-    return int(raw) if raw.isascii() and raw.isdigit() and len(raw) <= 10 else 0
-
-
-def _unsafe_parent(norm: str) -> str | None:
-    """Why root may not create `norm` here, or None when it may.
-
-    Mirrors hal0_doc_dir_parent_ok in installer/install.sh (the authority): the
-    deepest EXISTING ancestor must be a real directory reached with no symlink
-    component, owned by root, with no group-write and no other-write bit. The
-    reason never names a resolved path.
-    """
-    walk = ""
-    deepest: os.stat_result | None = None
-    for part in [p for p in norm.split("/") if p]:
-        walk = f"{walk}/{part}"
-        try:
-            info = os.lstat(walk)
-        except FileNotFoundError:
-            break
-        except (OSError, ValueError):
-            return "its parent folder cannot be inspected"
-        if stat.S_ISLNK(info.st_mode):
-            return "a link is on the way to it"
-        if not stat.S_ISDIR(info.st_mode):
-            return "a parent of it is not a folder"
-        deepest = info
-    if deepest is None:
-        try:
-            deepest = os.lstat("/")
-        except OSError:
-            return "its parent folder cannot be inspected"
-    if deepest.st_uid != _root_uid():
-        return "its closest existing parent folder is not owned by root"
-    if deepest.st_mode & 0o022:
-        return "its closest existing parent folder is writable by a group or by others"
-    return None
-
-
-def _canonical(norm: str) -> str | None:
-    """`norm` with its existing part resolved, or None when it cannot be resolved.
-
-    realpath of the deepest existing ancestor (a link is followed when it leads
-    somewhere that exists; a dangling or looping one counts as not existing),
-    joined with the remaining components, which are already normalised. The
-    existing part of the result has no link in it.
-    """
-    parts = [p for p in norm.split("/") if p]
-    walk = ""
-    done = 0
-    for part in parts:
-        if not os.path.exists(f"{walk}/{part}"):
-            break
-        walk = f"{walk}/{part}"
-        done += 1
-    try:
-        base = os.path.realpath(walk) if walk else "/"
-    except (OSError, ValueError):
-        return None
-    return _normal("/".join([base, *parts[done:]]))
-
-
-def _safe_location(value: str, full: str, problems: _Problems, *,
-                   default_store: str = DEFAULT_STORE) -> str | None:
-    """The canonical form of a model-store path, or None after reporting why not.
-
-    The path is canonicalised first (_canonical) and every check runs on that
-    form: not inside a system tree (by name and by inode identity), not too
-    close to the root, not an existing file, and, when it does not exist yet,
-    something the installer can create safely: inside the default store, or
-    under a root-owned parent that no group or other user can write to. No
-    message names the canonical path; the document's own text is echoed (escaped).
-    """
-    canon = _canonical(_normal(value))
-    if canon is None:
-        problems.error(f"{full}: {_q(value)} cannot be resolved")
-        return None
-    inside_default = _inside(canon, default_store)
-    if not inside_default:
+def _store_path(store: dict[str, Any], problems: _Problems,
+                default_store: str) -> tuple[bool, str | None]:
+    """model_store.path: (given, normalised text or None after an error)."""
+    given, norm = _path_text(store, "path", "model_store", problems)
+    if norm is None:
+        return given, None
+    shown = _q(store["path"])
+    if not _inside(norm, default_store):
         for tree in DENIED_TREES:
-            if _inside(canon, tree):
-                problems.error(f"{full}: {_q(value)} is inside {tree}, a system location")
-                return None
-        tree = _denied_by_identity(canon)
-        if tree is not None:
-            problems.error(
-                f"{full}: {_q(value)} is inside {tree} under a second name "
-                "(another mount of the same folder), a system location"
-            )
-            return None
-    if len([part for part in canon.split("/") if part]) < 2:
-        problems.error(f"{full}: {_q(value)} is too close to the root; use a folder like /mnt/models")
+            if _inside(norm, tree):
+                problems.error(f"model_store.path: {shown} is inside {tree}, a system location")
+                return True, None
+    if len(_parts(norm)) < 2:
+        problems.error(
+            f"model_store.path: {shown} is too close to the root; use a folder like /mnt/models"
+        )
+        return True, None
+    return True, norm
+
+
+def _flm_path(store: dict[str, Any], problems: _Problems, default_store: str,
+              store_given: bool, store_norm: str | None) -> str | None:
+    """model_store.flm_path: strictly inside the model store, or None after an error.
+
+    The model store is the document's own model_store.path when it gives one,
+    otherwise the default store. A folder anywhere else can only be chosen in
+    root's environment (HAL0_FLM_MODELS_DIR), never by a document.
+    """
+    _given, norm = _path_text(store, "flm_path", "model_store", problems)
+    if norm is None:
         return None
-    try:
-        exists = os.path.lexists(canon)
-        is_dir = os.path.isdir(canon)
-    except (OSError, ValueError):
-        exists, is_dir = True, False
-    if exists and not is_dir:
-        problems.error(f"{full}: {_q(value)} exists and is not a directory")
+    if store_given and store_norm is None:
+        return None  # model_store.path was refused: already one error for it
+    base = store_norm if store_given and store_norm is not None else default_store
+    if not _inside(norm, base, strictly=True):
+        problems.error(
+            f"model_store.flm_path: {_q(store['flm_path'])}: the NPU model folder from an "
+            "answers document must be a folder inside the model store; to use a folder "
+            "elsewhere, set HAL0_FLM_MODELS_DIR in the environment when running the installer"
+        )
         return None
-    if not exists and not inside_default:
-        reason = _unsafe_parent(canon)
-        if reason is not None:
-            problems.error(
-                f"{full}: {_q(value)}: the folder does not exist and its parent is not one "
-                f"only root can change ({reason}); create the folder first, or choose "
-                "one on a disk that root owns"
-            )
-            return None
-    return canon
+    return norm
 
 
 def _ident(value: Any, full: str, problems: _Problems) -> str | None:
@@ -830,12 +770,12 @@ def _build(doc: dict[str, Any], origin: str, problems: _Problems,
     for name, known in _SECTION_KEYS.items():
         _unknown(_section(doc, name, problems), known, name, strict, problems)
 
-    # model_store
+    # model_store: text only (see the module docstring)
     store = _section(doc, "model_store", problems)
-    path = _abs_path(store, "path", "model_store", problems, default_store=default_store)
+    store_given, path = _store_path(store, problems, default_store)
     if path is not None:
         out["HAL0_MODELS_DIR"] = path
-    flm = _abs_path(store, "flm_path", "model_store", problems, default_store=default_store)
+    flm = _flm_path(store, problems, default_store, store_given, path)
     if flm is not None:
         out["HAL0_FLM_MODELS_DIR"] = flm
 
@@ -1036,9 +976,9 @@ def _valid_default_store(value: str) -> bool:
     return (
         value.startswith("/")
         and len(value) <= MAX_PATH
-        and bool(_FS_PATH.match(value))
+        and _FS_PATH.fullmatch(value) is not None
         and ".." not in value.split("/")
-        and len([p for p in value.split("/") if p]) >= 2
+        and len(_parts(value)) >= 2
     )
 
 
@@ -1077,7 +1017,7 @@ def _saved_document(doc: dict[str, Any], stores: dict[str, str] | None = None) -
     secret would sit in one); `huggingface` and `apps.hermes.terminal_tool`
     are known but never kept. `slots` entries keep only the keys the loader reads.
     Document key order holds. `stores` maps `path` and `flm_path` to the
-    canonical form the reader exported; those are what is kept.
+    normalised text the reader exported; those are what is kept.
     """
     stores = stores or {}
     tables: dict[str, frozenset[str]] = dict(_SECTION_KEYS)
@@ -1104,7 +1044,7 @@ def _saved_document(doc: dict[str, Any], stores: dict[str, str] | None = None) -
             ]
         elif key in tables and isinstance(value, dict):
             value = {k: v for k, v in value.items() if k in tables[key]}
-            if key == "model_store":  # kept as exported: the canonical form
+            if key == "model_store":  # kept as exported: the normalised text
                 value = {
                     k: stores.get(k, _normal(v)) if isinstance(v, str) else v
                     for k, v in value.items()
@@ -1122,6 +1062,24 @@ def _bad_default_store(value: str) -> bool:
         "with no '..' part\n"
     )
     return True
+
+
+def _write_messages(kind: str, messages: list[str]) -> None:
+    """At most MAX_MESSAGES lines of one kind, then one line counting the rest."""
+    for message in messages[:MAX_MESSAGES]:
+        sys.stderr.write(f"{kind}: {message}\n")
+    if len(messages) > MAX_MESSAGES:
+        sys.stderr.write(f"{kind}: ... and {len(messages) - MAX_MESSAGES} more\n")
+
+
+def _saved_json(doc: dict[str, Any], values: dict[str, str]) -> str:
+    """The saved form as JSON text, with the store paths as they were exported."""
+    stores = {
+        key: values[name]
+        for key, name in (("path", "HAL0_MODELS_DIR"), ("flm_path", "HAL0_FLM_MODELS_DIR"))
+        if name in values
+    }
+    return json.dumps(_saved_document(doc, stores), indent=2, ensure_ascii=False) + "\n"
 
 
 def _emit_saved(argv: list[str]) -> int:
@@ -1162,18 +1120,12 @@ def _emit_saved(argv: list[str]) -> int:
             _walk_strings(doc, "", problems)
             values = _build(doc, "file", problems, manifest, default_store)
             if not problems.errors:
-                stores = {
-                    key: values[name]
-                    for key, name in (("path", "HAL0_MODELS_DIR"), ("flm_path", "HAL0_FLM_MODELS_DIR"))
-                    if name in values
-                }
-                text = json.dumps(_saved_document(doc, stores), indent=2, ensure_ascii=False) + "\n"
+                text = _saved_json(doc, values)
         except RecursionError:
             problems.error("the answers document is nested too deeply")
-    # Warnings are not repeated here: the apply run already printed them.
+    # Warnings are not printed in this mode: only the apply run reports them.
     if problems.errors or doc is None:
-        for error in problems.errors:
-            sys.stderr.write(f"error: {error}\n")
+        _write_messages("error", problems.errors)
         return 2
     sys.stdout.buffer.write(text.encode("utf-8"))
     sys.stdout.buffer.flush()
@@ -1199,17 +1151,18 @@ def main(argv: list[str]) -> int:
         try:
             _walk_strings(doc, "", problems)
             values = _build(doc, opts.origin, problems, opts.manifest, opts.default_store)
+            for name in ALLOWED_NAMES:
+                if name in values:
+                    lines.append(f"{name}={values[name]}")
+            if not problems.errors:
+                # The saved form, from this same read: one line, standard base64.
+                saved = base64.b64encode(_saved_json(doc, values).encode("utf-8"))
+                lines.append("#saved " + saved.decode("ascii"))
         except RecursionError:
             problems.error("the answers document is nested too deeply")
-            values = {}
-        for name in ALLOWED_NAMES:
-            if name in values:
-                lines.append(f"{name}={values[name]}")
-    for warning in problems.warnings:
-        sys.stderr.write(f"warning: {warning}\n")
+    _write_messages("warning", problems.warnings)
     if problems.errors or doc is None:
-        for error in problems.errors:
-            sys.stderr.write(f"error: {error}\n")
+        _write_messages("error", problems.errors)
         return 2
     sys.stdout.buffer.write("".join(f"{line}\n" for line in lines).encode("utf-8"))
     sys.stdout.buffer.flush()

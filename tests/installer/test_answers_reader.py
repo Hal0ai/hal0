@@ -6,6 +6,7 @@ the installer runs it: ``python -I answers_reader.py --origin ... DOC``.
 
 from __future__ import annotations
 
+import base64
 import json
 import os
 import subprocess
@@ -36,7 +37,7 @@ def _manifest(tmp_path: Path, data: object = LADDER) -> Path:
 
 FULL = {
     "version": 1,
-    "model_store": {"path": "/mnt/my models/a=b", "flm_path": "/mnt/flm"},
+    "model_store": {"path": "/mnt/my models/a=b", "flm_path": "/mnt/my models/a=b/flm"},
     "apps": {
         "openwebui": {"enabled": False},
         "hermes": {"enabled": False, "terminal_tool": True},
@@ -73,8 +74,20 @@ def run(doc: object, tmp_path: Path, origin: str = "wizard", raw: bytes | None =
 
 
 def lines(proc: subprocess.CompletedProcess[str]) -> list[str]:
+    """The NAME=value lines of a successful run (its last line, `#saved ...`, checked apart)."""
     assert proc.returncode == 0, proc.stderr
-    return proc.stdout.splitlines()
+    out = proc.stdout.splitlines()
+    assert out and out[-1].startswith("#saved "), proc.stdout
+    assert [x for x in out if x.startswith("#")] == [out[-1]], proc.stdout
+    return out[:-1]
+
+
+def saved_of(proc: subprocess.CompletedProcess[str]) -> dict:
+    """The saved form carried by the apply run's `#saved <base64>` line."""
+    assert proc.returncode == 0, proc.stderr
+    last = proc.stdout.splitlines()[-1]
+    assert last.startswith("#saved ")
+    return json.loads(base64.b64decode(last[len("#saved "):], validate=True).decode("utf-8"))
 
 
 def test_full_document_maps_every_key(tmp_path: Path) -> None:
@@ -82,7 +95,7 @@ def test_full_document_maps_every_key(tmp_path: Path) -> None:
     assert lines(proc) == [
         "HAL0_NONINTERACTIVE=1",
         "HAL0_MODELS_DIR=/mnt/my models/a=b",
-        "HAL0_FLM_MODELS_DIR=/mnt/flm",
+        "HAL0_FLM_MODELS_DIR=/mnt/my models/a=b/flm",
         "HAL0_SKIP_OPENWEBUI=1",
         "HAL0_SKIP_HERMES=1",
         "HAL0_HERMES_TERMINAL=1",
@@ -638,23 +651,32 @@ _DENIED = ("/etc", "/usr", "/bin", "/sbin", "/lib", "/lib32", "/lib64", "/libx32
            "/root", "/proc", "/sys", "/dev", "/run", "/var/run", "/var/log", "/var/lib")
 
 
-@pytest.mark.parametrize("key", _STORE_KEYS)
+_OUTSIDE_STORE = "must be a folder inside the model store"
+
+
 @pytest.mark.parametrize("tree", _DENIED)
 @pytest.mark.parametrize("suffix", ["", "/x", "/x/y"])
-def test_store_path_in_a_system_tree_is_refused(tmp_path: Path, key: str, tree: str,
-                                                suffix: str) -> None:
-    proc = run({"version": 1, "model_store": {key: tree + suffix}}, tmp_path)
+def test_store_path_in_a_system_tree_is_refused(tmp_path: Path, tree: str, suffix: str) -> None:
+    proc = run({"version": 1, "model_store": {"path": tree + suffix}}, tmp_path)
     assert proc.returncode == 2, proc.stdout
     assert proc.stdout == ""
-    assert f"model_store.{key}" in proc.stderr and "system location" in proc.stderr
+    assert "model_store.path" in proc.stderr and f"is inside {tree}, a system location" in proc.stderr
 
 
-@pytest.mark.parametrize("key", _STORE_KEYS)
-@pytest.mark.parametrize("bad", ["/", "/mnt", "/home", "//", "/./", "//mnt/", "/mnt/."])
-def test_store_path_needs_two_components(tmp_path: Path, key: str, bad: str) -> None:
-    proc = run({"version": 1, "model_store": {key: bad}}, tmp_path)
+@pytest.mark.parametrize("tree", _DENIED)
+@pytest.mark.parametrize("suffix", ["", "/x", "/x/y"])
+def test_flm_path_in_a_system_tree_is_outside_the_store(tmp_path: Path, tree: str,
+                                                        suffix: str) -> None:
+    proc = run({"version": 1, "model_store": {"flm_path": tree + suffix}}, tmp_path)
     assert proc.returncode == 2 and proc.stdout == ""
-    assert f"model_store.{key}" in proc.stderr and "too close to the root" in proc.stderr
+    assert "model_store.flm_path" in proc.stderr and _OUTSIDE_STORE in proc.stderr
+
+
+@pytest.mark.parametrize("bad", ["/", "/mnt", "/home", "//", "/./", "//mnt/", "/mnt/."])
+def test_store_path_needs_two_components(tmp_path: Path, bad: str) -> None:
+    proc = run({"version": 1, "model_store": {"path": bad}}, tmp_path)
+    assert proc.returncode == 2 and proc.stdout == ""
+    assert "model_store.path" in proc.stderr and "too close to the root" in proc.stderr
 
 
 @pytest.mark.parametrize("bad", ["//etc", "/./etc", "/etc/", "//usr//lib/x", "/var/./lib/x"])
@@ -663,10 +685,9 @@ def test_store_path_spelled_oddly_is_still_refused(tmp_path: Path, bad: str) -> 
     assert proc.returncode == 2 and "system location" in proc.stderr
 
 
-@pytest.mark.parametrize("key", _STORE_KEYS)
 @pytest.mark.parametrize("ok", ["/var/lib/hal0/models", "/var/lib/hal0/models/flm"])
-def test_hal0_models_directory_is_allowed_under_var_lib(tmp_path: Path, key: str, ok: str) -> None:
-    proc = run({"version": 1, "model_store": {key: ok}}, tmp_path)
+def test_hal0_models_directory_is_allowed_under_var_lib(tmp_path: Path, ok: str) -> None:
+    proc = run({"version": 1, "model_store": {"path": ok}}, tmp_path)
     assert proc.returncode == 0, proc.stderr
 
 
@@ -675,45 +696,27 @@ def test_the_rest_of_var_lib_hal0_is_refused(tmp_path: Path, bad: str) -> None:
     assert run({"version": 1, "model_store": {"path": bad}}, tmp_path).returncode == 2
 
 
-@pytest.mark.parametrize("key", _STORE_KEYS)
 @pytest.mark.parametrize("ok", ["/mnt/disk/models", "/srv/hal0/models", "/home/someone/models",
                                 "/mnt/my models/a=b", "/opt/hal0", "/var/data/models"])
-def test_ordinary_store_paths_are_accepted(tmp_path: Path, key: str, ok: str) -> None:
-    proc = run({"version": 1, "model_store": {key: ok}}, tmp_path)
-    assert proc.returncode == 0, proc.stderr
+def test_ordinary_store_paths_are_accepted(tmp_path: Path, ok: str) -> None:
+    proc = run({"version": 1, "model_store": {"path": ok, "flm_path": f"{ok}/flm"}}, tmp_path)
+    assert lines(proc) == ["HAL0_NONINTERACTIVE=1", f"HAL0_MODELS_DIR={ok}",
+                           f"HAL0_FLM_MODELS_DIR={ok}/flm"]
 
 
-@pytest.mark.parametrize("key", _STORE_KEYS)
-def test_symlink_into_a_system_tree_is_refused(tmp_path: Path, key: str) -> None:
-    link = tmp_path / "link"
-    link.symlink_to("/etc")
-    for value in (str(link), f"{link}/hal0/models"):  # the link itself, and below it
-        proc = run({"version": 1, "model_store": {key: value}}, tmp_path)
-        assert proc.returncode == 2 and proc.stdout == "", value
-        assert f"model_store.{key}" in proc.stderr and "/etc" in proc.stderr, value
-
-
-def test_symlink_to_an_ordinary_directory_is_accepted(tmp_path: Path) -> None:
-    target = tmp_path / "real"
-    target.mkdir()
-    link = tmp_path / "link"
-    link.symlink_to(target)
-    assert run({"version": 1, "model_store": {"path": str(link)}}, tmp_path).returncode == 0
-
-
-@pytest.mark.parametrize("key", _STORE_KEYS)
-def test_existing_regular_file_is_refused(tmp_path: Path, key: str) -> None:
-    target = tmp_path / "a-file"
-    target.write_text("x")
-    proc = run({"version": 1, "model_store": {key: str(target)}}, tmp_path)
-    assert proc.returncode == 2
-    assert f"model_store.{key}" in proc.stderr and "not a directory" in proc.stderr
-
-
-def test_existing_directory_and_missing_path_are_accepted(tmp_path: Path) -> None:
-    (tmp_path / "d").mkdir()
-    for value in (str(tmp_path / "d"), str(tmp_path / "not" / "yet")):
-        assert run({"version": 1, "model_store": {"path": value}}, tmp_path, env=_ME).returncode == 0
+def test_what_is_on_disk_at_the_path_does_not_matter_to_the_reader(tmp_path: Path) -> None:
+    # A link into /etc, a regular file, a dangling link: the reader judges the
+    # text only, and passes the document's own text on; the installer's sink
+    # decides what may be created or used there.
+    (tmp_path / "etc-link").symlink_to("/etc")
+    (tmp_path / "a-file").write_text("x")
+    (tmp_path / "dangling").symlink_to(tmp_path / "nowhere")
+    for value in (f"{tmp_path}/etc-link", f"{tmp_path}/etc-link/hal0/models", f"{tmp_path}/a-file",
+                  f"{tmp_path}/dangling/models"):
+        proc = run({"version": 1, "model_store": {"path": value}}, tmp_path)
+        assert lines(proc) == ["HAL0_NONINTERACTIVE=1", f"HAL0_MODELS_DIR={value}"], value
+        assert proc.stderr == ""
+        assert saved_of(proc)["model_store"] == {"path": value}
 
 
 # ── credentials and secrets never reach the (world-readable) install log ────
@@ -812,10 +815,7 @@ def test_the_document_is_read_through_one_nonblocking_descriptor() -> None:
     text = READER.read_text(encoding="utf-8")
     assert "os.O_NONBLOCK" in text and "os.fstat(fd)" in text
     assert text.count("_read_capped(path)") == 2  # the document and the model list
-    # The one os.stat is _identity, which looks at the denied trees and the
-    # store path's ancestors, never at the document or the model list.
-    without_identity = text.replace("info = os.stat(path)", "")
-    assert "with open(" not in without_identity and "os.stat(" not in without_identity
+    assert "with open(" not in text and "os.stat(" not in text
 
 
 # ── network.bind_host: checked in every mode, kept when valid ───────────────
@@ -943,93 +943,6 @@ def test_slot_messages_never_echo_a_nested_value(tmp_path: Path, key: str) -> No
     assert "hf_nested_secret" not in proc.stderr
 
 
-# ── model_store.flm_path: the installer must be able to create it safely ────
-#
-# Mirrors the installer's sink rule so a person learns before the install starts.
-# Tests cannot make root-owned directories: HAL0_ANSWERS_TEST_ROOT_UID names the
-# uid that counts as root (default 0; the reader reads it from the environment,
-# never from a document).
-
-_ME = {"HAL0_ANSWERS_TEST_ROOT_UID": str(os.getuid())}
-
-
-def _flm(tmp_path: Path, value: str, env: dict[str, str] | None = None):
-    return run({"version": 1, "model_store": {"flm_path": value}}, tmp_path, env=env)
-
-
-def test_flm_path_in_another_persons_directory_is_refused(tmp_path: Path) -> None:
-    home = tmp_path / "home" / "alice"
-    (home / ".config").mkdir(parents=True)
-    for rel in (".config/systemd/user", ".local/bin", ".config/autostart"):
-        value = str(home / rel)
-        proc = _flm(tmp_path, value, env={"HAL0_ANSWERS_TEST_ROOT_UID": "0"})
-        assert proc.returncode == 2 and proc.stdout == "", value
-        assert "model_store.flm_path" in proc.stderr and "owned by root" in proc.stderr
-
-
-def test_flm_path_reason_never_echoes_a_resolved_path(tmp_path: Path) -> None:
-    # a dangling link on the way: refused, and the link's target is not named
-    (tmp_path / "link").symlink_to(tmp_path / "nowhere")
-    proc = _flm(tmp_path, str(tmp_path / "link" / "flm"), env=_ME)
-    assert proc.returncode == 2 and "a link" in proc.stderr
-    assert str(tmp_path / "nowhere") not in proc.stderr
-
-
-def test_flm_path_under_a_group_or_sticky_ancestor_is_refused(tmp_path: Path) -> None:
-    for mode in (0o775, 0o1777, 0o757):
-        parent = tmp_path / f"p{mode:o}"
-        parent.mkdir()
-        parent.chmod(mode)
-        proc = _flm(tmp_path, str(parent / "flm"), env=_ME)
-        assert proc.returncode == 2, oct(mode)
-        assert "model_store.flm_path" in proc.stderr and "writable" in proc.stderr
-
-
-def test_flm_path_under_a_file_is_refused(tmp_path: Path) -> None:
-    (tmp_path / "afile").write_text("x")
-    proc = _flm(tmp_path, str(tmp_path / "afile" / "flm"), env=_ME)
-    assert proc.returncode == 2 and "model_store.flm_path" in proc.stderr
-
-
-def test_flm_path_under_a_root_owned_ancestor_is_accepted(tmp_path: Path) -> None:
-    proc = _flm(tmp_path, str(tmp_path / "a" / "b" / "flm"), env=_ME)
-    assert proc.returncode == 0, proc.stderr
-    assert proc.stdout.splitlines()[-1].startswith("HAL0_FLM_MODELS_DIR=")
-
-
-def test_flm_path_in_the_default_store_is_accepted_without_the_ancestor_rule(tmp_path: Path) -> None:
-    proc = _flm(tmp_path, "/var/lib/hal0/models/flm", env={"HAL0_ANSWERS_TEST_ROOT_UID": "4242"})
-    assert proc.returncode == 0, proc.stderr
-
-
-def test_an_existing_flm_directory_is_accepted_whoever_owns_it(tmp_path: Path) -> None:
-    (tmp_path / "mine").mkdir()
-    proc = _flm(tmp_path, str(tmp_path / "mine"), env={"HAL0_ANSWERS_TEST_ROOT_UID": "0"})
-    assert proc.returncode == 0, proc.stderr
-
-
-def test_the_model_store_path_is_subject_to_the_ancestor_rule_too(tmp_path: Path) -> None:
-    value = str(tmp_path / "x" / "store")
-    proc = run({"version": 1, "model_store": {"path": value}}, tmp_path,
-               env={"HAL0_ANSWERS_TEST_ROOT_UID": "0" if os.getuid() else "1"})
-    assert proc.returncode == 2 and "model_store.path" in proc.stderr
-
-
-def test_a_nonsense_seam_value_means_root_is_uid_0(tmp_path: Path) -> None:
-    proc = _flm(tmp_path, str(tmp_path / "flm"), env={"HAL0_ANSWERS_TEST_ROOT_UID": "abc"})
-    assert proc.returncode == 2 if os.getuid() != 0 else proc.returncode == 0
-
-
-# ── a second name for a system tree: compared by device and inode ───────────
-#
-# os.path.realpath cannot see a bind mount or a second mount of one filesystem.
-# The reader therefore also compares (st_dev, st_ino) of every existing ancestor
-# of the path with each denied tree that exists on the box. A real second name
-# needs a mount (root only; a hard link to a directory is impossible), so the
-# test reaches the reader in-process: the real stat is exercised on real
-# directories, and a fake identity function stands in for the second name.
-
-
 def _reader_module():
     import importlib.util  # noqa: PLC0415
 
@@ -1038,46 +951,6 @@ def _reader_module():
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
-
-
-def test_an_ancestor_that_is_a_denied_tree_by_inode_is_found(tmp_path: Path) -> None:
-    reader = _reader_module()
-    (tmp_path / "denied" / "inner").mkdir(parents=True)
-    (tmp_path / "other").mkdir()
-    trees = (str(tmp_path / "denied"), str(tmp_path / "absent"))
-    assert reader._denied_by_identity(str(tmp_path / "denied" / "inner" / "x" / "y"), trees)
-    assert reader._denied_by_identity(str(tmp_path / "denied"), trees)
-    assert not reader._denied_by_identity(str(tmp_path / "other" / "x"), trees)
-    assert not reader._denied_by_identity(str(tmp_path / "denied-not" / "x"), trees)
-
-
-def test_a_second_name_for_a_denied_tree_is_refused(tmp_path: Path, monkeypatch) -> None:
-    reader = _reader_module()
-    seen = {"/fake/denied": (7, 99), "/mnt/alias": (7, 99), "/mnt": (7, 1), "/": (7, 0)}
-    monkeypatch.setattr(reader, "DENIED_TREES", ("/fake/denied",))
-    monkeypatch.setattr(reader, "_identity", lambda p: seen.get(p))
-    problems = reader._Problems()
-    assert not reader._safe_location("/mnt/alias/models", "model_store.path", problems)
-    assert len(problems.errors) == 1
-    assert "model_store.path" in problems.errors[0] and "second name" in problems.errors[0]
-    assert "/fake/denied" in problems.errors[0]
-    ok = reader._Problems()
-    assert reader._safe_location("/mnt/else/models", "model_store.path", ok)
-    assert ok.errors == []
-
-
-def test_the_default_store_is_not_caught_by_the_inode_check(tmp_path: Path) -> None:
-    # /var/lib is a denied tree and an ancestor of the default store.
-    reader = _reader_module()
-    problems = reader._Problems()
-    assert reader._safe_location("/var/lib/hal0/models/flm", "model_store.path", problems)
-    assert problems.errors == []
-
-
-@pytest.mark.parametrize("key", _STORE_KEYS)
-def test_a_real_system_tree_is_still_refused_by_name_first(tmp_path: Path, key: str) -> None:
-    proc = run({"version": 1, "model_store": {key: "/etc/x"}}, tmp_path)
-    assert proc.returncode == 2 and "system location" in proc.stderr
 
 
 # ── a credential anywhere in a URL: rejected, nothing of it echoed ──────────
@@ -1206,30 +1079,29 @@ def test_a_long_scalar_in_any_key_is_capped(tmp_path: Path) -> None:
         assert "Traceback" not in proc.stderr, path
 
 
-# ── values are exported and saved in canonical form ─────────────────────────
+# ── values are exported and saved in normalised form ────────────────────────
 
 
-@pytest.mark.parametrize(("key", "given", "canonical"), [
+@pytest.mark.parametrize(("key", "given", "normal"), [
     ("path", "/mnt//x/./", "/mnt/x"),
     ("path", "//mnt/x///y/", "/mnt/x/y"),
     ("path", "/mnt/./x", "/mnt/x"),
-    ("flm_path", "{t}//flm/./", "{t}/flm"),
+    ("flm_path", "/var/lib/hal0/models//flm/./", "/var/lib/hal0/models/flm"),
 ])
 def test_store_paths_are_exported_and_saved_normalised(tmp_path: Path, key: str, given: str,
-                                                        canonical: str) -> None:
-    given, canonical = given.format(t=tmp_path), canonical.format(t=tmp_path)
+                                                        normal: str) -> None:
     doc = {"version": 1, "model_store": {key: given}}
-    env = _ME if given.startswith(str(tmp_path)) else None  # a real root-owned /mnt otherwise
-    proc = run(doc, tmp_path, env=env)
+    proc = run(doc, tmp_path)
     name = "HAL0_MODELS_DIR" if key == "path" else "HAL0_FLM_MODELS_DIR"
-    assert f"{name}={canonical}" in lines(proc)
-    saved = _emit(doc, tmp_path, env=env)
+    assert f"{name}={normal}" in lines(proc)
+    assert saved_of(proc)["model_store"] == {key: normal}
+    saved = _emit(doc, tmp_path)
     assert saved.returncode == 0, saved.stderr
-    assert json.loads(saved.stdout)["model_store"] == {key: canonical}
+    assert json.loads(saved.stdout)["model_store"] == {key: normal}
 
 
 def test_the_normalised_path_is_checked_too(tmp_path: Path) -> None:
-    for bad in ("/mnt/../etc/x", "/./usr/./lib", "//etc//x"):
+    for bad in ("/mnt/../etc/x", "/./usr/./lib", "//etc//x", "///etc", "//var//lib/x"):
         proc = run({"version": 1, "model_store": {"path": bad}}, tmp_path)
         assert proc.returncode == 2, bad
     proc = run({"version": 1, "model_store": {"path": "/./etc/./x"}}, tmp_path)
@@ -1250,179 +1122,209 @@ def test_a_null_public_url_is_still_fine(tmp_path: Path) -> None:
     ]
 
 
-# ── one canonical path, resolved once in the reader (round 3) ───────────────
+# ── the two folder paths are text: the reader never looks at the disk ───────
 #
-# Both store paths are canonicalised before any check: realpath of the deepest
-# existing ancestor joined with the normalised remaining components. Every check
-# runs on that form, and it is what is exported and saved. The installer's sinks
-# therefore receive a path whose existing part has no link in it.
-
-_NOT_ME = {"HAL0_ANSWERS_TEST_ROOT_UID": str(os.getuid() + 1)}  # nobody here is "root"
+# Round 3 resolved the path with realpath and printed the result; a folder whose
+# NAME held a newline then injected NAME=value lines. The reader now checks and
+# prints the document's own text only, and makes no filesystem call for either
+# path; the installer's sinks hold every rule about what is on disk.
 
 
-def _store(tmp_path: Path, key: str, value: str, env: dict[str, str] | None = None,
-           *extra: str, doc_dir: Path | None = None):
+def _store(tmp_path: Path, key: str, value: str, *extra: str):
     path = tmp_path / "answers.json"
     path.write_text(json.dumps({"version": 1, "model_store": {key: value}}), encoding="utf-8")
     return subprocess.run(
         [sys.executable, "-I", str(READER), "--origin", "wizard", *extra, "--", str(path)],
-        capture_output=True, text=True, check=False, env={**os.environ, **(env or {})},
+        capture_output=True, text=True, check=False,
     )
 
 
-def _name(key: str) -> str:
-    return "HAL0_MODELS_DIR" if key == "path" else "HAL0_FLM_MODELS_DIR"
+_HOSTILE_NAMES = [
+    "x\nHAL0_HERMES_TERMINAL=1",
+    "x'\"$(id)`id`",
+    "x\x1b]0;owned\x07\x1b[31m",
+    "x\\nHAL0_PORT=1",
+    "#saved AAAA",
+]
 
 
-@pytest.mark.parametrize("key", _STORE_KEYS)
-def test_a_symlinked_ancestor_resolving_to_an_allowed_place_is_accepted_and_resolved(
-        tmp_path: Path, key: str) -> None:
-    real = tmp_path / "real"
-    real.mkdir()
-    (tmp_path / "link").symlink_to(real)
-    proc = _store(tmp_path, key, str(tmp_path / "link" / "a" / "models"), _ME)
-    assert f"{_name(key)}={real}/a/models" in lines(proc)
-    assert proc.stderr == ""  # nothing is said about the change
-    saved = _emit({"version": 1, "model_store": {key: str(tmp_path / "link" / "a" / "models")}},
-                  tmp_path, env=_ME)
-    assert json.loads(saved.stdout)["model_store"] == {key: f"{real}/a/models"}
-
-
-@pytest.mark.parametrize("key", _STORE_KEYS)
-def test_a_store_that_is_itself_a_link_to_a_directory_is_exported_resolved(
-        tmp_path: Path, key: str) -> None:
-    real = tmp_path / "tank" / "models"
+@pytest.mark.parametrize("hostile", _HOSTILE_NAMES)
+@pytest.mark.parametrize("origin", ["wizard", "file"])
+def test_a_hostile_folder_behind_a_link_never_reaches_the_output(tmp_path: Path, hostile: str,
+                                                                 origin: str) -> None:
+    # The third pass's attack: the document's text is clean, the folder the link
+    # leads to on disk has a newline, a quote or an escape in its NAME.
+    real = tmp_path / "real" / hostile
     real.mkdir(parents=True)
-    (tmp_path / "models").symlink_to(real)
-    proc = _store(tmp_path, key, str(tmp_path / "models"), _NOT_ME)  # exists: no ancestor rule
-    assert f"{_name(key)}={real}" in lines(proc)
-
-
-@pytest.mark.parametrize("key", _STORE_KEYS)
-def test_a_system_folder_that_is_itself_a_link_is_a_legitimate_path(tmp_path: Path,
-                                                                    key: str) -> None:
-    # like /home -> /var/home: the link is followed, the result is checked
-    (tmp_path / "var" / "home").mkdir(parents=True)
-    (tmp_path / "home").symlink_to(tmp_path / "var" / "home")
-    proc = _store(tmp_path, key, str(tmp_path / "home" / "me" / "models"), _ME)
-    assert f"{_name(key)}={tmp_path}/var/home/me/models" in lines(proc)
-
-
-@pytest.mark.parametrize("key", _STORE_KEYS)
-@pytest.mark.parametrize("target", ["/etc", "/usr/share", "/var/lib/other", "/var/log", "/run"])
-def test_a_link_resolving_into_a_denied_tree_is_refused(tmp_path: Path, key: str,
-                                                        target: str) -> None:
-    if not os.path.isdir(target):
-        pytest.skip(f"{target} does not exist here")
-    (tmp_path / "link").symlink_to(target)
-    for value in (str(tmp_path / "link"), str(tmp_path / "link" / "m" / "models")):
-        proc = _store(tmp_path, key, value, _ME)
-        assert proc.returncode == 2 and proc.stdout == "", value
-        assert f"model_store.{key}" in proc.stderr and "system location" in proc.stderr
-        assert os.path.realpath(target) + "/" not in proc.stderr.replace(value, "")
-
-
-@pytest.mark.parametrize("key", _STORE_KEYS)
-def test_the_depth_rule_runs_on_the_canonical_path(tmp_path: Path, key: str) -> None:
-    # /x/link -> / : two components as written, none once resolved
-    (tmp_path / "link").symlink_to("/")
-    proc = _store(tmp_path, key, str(tmp_path / "link"), _ME)
-    assert proc.returncode == 2 and proc.stdout == ""
-
-
-def test_the_canonical_path_is_never_echoed_in_a_message(tmp_path: Path) -> None:
-    real = tmp_path / "secret-real-name"
-    real.mkdir()
     (tmp_path / "link").symlink_to(real)
-    proc = _store(tmp_path, "path", str(tmp_path / "link" / "m"), _NOT_ME)
+    store = f"{tmp_path}/link"
+    doc = {"version": 1, "model_store": {"path": f"{store}/models", "flm_path": f"{store}/models/flm"}}
+    proc = run(doc, tmp_path, origin=origin)
+    assert lines(proc) == [
+        "HAL0_NONINTERACTIVE=1",
+        f"HAL0_MODELS_DIR={store}/models",
+        f"HAL0_FLM_MODELS_DIR={store}/models/flm",
+    ]
+    assert len(proc.stdout.splitlines()) == 4  # nothing more than the three lines and #saved
+    assert saved_of(proc)["model_store"] == doc["model_store"]
+    assert proc.stderr == ""
+    assert hostile not in proc.stdout and "real" not in proc.stdout
+    # the store itself being the link: the same
+    proc = run({"version": 1, "model_store": {"path": store}}, tmp_path, origin=origin)
+    assert lines(proc) == ["HAL0_NONINTERACTIVE=1", f"HAL0_MODELS_DIR={store}"]
+    saved = _emit(doc, tmp_path)
+    assert saved.returncode == 0 and json.loads(saved.stdout)["model_store"] == doc["model_store"]
+    assert hostile not in saved.stdout
+
+
+def _no_disk_for(monkeypatch, reader, roots: tuple[str, ...]) -> list[str]:
+    """Make any filesystem look at a path under ROOTS fail the test; return the log."""
+    seen: list[str] = []
+
+    def guard(name, real):
+        def wrapped(target, *args, **kwargs):
+            text = os.fsdecode(target) if isinstance(target, (str, bytes, os.PathLike)) else ""
+            if any(text == root or text.startswith(root + "/") or root.startswith(text + "/")
+                   and text not in ("", "/") for root in roots):
+                seen.append(f"{name}({text})")
+                raise AssertionError(f"the reader called {name} on {text!r}")
+            return real(target, *args, **kwargs)
+        return wrapped
+
+    for mod, name in ((reader.os, "stat"), (reader.os, "lstat"), (reader.os, "open"),
+                      (reader.os, "listdir"), (reader.os, "scandir"), (reader.os, "access"),
+                      (reader.os.path, "exists"), (reader.os.path, "lexists"),
+                      (reader.os.path, "isdir"), (reader.os.path, "islink"),
+                      (reader.os.path, "realpath")):
+        monkeypatch.setattr(mod, name, guard(name, getattr(mod, name)))
+    return seen
+
+
+@pytest.mark.parametrize("mode", ["apply", "saved"])
+def test_the_reader_makes_no_filesystem_call_for_either_path(tmp_path: Path, monkeypatch,
+                                                             capsys, mode: str) -> None:
+    reader = _reader_module()
+    existing = tmp_path / "probe-store"
+    (existing / "flm").mkdir(parents=True)
+    for store in (str(existing), "/srv/hal0-lexical-probe/models"):
+        doc = tmp_path / "answers.json"
+        doc.write_text(json.dumps({"version": 1, "model_store": {
+            "path": store, "flm_path": f"{store}/flm"}}), encoding="utf-8")
+        manifest = _manifest(tmp_path)
+        with monkeypatch.context() as patch:
+            seen = _no_disk_for(patch, reader, (store,))
+            argv = (["--origin", "wizard", "--models-manifest", str(manifest), "--", str(doc)]
+                    if mode == "apply" else
+                    ["--models-manifest", str(manifest), "--emit-saved", str(doc)])
+            rc = reader.main(argv)
+        out = capsys.readouterr()
+        assert seen == [] and rc == 0, (seen, out.err)
+        assert store in out.out
+
+
+def test_the_reader_source_has_no_filesystem_probe_left() -> None:
+    text = READER.read_text(encoding="utf-8")
+    for gone in ("_canonical", "_safe_location", "_unsafe_parent", "_denied_by_identity",
+                 "_identity", "HAL0_ANSWERS_TEST_ROOT_UID", "os.lstat", "os.stat(",
+                 "os.path.exists", "os.path.lexists", "os.path.isdir"):
+        assert gone not in text, gone
+    # the one realpath left locates the reader's own manifest file, never a document path
+    assert text.count("realpath") == 1 and "os.path.realpath(__file__)" in text
+
+
+@pytest.mark.parametrize("bad", ["/mnt/café", "/mnt/١٢", "/mnt/ａ",
+                                 "/mnt/a b", "/mnt/models\n", "/mnt/x y"])
+def test_non_ascii_letters_and_a_trailing_newline_are_refused(tmp_path: Path, bad: str) -> None:
+    for key in _STORE_KEYS:
+        proc = run({"version": 1, "model_store": {key: bad}}, tmp_path)
+        assert proc.returncode == 2 and proc.stdout == "", (key, bad)
+        assert f"model_store.{key}" in proc.stderr
+
+
+@pytest.mark.parametrize("key", _STORE_KEYS)
+def test_a_path_longer_than_4096_characters_is_refused(tmp_path: Path, key: str) -> None:
+    value = "/var/lib/hal0/models/" + "a" * 4096
+    proc = run({"version": 1, "model_store": {key: value}}, tmp_path)
+    assert proc.returncode == 2 and "longer than 4096" in proc.stderr
+    assert "a" * 100 not in proc.stderr
+
+
+# ── model_store.flm_path: only a folder inside the model store ──────────────
+
+
+@pytest.mark.parametrize(("store", "flm", "ok"), [
+    (None, "/var/lib/hal0/models/flm", True),
+    (None, "/var/lib/hal0/models/npu/flm", True),
+    (None, "/var/lib/hal0/models", False),       # the store itself is not inside it
+    (None, "/var/lib/hal0/modelsx/flm", False),  # a look-alike, compared by component
+    (None, "/var/lib/hal0/flm", False),
+    (None, "/mnt/disk/flm", False),
+    (None, "/home/alice/.config/systemd/user", False),
+    ("/mnt/disk/models", "/mnt/disk/models/flm", True),
+    ("/mnt/disk/models", "//mnt//disk/models/./flm/", True),
+    ("/mnt/disk/models", "/mnt/disk/models", False),
+    ("/mnt/disk/models", "/mnt/disk/modelsx/flm", False),
+    ("/mnt/disk/models", "/mnt/disk/flm", False),
+    ("/mnt/disk/models", "/var/lib/hal0/models/flm", False),  # the default store is not the store now
+    ("/mnt/disk/models/", "/mnt/disk/models/flm", True),
+])
+def test_flm_path_must_be_inside_the_model_store(tmp_path: Path, store: str | None, flm: str,
+                                                 ok: bool) -> None:
+    section = {"flm_path": flm} if store is None else {"path": store, "flm_path": flm}
+    proc = run({"version": 1, "model_store": section}, tmp_path)
+    if ok:
+        assert f"HAL0_FLM_MODELS_DIR={reader_normal(flm)}" in lines(proc)
+    else:
+        assert proc.returncode == 2 and proc.stdout == ""
+        assert "model_store.flm_path" in proc.stderr and _OUTSIDE_STORE in proc.stderr
+        assert "set HAL0_FLM_MODELS_DIR in the environment when running the installer" in proc.stderr
+
+
+def reader_normal(path: str) -> str:
+    return "/" + "/".join(p for p in path.split("/") if p not in ("", "."))
+
+
+def test_a_refused_store_path_does_not_add_a_second_error_for_flm(tmp_path: Path) -> None:
+    proc = run({"version": 1, "model_store": {"path": "/etc/m", "flm_path": "/etc/m/flm"}}, tmp_path)
     assert proc.returncode == 2
-    assert "secret-real-name" not in proc.stderr
+    assert proc.stderr.count("error:") == 1 and "model_store.path" in proc.stderr
 
 
-@pytest.mark.parametrize("key", _STORE_KEYS)
-def test_a_missing_store_under_a_user_owned_ancestor_is_refused(tmp_path: Path, key: str) -> None:
-    proc = _store(tmp_path, key, str(tmp_path / "a" / "models"), _NOT_ME)
-    assert proc.returncode == 2 and proc.stdout == ""
-    assert f"model_store.{key}" in proc.stderr
-    assert "does not exist" in proc.stderr and "only root can change" in proc.stderr
-    assert "create the folder first" in proc.stderr and "a disk that root owns" in proc.stderr
-    assert str(tmp_path) not in proc.stderr.replace(str(tmp_path / "a" / "models"), "")
+# ── the default store comes from the command line ───────────────────────────
 
 
-@pytest.mark.parametrize("key", _STORE_KEYS)
-@pytest.mark.parametrize("mode", [0o775, 0o1777, 0o757])
-def test_a_missing_store_under_a_writable_ancestor_is_refused(tmp_path: Path, key: str,
-                                                              mode: int) -> None:
-    parent = tmp_path / "p"
-    parent.mkdir()
-    parent.chmod(mode)
-    proc = _store(tmp_path, key, str(parent / "models"), _ME)
-    assert proc.returncode == 2 and "does not exist" in proc.stderr
-
-
-@pytest.mark.parametrize("key", _STORE_KEYS)
-def test_an_existing_store_under_a_user_owned_ancestor_is_accepted(tmp_path: Path,
-                                                                   key: str) -> None:
-    (tmp_path / "a" / "models").mkdir(parents=True)
-    proc = _store(tmp_path, key, str(tmp_path / "a" / "models"), _NOT_ME)
-    assert f"{_name(key)}={tmp_path}/a/models" in lines(proc)
-
-
-@pytest.mark.parametrize("key", _STORE_KEYS)
-def test_a_missing_store_under_a_root_owned_ancestor_is_accepted(tmp_path: Path, key: str) -> None:
-    proc = _store(tmp_path, key, str(tmp_path / "a" / "models"), _ME)
-    assert f"{_name(key)}={tmp_path}/a/models" in lines(proc)
-
-
-@pytest.mark.parametrize("key", _STORE_KEYS)
-def test_a_missing_store_with_a_dangling_link_on_the_way_is_refused(tmp_path: Path,
-                                                                    key: str) -> None:
-    (tmp_path / "link").symlink_to(tmp_path / "nowhere")
-    proc = _store(tmp_path, key, str(tmp_path / "link" / "models"), _ME)
-    assert proc.returncode == 2 and f"model_store.{key}" in proc.stderr
-    assert str(tmp_path / "nowhere") not in proc.stderr
-
-
-@pytest.mark.parametrize("key", _STORE_KEYS)
-def test_the_default_store_needs_no_safe_parent_and_the_rule_is_not_waived_elsewhere(
-        tmp_path: Path, key: str) -> None:
-    proc = _store(tmp_path, key, "/var/lib/hal0/models/x", _NOT_ME)
-    assert proc.returncode == 0, proc.stderr
-    proc = _store(tmp_path, key, "/var/lib/hal0/models-x/x", _NOT_ME)
-    assert proc.returncode == 2
-
-
-@pytest.mark.parametrize("key", _STORE_KEYS)
-def test_default_store_argument_makes_a_dev_prefix_store_acceptable(tmp_path: Path,
-                                                                    key: str) -> None:
-    dev = tmp_path / "dev" / "var" / "lib" / "hal0"  # nothing exists: a fresh --dev prefix
-    value = f"{dev}/models/store"
-    refused = _store(tmp_path, key, value, _NOT_ME)
-    assert refused.returncode == 2
-    accepted = _store(tmp_path, key, value, _NOT_ME, "--default-store", f"{dev}/models")
-    assert f"{_name(key)}={value}" in lines(accepted)
+def test_default_store_argument_moves_the_flm_rule_to_a_dev_prefix(tmp_path: Path) -> None:
+    dev = tmp_path / "dev" / "var" / "lib" / "hal0"
+    value = f"{dev}/models/flm"
+    refused = _store(tmp_path, "flm_path", value)
+    assert refused.returncode == 2 and _OUTSIDE_STORE in refused.stderr
+    accepted = _store(tmp_path, "flm_path", value, "--default-store", f"{dev}/models")
+    assert f"HAL0_FLM_MODELS_DIR={value}" in lines(accepted)
     saved = subprocess.run(
         [sys.executable, "-I", str(READER), "--default-store", f"{dev}/models",
          "--emit-saved", str(tmp_path / "answers.json")],
-        capture_output=True, text=True, check=False, env={**os.environ, **_NOT_ME},
+        capture_output=True, text=True, check=False,
     )
     assert saved.returncode == 0, saved.stderr
-    assert json.loads(saved.stdout)["model_store"] == {key: value}
+    assert json.loads(saved.stdout)["model_store"] == {"flm_path": value}
 
 
 def test_default_store_argument_is_the_only_exception_it_names(tmp_path: Path) -> None:
     # the literal /var/lib/hal0/models stops being special once another store is passed
-    proc = _store(tmp_path, "path", "/var/lib/hal0/models/x", _NOT_ME,
+    proc = _store(tmp_path, "path", "/var/lib/hal0/models/x",
                   "--default-store", str(tmp_path / "dev" / "models"))
     assert proc.returncode == 2 and "system location" in proc.stderr
+    proc = _store(tmp_path, "path", f"{tmp_path}/dev/models/x",
+                  "--default-store", str(tmp_path / "dev" / "models"))
+    assert proc.returncode == 0, proc.stderr
 
 
 @pytest.mark.parametrize("bad", ["relative/models", "", "/mnt/with\nnewline", "/mnt/a;b",
-                                 "/mnt/../x", "/" + "a" * 5000])
+                                 "/mnt/../x", "/" + "a" * 5000, "/mnt/café", "/mnt"])
 def test_default_store_argument_is_validated_like_a_path(tmp_path: Path, bad: str) -> None:
     for mode in ("apply", "saved"):
         if mode == "apply":
-            proc = _store(tmp_path, "path", "/mnt/disk/models", None, "--default-store", bad)
+            proc = _store(tmp_path, "path", "/mnt/disk/models", "--default-store", bad)
         else:
             (tmp_path / "answers.json").write_text('{"version": 1}', encoding="utf-8")
             proc = subprocess.run(
@@ -1438,5 +1340,55 @@ def test_a_document_cannot_name_the_default_store(tmp_path: Path) -> None:
     doc = {"version": 1, "model_store": {"path": "/mnt/disk/models", "default_store": "/etc"},
            "default_store": "/etc"}
     proc = run(doc, tmp_path)
-    assert proc.returncode == 0 and "default_store" not in proc.stdout
-    assert all("/etc" not in line for line in proc.stdout.splitlines())
+    assert proc.returncode == 0 and "default_store" not in "".join(lines(proc))
+    assert all("/etc" not in line for line in lines(proc))
+
+
+# ── one read, one run: the saved form is the apply run's last line ──────────
+
+
+def test_the_apply_run_ends_with_exactly_one_saved_line(tmp_path: Path) -> None:
+    proc = run(FULL, tmp_path, manifest=_manifest(tmp_path))
+    out = proc.stdout.splitlines()
+    assert [x for x in out if x.startswith("#saved")] == [out[-1]]
+    assert all(x.startswith("HAL0_") for x in out[:-1])
+    payload = out[-1][len("#saved "):]
+    assert payload and base64.b64encode(base64.b64decode(payload, validate=True)).decode() == payload
+    emitted = _emit(FULL, tmp_path, "--models-manifest", str(_manifest(tmp_path)))
+    assert emitted.returncode == 0, emitted.stderr
+    assert base64.b64decode(payload).decode("utf-8") == emitted.stdout  # the same saved form
+
+
+def test_the_saved_line_drops_the_grant_the_token_and_unknown_keys(tmp_path: Path) -> None:
+    doc = {"version": 1, "huggingface": {"token": "hf_secret"}, "mystery": "hf_secret2",
+           "apps": {"hermes": {"terminal_tool": True}}}
+    proc = run(doc, tmp_path)
+    assert "HAL0_HERMES_TERMINAL=1" in lines(proc)
+    assert saved_of(proc) == {"version": 1, "apps": {"hermes": {}}}
+    assert "hf_secret" not in base64.b64decode(proc.stdout.splitlines()[-1][7:]).decode()
+
+
+def test_a_rejected_document_prints_no_saved_line(tmp_path: Path) -> None:
+    proc = run({"version": 1, "network": {"port": 0}}, tmp_path)
+    assert proc.returncode == 2 and proc.stdout == ""
+
+
+# ── message volume is capped ────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize(("strict", "kind"), [(False, "warning"), (True, "error")])
+@pytest.mark.parametrize("count", [20, 21, 500])
+def test_messages_are_capped_at_twenty_per_kind(tmp_path: Path, strict: bool, kind: str,
+                                                count: int) -> None:
+    doc = {"version": 1, "strict": strict, **{f"unknown{i:04d}": 1 for i in range(count)}}
+    proc = run(doc, tmp_path)
+    assert proc.returncode == (2 if strict else 0)
+    err = proc.stderr.splitlines()
+    shown = [x for x in err if x.startswith(f"{kind}: ") and "unknown" in x]
+    assert len(shown) == min(count, 20)
+    more = [x for x in err if x.startswith(f"{kind}: ... and ")]
+    if count > 20:
+        assert more == [f"{kind}: ... and {count - 20} more"]
+    else:
+        assert more == []
+    assert len(err) <= 21 + (1 if strict else 0)
