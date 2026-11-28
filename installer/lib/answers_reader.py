@@ -1,7 +1,13 @@
 #!/usr/bin/env python3
 """Read an installer answers document and print allow-listed NAME=value lines.
 
-Usage:  python3 -I answers_reader.py --origin wizard|file [--default-store PATH] [--] DOCUMENT.json
+Usage:  python3 -I answers_reader.py --origin wizard|file [--screens-shown]
+            [--default-store PATH] [--] DOCUMENT.json
+
+`--screens-shown` (origin wizard only; any other origin is a usage error, exit 2)
+says the caller ran the setup screens in front of a person who confirmed the
+review screen. Only then does a false or absent apps.hermes.terminal_tool print
+HAL0_HERMES_TERMINAL=0. A document cannot say it.
 
 Runs as root, before hal0's package is installed: standard library only, one
 file, Python 3.10 or newer. The document is data. This program never evaluates
@@ -806,6 +812,7 @@ def _build(
     problems: _Problems,
     manifest_path: str = _MANIFEST,
     default_store: str = DEFAULT_STORE,
+    screens_shown: bool = False,
 ) -> dict[str, str]:
     out: dict[str, str] = {"HAL0_NONINTERACTIVE": "1"}
 
@@ -874,6 +881,12 @@ def _build(
                 "apps.hermes.terminal_tool is only honoured when chosen in the install "
                 "wizard; ignored for an answers file (the terminal tool stays off)"
             )
+    elif screens_shown and origin == "wizard":
+        # A person saw the review screen and confirmed it: an unticked or absent
+        # row is their answer, so the box is made to match it. Only the caller's
+        # --screens-shown (a wizard run that showed screens) says so; a document
+        # cannot, and nothing else ever emits 0.
+        out["HAL0_HERMES_TERMINAL"] = "0"
     pi = _bool(entries["pi"], "enabled", "apps.pi", problems)
     if pi is True:
         out["HAL0_INSTALL_PI"] = "1"
@@ -1060,6 +1073,7 @@ class _Options:
         self.path: str | None = None
         self.manifest = _MANIFEST
         self.default_store = DEFAULT_STORE
+        self.screens_shown = False
 
 
 def _valid_default_store(value: str) -> bool:
@@ -1087,6 +1101,8 @@ def _parse_args(argv: list[str]) -> _Options | None:
             opts.default_store = _normal(args[0]) if args[0].startswith("/") else args[0]
             args.pop(0)
             seen_store = True
+        elif arg == "--screens-shown" and not opts.screens_shown:
+            opts.screens_shown = True
         elif arg == "--":
             if len(args) == 1 and opts.path is None:
                 opts.path = args.pop(0)
@@ -1097,6 +1113,8 @@ def _parse_args(argv: list[str]) -> _Options | None:
         else:
             return None
     if opts.origin not in ORIGINS or not opts.path:
+        return None
+    if opts.screens_shown and opts.origin != "wizard":
         return None
     return opts
 
@@ -1228,8 +1246,8 @@ def main(argv: list[str]) -> int:
     opts = _parse_args(argv)
     if opts is None or opts.origin is None or opts.path is None:
         sys.stderr.write(
-            "usage: answers_reader.py --origin wizard|file [--models-manifest PATH] "
-            "[--default-store PATH] [--] DOCUMENT.json\n"
+            "usage: answers_reader.py --origin wizard|file [--screens-shown] "
+            "[--models-manifest PATH] [--default-store PATH] [--] DOCUMENT.json\n"
         )
         return 2
     if _bad_default_store(opts.default_store):
@@ -1240,7 +1258,14 @@ def main(argv: list[str]) -> int:
     if doc is not None:
         try:
             _walk_strings(doc, "", problems)
-            values = _build(doc, opts.origin, problems, opts.manifest, opts.default_store)
+            values = _build(
+                doc,
+                opts.origin,
+                problems,
+                opts.manifest,
+                opts.default_store,
+                opts.screens_shown,
+            )
             for name in ALLOWED_NAMES:
                 if name in values:
                     lines.append(f"{name}={values[name]}")

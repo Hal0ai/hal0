@@ -86,6 +86,58 @@ def test_terminal_name_refused_for_file_origin(tmp_path: Path) -> None:
     assert proc.stdout.splitlines() == ["rc=1", "unset"]
 
 
+def _flag_reader(tmp_path: Path) -> Path:
+    """A stand-in reader that prints what it was given, and the flag it saw as a name."""
+    fake = tmp_path / "flag_reader.py"
+    fake.write_text(
+        "import sys\n"
+        "argv = sys.argv[1:]\n"
+        "open(sys.argv[0] + '.argv', 'w').write(' '.join(argv))\n"
+        "if '--screens-shown' in argv:\n"
+        "    print('HAL0_HERMES_TERMINAL=0')\n"
+        f"print({SAVED!r})\n",
+        encoding="utf-8",
+    )
+    return fake
+
+
+def test_screens_shown_reaches_the_reader_for_the_wizard_origin(tmp_path: Path) -> None:
+    fake = _flag_reader(tmp_path)
+    proc = _bash(
+        'hal0_apply_answers /x/doc.json wizard screens-shown; echo "rc=$?"; '
+        'echo "${HAL0_HERMES_TERMINAL:-unset}"',
+        tmp_path,
+        reader=fake,
+    )
+    assert proc.stdout.splitlines() == ["rc=0", "0"], proc.stderr
+    assert "--origin wizard --screens-shown" in (tmp_path / "flag_reader.py.argv").read_text()
+    # without the third argument the reader never sees the flag
+    proc = _bash(
+        'hal0_apply_answers /x/doc.json wizard; echo "rc=$?"; echo "${HAL0_HERMES_TERMINAL:-unset}"',
+        tmp_path,
+        reader=fake,
+    )
+    assert proc.stdout.splitlines() == ["rc=0", "unset"], proc.stderr
+    assert "--screens-shown" not in (tmp_path / "flag_reader.py.argv").read_text()
+
+
+def test_screens_shown_is_refused_for_the_file_origin_before_the_reader_runs(
+    tmp_path: Path,
+) -> None:
+    fake = _flag_reader(tmp_path)
+    for third in ("screens-shown", "yes", "--screens-shown"):
+        proc = _bash(
+            f'hal0_apply_answers /x/doc.json file {third}; echo "rc=$?"; '
+            'echo "${HAL0_HERMES_TERMINAL:-unset}"',
+            tmp_path,
+            reader=fake,
+        )
+        assert proc.stdout.splitlines() == ["rc=1", "unset"], (third, proc.stderr)
+        assert not (tmp_path / "flag_reader.py.argv").exists(), third
+    proc = _bash('hal0_apply_answers /x/doc.json wizard yes; echo "rc=$?"', tmp_path, reader=fake)
+    assert proc.stdout.splitlines() == ["rc=1"] and not (tmp_path / "flag_reader.py.argv").exists()
+
+
 def test_value_with_spaces_and_equals_survives(tmp_path: Path) -> None:
     path = "/mnt/my models/a=b"
     doc = _doc(tmp_path, {"version": 1, "model_store": {"path": path, "flm_path": f"{path}/x="}})

@@ -328,7 +328,8 @@ force the flag/env values everywhere.
 
 HAL0_HERMES_TERMINAL=1 gives the bundled Hermes agent a terminal tool, letting
 it run commands as the hal0 user (root-equivalent on this box). It is OFF by
-default and a non-interactive install never enables it.
+default. An unattended install leaves it off unless HAL0_HERMES_TERMINAL=1 is
+set in the environment, which is the explicit opt-in.
 EOF
             exit 0
             ;;

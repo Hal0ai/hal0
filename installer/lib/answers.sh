@@ -104,7 +104,11 @@ _hal0_answers_path_ok() {
         && "${value}" != *[!ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_.+@,:~=/\ -]* ]]
 }
 
-# Apply the answers document at PATH; ORIGIN is `file` or `wizard`.
+# Apply the answers document at PATH; ORIGIN is `file` or `wizard`. The optional
+# third argument `screens-shown` (origin `wizard` only; anything else returns 1
+# before the reader runs) tells the reader the setup screens were shown to a
+# person who confirmed the review screen, which is the one thing that lets it
+# print HAL0_HERMES_TERMINAL=0 (a document cannot say it).
 # Runs the reader ONCE (${PY} -I, standard library only), then exports what it
 # printed. All-or-nothing: every line is checked against the allow-list and
 # collected first; nothing is exported unless every line passed. Values are
@@ -118,7 +122,7 @@ _hal0_answers_path_ok() {
 # Returns 0 on success, the reader's status (2) with its messages on stderr
 # when it rejects the document, or 1 for anything the reader should not print.
 hal0_apply_answers() {
-    local path="${1:-}" origin="${2:-file}"
+    local path="${1:-}" origin="${2:-file}" screens="${3:-}"
     # Names exported by this call (empty until it succeeds); install.sh reads it
     # to tell a document's value from an inherited environment variable.
     HAL0_ANSWERS_EXPORTED=()
@@ -140,9 +144,24 @@ hal0_apply_answers() {
     fi
 
     local output rc=0
-    local -a store_arg=()
+    local -a store_arg=() screens_arg=()
+    case "${screens}" in
+        "") ;;
+        screens-shown)
+            if [[ "${origin}" != "wizard" ]]; then
+                echo "error: only a run of the setup screens can have shown them" >&2
+                return 1
+            fi
+            screens_arg=(--screens-shown)
+            ;;
+        *)
+            echo "error: unknown answers option: ${screens//[^A-Za-z0-9_-]/?}" >&2
+            return 1
+            ;;
+    esac
     _hal0_default_store_arg
     output="$("${_HAL0_ANSWERS_PY}" -I "${_HAL0_ANSWERS_READER}" --origin "${origin}" \
+        "${screens_arg[@]+"${screens_arg[@]}"}" \
         "${store_arg[@]+"${store_arg[@]}"}" -- "${path}")" || rc=$?
     if [[ "${rc}" -ne 0 ]]; then
         echo "Stopped: the answers document was not accepted." >&2
@@ -635,8 +654,8 @@ _hal0_wizard_take_token() {
 #   130 interrupted -> 130
 #   any other code, an exit 0 with no document, or a refused document -> 1
 # The wizard prints its own reasons. Nothing it wrote outlives this call: the
-# work directory, and in it the document, the token file and the chosen-folder
-# file, is removed on every path.
+# work directory, and in it the document, the token file, the chosen-folder
+# file and the screens-shown marker, is removed on every path.
 hal0_run_wizard() {
     unset _HAL0_WIZARD_HF_TOKEN _HAL0_WIZARD_CHOSEN_STORE _HAL0_SAVED_STORE
     HAL0_WIZARD_RAN=0
@@ -682,6 +701,7 @@ _hal0_wizard_call() {
     local dir="${1}" rc=0 headless=0 origin=wizard arg chosen="" line=""
     local out="${dir}/answers.json" secret="${dir}/hf-token.env"
     local chosen_out="${dir}/chosen-folder" saved_copy="${dir}/saved.json"
+    local shown_out="${dir}/screens-shown" screens=""
     local given_copy="${dir}/given.json"
     local -a cmd=() status=()
     export -n line chosen
@@ -696,7 +716,8 @@ _hal0_wizard_call() {
     if [[ -n "${HAL0_FACTS_FILE:-}" && -f "${HAL0_FACTS_FILE}" ]]; then
         cmd+=(--facts "${HAL0_FACTS_FILE}")
     fi
-    cmd+=(--out "${out}" --secret-out "${secret}" --chosen-folder-out "${chosen_out}")
+    cmd+=(--out "${out}" --secret-out "${secret}" --chosen-folder-out "${chosen_out}"
+        --screens-shown-out "${shown_out}")
     if [[ -n "${VERSION:-}" ]]; then
         cmd+=(--hal0-version "${VERSION}")
     fi
@@ -777,6 +798,22 @@ _hal0_wizard_call() {
         fi
     fi
     rm -f -- "${chosen_out}"
+    # The marker that a person confirmed the review screen, written by the
+    # wizard only then. A headless run never shows a screen, so a file there is
+    # ignored. Only the exact text `shown` and a newline counts (one line,
+    # _hal0_wizard_one_line: a regular file of this process's, size equal to the
+    # line plus its newline, so a NUL or a second line is refused); anything
+    # else is one warning and counts as no screens. It was read only because
+    # the wizard exited 0 (every other status returned above).
+    if [[ "${headless}" -eq 0 ]] && [[ -e "${shown_out}" || -L "${shown_out}" ]]; then
+        if _hal0_wizard_own_file "${shown_out}" && _hal0_wizard_one_line "${shown_out}" \
+            && [[ "${line}" == "shown" ]]; then
+            screens="screens-shown"
+        else
+            _hal0_answers_warn "the setup screens' record that the review screen was confirmed was not in the expected form; the Hermes terminal tool is left as it is"
+        fi
+    fi
+    rm -f -- "${shown_out}"
     # A document merged from a given file had no screens: what it says about
     # the Hermes terminal tool came from that file (or from HAL0_HERMES_TERMINAL
     # in the environment, which install.sh honours on its own), so it is applied
@@ -784,7 +821,9 @@ _hal0_wizard_call() {
     if [[ -n "${HAL0_ANSWERS_FILE:-}" ]]; then
         origin="file"
     fi
-    if ! hal0_apply_answers "${out}" "${origin}"; then
+    # Only origin `wizard` can have shown screens (a given document is headless).
+    [[ "${origin}" == "wizard" ]] || screens=""
+    if ! hal0_apply_answers "${out}" "${origin}" "${screens}"; then
         unset _HAL0_WIZARD_HF_TOKEN
         return 1
     fi

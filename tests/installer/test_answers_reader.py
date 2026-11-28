@@ -66,12 +66,13 @@ def run(
     raw: bytes | None = None,
     manifest: Path | None = None,
     env: dict[str, str] | None = None,
+    flags: tuple[str, ...] = (),
 ):
     path = tmp_path / "answers.json"
     path.write_bytes(raw if raw is not None else json.dumps(doc).encode())
     seam = ["--models-manifest", str(manifest)] if manifest else []
     return subprocess.run(
-        [sys.executable, "-I", str(READER), "--origin", origin, *seam, "--", str(path)],
+        [sys.executable, "-I", str(READER), "--origin", origin, *flags, *seam, "--", str(path)],
         capture_output=True,
         text=True,
         check=False,
@@ -440,6 +441,88 @@ def test_terminal_tool_only_for_wizard_origin(tmp_path: Path) -> None:
     proc = run(doc, tmp_path, origin="file")
     assert lines(proc) == ["HAL0_NONINTERACTIVE=1"]
     assert "terminal_tool" in proc.stderr
+
+
+_SCREENS = ("--screens-shown",)
+_TERMINAL_OFF_DOCS = [
+    pytest.param({"version": 1}, id="no-apps"),
+    pytest.param({"version": 1, "apps": {"hermes": {"enabled": True}}}, id="absent"),
+    pytest.param(
+        {"version": 1, "apps": {"hermes": {"enabled": True, "terminal_tool": False}}}, id="false"
+    ),
+    pytest.param(
+        {"version": 1, "apps": {"hermes": {"enabled": False, "terminal_tool": False}}},
+        id="hermes-off",
+    ),
+]
+
+
+@pytest.mark.parametrize("doc", _TERMINAL_OFF_DOCS)
+def test_screens_shown_terminal_off_or_absent_emits_zero(tmp_path: Path, doc: dict) -> None:
+    got = lines(run(doc, tmp_path, origin="wizard", flags=_SCREENS))
+    assert got.count("HAL0_HERMES_TERMINAL=0") == 1
+    assert not any(x.startswith("HAL0_HERMES_TERMINAL=1") for x in got)
+
+
+def test_screens_shown_terminal_true_emits_one(tmp_path: Path) -> None:
+    doc = {"version": 1, "apps": {"hermes": {"terminal_tool": True}}}
+    got = lines(run(doc, tmp_path, origin="wizard", flags=_SCREENS))
+    assert "HAL0_HERMES_TERMINAL=1" in got
+    assert "HAL0_HERMES_TERMINAL=0" not in got
+
+
+@pytest.mark.parametrize("doc", _TERMINAL_OFF_DOCS)
+def test_without_screens_shown_terminal_off_or_absent_emits_nothing(
+    tmp_path: Path, doc: dict
+) -> None:
+    for origin in ("wizard", "file"):
+        got = lines(run(doc, tmp_path, origin=origin))
+        assert not any(x.startswith("HAL0_HERMES_TERMINAL") for x in got), origin
+
+
+def test_a_saved_form_emits_nothing_for_the_terminal_tool(tmp_path: Path) -> None:
+    doc = tmp_path / "doc.json"
+    doc.write_text(
+        json.dumps({"version": 1, "apps": {"hermes": {"terminal_tool": True}}}), encoding="utf-8"
+    )
+    saved = subprocess.run(
+        [sys.executable, "-I", str(READER), "--emit-saved", str(doc)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert saved.returncode == 0, saved.stderr
+    assert "terminal_tool" not in saved.stdout
+    for origin in ("wizard", "file"):
+        got = lines(run(None, tmp_path, origin=origin, raw=saved.stdout.encode()))
+        assert not any(x.startswith("HAL0_HERMES_TERMINAL") for x in got), origin
+
+
+def test_a_document_cannot_claim_the_screens_were_shown(tmp_path: Path) -> None:
+    doc = {"version": 1, "screens_shown": True, "apps": {"hermes": {"screens_shown": True}}}
+    got = lines(run(doc, tmp_path, origin="wizard"))
+    assert not any(x.startswith("HAL0_HERMES_TERMINAL") for x in got)
+
+
+def test_screens_shown_with_origin_file_is_a_usage_error(tmp_path: Path) -> None:
+    doc = {"version": 1, "apps": {"hermes": {"terminal_tool": False}}}
+    proc = run(doc, tmp_path, origin="file", flags=_SCREENS)
+    assert proc.returncode == 2 and proc.stdout == ""
+    assert "usage" in proc.stderr
+    # in either order, and given twice
+    path = tmp_path / "answers.json"
+    for argv in (
+        ["--screens-shown", "--origin", "file", "--", str(path)],
+        ["--origin", "wizard", "--screens-shown", "--screens-shown", "--", str(path)],
+        ["--origin", "wizard", "--screens-shown=1", "--", str(path)],
+    ):
+        again = subprocess.run(
+            [sys.executable, "-I", str(READER), *argv],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert again.returncode == 2 and again.stdout == "", argv
 
 
 @pytest.mark.parametrize(
