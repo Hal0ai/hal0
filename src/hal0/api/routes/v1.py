@@ -1171,22 +1171,50 @@ def _client_gone_response(request: Request) -> Response:
 
 
 #: Response headers naming what actually answered a ``/v1`` request (#4017).
-#: A caller may address a slot by name or alias, and the dispatcher may send a
-#: model the slot serves in place of the one named, so the request's ``model``
-#: is not proof of which model produced the reply. Additive: the body is
-#: unchanged.
+#: A caller may address a slot by name or alias, and a request for a model no
+#: slot is bound to can be answered by a default slot serving another model,
+#: so the request's ``model`` is not proof of which model produced the reply.
+#: Additive: the body is unchanged.
 RESOLVED_MODEL_HEADER = "X-hal0-Resolved-Model"
 RESOLVED_SLOT_HEADER = "X-hal0-Slot"
 
 
-def _stamp_resolved(response: Response, *, model: str, slot: str) -> None:
-    """Add the resolved-model and slot headers to ``response`` when known.
+def _resolved_identity(request: Request, call: Any) -> tuple[str, str]:
+    """``(model, slot)`` that answered ``call``; either may be ``""`` (unknown).
 
-    Values that cannot be sent as a header (non-ASCII, control characters) are
-    left out rather than mangled.
+    For a slot, the model is read from the slot's own state (what it has
+    loaded), never from the routing decision: the dispatcher's fallback path
+    records the caller's requested name as ``resolved_model``, which is the
+    one value this header must not repeat. For a remote provider there is no
+    slot, and the model is the id hal0 sent upstream.
+    """
+    slot = (
+        getattr(call, "slot_name", "") or getattr(call, "container_slot_name", "") or ""
+    ).strip()
+    if not slot:
+        return (getattr(call, "resolved_model", "") or "").strip(), ""
+    slot_manager = getattr(request.app.state, "slot_manager", None)
+    loaded = getattr(slot_manager, "loaded_model_id", None)
+    try:
+        model = loaded(slot) if callable(loaded) else ""
+    except Exception:
+        model = ""
+    return (model if isinstance(model, str) else ""), slot
+
+
+def _stamp_resolved(response: Response, *, model: str, slot: str) -> None:
+    """Set the resolved-model and slot headers on ``response``, or remove them.
+
+    Whatever the upstream sent under these names is dropped first: they are
+    hal0's statement, and an upstream that happens to send one (another hal0
+    behind this one) must not be passed through as if hal0 had said it. A
+    value hal0 does not know, or one a header cannot carry (non-ASCII,
+    control characters, surrounding spaces), leaves the header absent.
     """
     for header, value in ((RESOLVED_MODEL_HEADER, model), (RESOLVED_SLOT_HEADER, slot)):
-        if value and value.isascii() and value.isprintable():
+        if header in response.headers:
+            del response.headers[header]
+        if value and value == value.strip() and value.isascii() and value.isprintable():
             response.headers[header] = value
 
 
@@ -1223,8 +1251,11 @@ async def _dispatch_and_forward_probed(
         body = await _rewrite_chat_slot_alias(request, body)
         # #430: backend-aware load BEFORE dispatch, so a slot-backed model is
         # loaded under its declared backend whichever routing path dispatch
-        # then takes. A model no upstream serves surfaces as the dispatcher's
-        # NoRouteFound envelope (404) — there is no catch-all fall-through.
+        # then takes. A model no upstream serves is NOT always a 404: the
+        # dispatcher's capability fallback can send it to a default slot of
+        # the right kind (#4017), which is why the response names the slot
+        # and the model that answered (``_stamp_resolved``). Only when no
+        # such slot exists does it surface as NoRouteFound.
         loading_since = time.monotonic()
         await _ensure_backend_for_model(request, body)
         if _load_was_slow(loading_since) and await probe():
@@ -1272,11 +1303,8 @@ async def _dispatch_and_forward_probed(
             seam.record_error(exc, call=call, request=request, t_entry=t_entry)
         raise
     if isinstance(response, Response):
-        _stamp_resolved(
-            response,
-            model=getattr(call, "resolved_model", "") or "",
-            slot=getattr(call, "slot_name", "") or getattr(call, "container_slot_name", "") or "",
-        )
+        model, slot = _resolved_identity(request, call)
+        _stamp_resolved(response, model=model, slot=slot)
     if isinstance(response, StreamingResponse):
         response = _instrument_streaming_throughput(
             response,
@@ -2019,6 +2047,21 @@ async def _npu_embed_tag(request: Request, body: dict[str, Any]) -> str:
     model_section = (cfg or {}).get("model") or {}
     default = model_section.get("default", "") if isinstance(model_section, dict) else ""
     return default.strip() if isinstance(default, str) and default.strip() else FLM_EMBED_TAG
+
+
+async def _npu_trio_default(request: Request, slot_type: str, requested: str) -> str:
+    """The ``[model].default`` of the NPU trio slot ``requested`` addresses, or ``""``."""
+    slot_manager = getattr(request.app.state, "slot_manager", None)
+    if slot_manager is None or not isinstance(requested, str):
+        return ""
+    try:
+        configs = await slot_manager.iter_configs()
+    except Exception:
+        return ""
+    cfg = _match_npu_trio_cfg(configs, slot_type, requested.strip())
+    model_section = (cfg or {}).get("model") or {}
+    default = model_section.get("default", "") if isinstance(model_section, dict) else ""
+    return default.strip() if isinstance(default, str) else ""
 
 
 async def _dispatch_via_npu_trio(
@@ -2919,7 +2962,13 @@ async def _forward_multipart(
                     content_type=content_type,
                 )
                 _touch_npu_shadow_count(request, "flm-stt")
-                return _wrap_npu_trio_response(upstream_resp)
+                stt_response = _wrap_npu_trio_response(upstream_resp)
+                _stamp_resolved(
+                    stt_response,
+                    model=await _npu_trio_default(request, "transcription", model_value),
+                    slot="flm-stt",
+                )
+                return stt_response
 
     call = await dispatcher.dispatch(request, body={"model": model_value} if model_value else {})
 
@@ -2933,7 +2982,11 @@ async def _forward_multipart(
 
     # Reuse the dispatcher's existing forward path.
     try:
-        return await dispatcher.forward(call)
+        forwarded = await dispatcher.forward(call)
+        if isinstance(forwarded, Response):
+            model, slot = _resolved_identity(request, call)
+            _stamp_resolved(forwarded, model=model, slot=slot)
+        return forwarded
     except httpx.HTTPError as exc:
         from hal0.dispatcher.router import UpstreamUnavailable
 

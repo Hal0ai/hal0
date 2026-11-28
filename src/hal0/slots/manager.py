@@ -1488,6 +1488,20 @@ class SlotManager:
         """
         return self._current_state(self._resolve_alias(name))
 
+    def loaded_model_id(self, name: str) -> str:
+        """The registry id of the model *name* has loaded, or ``""``.
+
+        Read from the slot's own state record, so it is what the slot serves
+        and not what a request asked for. Empty for an unknown slot, a slot
+        outside the dispatchable ready-set, or a record with no model. Never
+        raises; synchronous like :meth:`state`.
+        """
+        key = self._resolve_alias(name)
+        if self._current_state(key) not in DISPATCHABLE_STATES:
+            return ""
+        rec = self._states.get(self._key(key))
+        return (rec.model_id or "").strip() if rec is not None else ""
+
     def is_ready_for_dispatch(self, name: str) -> bool:
         """Return ``True`` when *name* is in the dispatchable ready-set.
 

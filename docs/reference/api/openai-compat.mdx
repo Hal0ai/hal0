@@ -188,16 +188,24 @@ rendered through.
 - **`/v1/models` default filtering** — hides non-text-modality models unless
   `?show_all=true` is passed; `GET /v1/models/{id}` bypasses the filter.
 
-Every dispatched response carries two hal0 headers that name what answered:
+Responses from `/v1/chat/completions`, `/v1/completions`, `/v1/embeddings`, `/v1/rerankings` and
+`/v1/audio/transcriptions` carry two hal0 headers that name what answered:
 
-- **`X-hal0-Resolved-Model`**: the model id sent to the slot. It can differ
-  from the `model` you sent: a slot name or alias resolves to the slot's
-  model, and a slot that does not serve the named model is sent the one it
-  has loaded. The `model` field in the body is whatever the backend returns
-  and may echo your request, so read this header when the exact model
-  matters, for example before storing embeddings.
+- **`X-hal0-Resolved-Model`**: for a slot, the registry id of the model that
+  slot had loaded when it answered; for a remote provider, the model id hal0
+  sent to it. It can differ from the `model` you sent: a slot name or alias
+  resolves to the slot's model, and a request for a model no slot is bound to
+  can be answered by the default slot of the right kind, which serves its own
+  model. The `model` field in the body is whatever the backend returns and may
+  echo your request, so read this header when the exact model matters, for
+  example before storing embeddings. The header is absent when hal0 does not
+  know the model; it never repeats the name you sent as a guess.
 - **`X-hal0-Slot`**: the slot that served the request. Absent for a remote
   provider that is not a slot.
+
+hal0 sets both itself and drops any header of the same name an upstream sends.
+They are not set on `/v1/images/generations`, `/v1/systemone` or a response
+assembled by the `"omni": true` loop, which may involve more than one slot.
 
 ## Hermes models
 

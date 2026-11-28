@@ -419,3 +419,32 @@ def test_scrubber_does_not_touch_non_audio_routes(
     assert r.status_code == 500
     # Body unchanged — the chat route never touches the scrubber.
     assert "ffmpeg" in r.text
+
+
+def test_v1_audio_transcriptions_names_the_slot_and_drops_an_upstream_copy(
+    client: TestClient,
+) -> None:
+    """#4017: the transcription path carries hal0's slot header, and a header
+    of the same name sent by the speech-to-text server does not get through."""
+    _seed_stt_upstream(client)
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={"text": "hello"},
+            headers={"X-hal0-Slot": "from-upstream", "X-hal0-Resolved-Model": "from-upstream"},
+        )
+
+    _install_mock_transport(client, handler)
+    files = {"file": ("clip.wav", b"RIFF" + b"\x00" * 64, "audio/wav")}
+    r = client.post(
+        "/v1/audio/transcriptions", files=files, data={"model": "moonshine-small-streaming-en"}
+    )
+
+    assert r.status_code == 200, r.text
+    assert r.headers.get("x-hal0-slot") not in (None, "from-upstream")
+    assert r.headers.get("x-hal0-resolved-model") != "from-upstream"
+    assert r.headers.get("x-hal0-resolved-model") != "moonshine-small-streaming-en" or (
+        client.app.state.slot_manager.loaded_model_id(r.headers["x-hal0-slot"])
+        == "moonshine-small-streaming-en"
+    )
