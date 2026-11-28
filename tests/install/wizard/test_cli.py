@@ -719,3 +719,152 @@ def test_plain_form_can_ask_about_a_numbered_line(
 def _second_job_ids(catalog: Catalog) -> list[str]:
     """The id of the second job on the Customize screen: the assistant."""
     return [c.id for c in catalog.components if "assistant that carries out" in c.label]
+
+
+# ------------------------------------------------- amendments before review
+
+
+@pytest.fixture
+def consent_upgrade_facts_path(tmp_path: Path) -> Path:
+    return _facts_file(
+        tmp_path,
+        "consent-upgrade.json",
+        gpu={"outcome": "cpu_only_needs_consent"},
+        install={"state": "upgrade", "version": "1.0"},
+    )
+
+
+def test_saved_cpu_only_consent_lets_an_upgrade_continue(
+    catalog_path: Path, tmp_path: Path, consent_upgrade_facts_path: Path
+) -> None:
+    saved = _write_json(tmp_path / "saved-consent.json", {"hardware": {"allow_cpu_only": True}})
+    out = tmp_path / "a.json"
+    r = wizard(
+        "--catalog",
+        catalog_path,
+        "--facts",
+        consent_upgrade_facts_path,
+        "--saved",
+        saved,
+        "--out",
+        out,
+    )
+    assert r.returncode == 0 and r.stderr == ""
+    assert json.loads(out.read_text())["hardware"]["allow_cpu_only"] is True
+
+
+def test_given_cpu_only_consent_lets_a_headless_run_continue(
+    catalog_path: Path, tmp_path: Path, consent_facts_path: Path
+) -> None:
+    given = _write_json(tmp_path / "given-consent.json", {"hardware": {"allow_cpu_only": True}})
+    r = wizard(
+        "--catalog",
+        catalog_path,
+        "--facts",
+        consent_facts_path,
+        "--answers",
+        given,
+        "--out",
+        tmp_path / "a.json",
+        "--headless",
+    )
+    assert r.returncode == 0
+
+
+def test_a_saved_refusal_is_not_consent(
+    catalog_path: Path, tmp_path: Path, consent_upgrade_facts_path: Path
+) -> None:
+    saved = _write_json(tmp_path / "saved-no.json", {"hardware": {"allow_cpu_only": False}})
+    r = wizard(
+        "--catalog",
+        catalog_path,
+        "--facts",
+        consent_upgrade_facts_path,
+        "--saved",
+        saved,
+        "--out",
+        tmp_path / "a.json",
+    )
+    assert r.returncode == 11 and "HAL0_ALLOW_CPU_ONLY=1" in r.stderr
+
+
+def test_no_consent_anywhere_still_stops_an_upgrade(
+    catalog_path: Path, tmp_path: Path, consent_upgrade_facts_path: Path, saved_path: Path
+) -> None:
+    r = wizard(
+        "--catalog",
+        catalog_path,
+        "--facts",
+        consent_upgrade_facts_path,
+        "--saved",
+        saved_path,
+        "--out",
+        tmp_path / "a.json",
+    )
+    assert r.returncode == 11
+
+
+def test_a_saved_copy_is_written_again_with_the_final_answers(
+    catalog_path: Path,
+    tmp_path: Path,
+    pty_pair: tuple[int, str],
+    spawn: Callable[..., subprocess.Popen[str]],
+) -> None:
+    master, slave = pty_pair
+    out, copy = tmp_path / "a.json", tmp_path / "copy.json"
+    p = spawn("--catalog", catalog_path, "--out", out, "--tty", slave)
+    wait_for_output(master)
+    os.write(master, ENTER * 2 + b"s" + str(copy).encode() + ENTER)  # review, copy path set
+    os.write(master, b"bb" + DOWN + ENTER + ENTER * 2)  # back to the type, pick Minimal, review
+    assert wait_exit(p, master)[0] == 0
+    final = json.loads(out.read_text())
+    assert final["install"]["type"] == "minimal"
+    assert strip_meta(json.loads(copy.read_text())) == strip_meta(final)
+
+
+def test_quitting_after_saving_a_copy_keeps_the_copy(
+    catalog_path: Path,
+    tmp_path: Path,
+    pty_pair: tuple[int, str],
+    spawn: Callable[..., subprocess.Popen[str]],
+) -> None:
+    master, slave = pty_pair
+    out, copy = tmp_path / "a.json", tmp_path / "copy.json"
+    p = spawn("--catalog", catalog_path, "--out", out, "--tty", slave)
+    wait_for_output(master)
+    os.write(master, ENTER * 2 + b"s" + str(copy).encode() + ENTER)
+    os.write(master, b"q")
+    assert wait_exit(p, master)[0] == 10
+    assert copy.exists() and not out.exists()
+
+
+def test_no_facts_file_adds_one_line_to_the_first_screen(
+    catalog_path: Path,
+    tmp_path: Path,
+    pty_pair: tuple[int, str],
+    spawn: Callable[..., subprocess.Popen[str]],
+) -> None:
+    spawn("--catalog", catalog_path, "--out", tmp_path / "a.json", "--tty", pty_pair[1])
+    text = " ".join(strip_ansi(wait_for_output(pty_pair[0]).decode()).split())
+    assert "This box could not be checked, so some choices may not suit it." in text
+
+
+def test_a_facts_file_leaves_that_line_out(
+    catalog_path: Path,
+    tmp_path: Path,
+    pty_pair: tuple[int, str],
+    big_pool_facts_path: Path,
+    spawn: Callable[..., subprocess.Popen[str]],
+) -> None:
+    spawn(
+        "--catalog",
+        catalog_path,
+        "--facts",
+        big_pool_facts_path,
+        "--out",
+        tmp_path / "a.json",
+        "--tty",
+        pty_pair[1],
+    )
+    text = " ".join(strip_ansi(wait_for_output(pty_pair[0]).decode()).split())
+    assert "could not be checked" not in text

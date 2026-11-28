@@ -42,6 +42,7 @@ class Inputs:
     given: Document | None
     over: tuple[Override, ...]
     hal0_version: str
+    facts_known: bool = True
 
 
 @contextlib.contextmanager
@@ -100,6 +101,15 @@ def plain_keys(line: str, view: View) -> tuple[int | None, list[str]]:
     return index, ["ENTER" if view.rows[index].kind == "choice" else "SPACE"]
 
 
+_UNCHECKED = "This box could not be checked, so some choices may not suit it."
+
+
+def _intro_notes(inp: Inputs) -> tuple[str, ...]:
+    """Lines added to the first screen's intro."""
+    earlier = _earlier_note(inp)
+    return (*(() if earlier is None else (earlier,)), *(() if inp.facts_known else (_UNCHECKED,)))
+
+
 def _earlier_note(inp: Inputs) -> str | None:
     """The intro line for a fresh install that was given saved answers."""
     if inp.saved is None or inp.facts.install_state != "fresh":
@@ -121,10 +131,10 @@ class Session:
         self.notice: str | None = None
         self.copy_to: object = None
 
-    def _view(self, state: State, first: Screen, note: str | None) -> View:
+    def _view(self, state: State, first: Screen, notes: tuple[str, ...]) -> View:
         shown = flow.view(state)
-        if note is not None and state.screen is first:
-            shown = replace(shown, intro=(*shown.intro, note))
+        if state.screen is first:
+            shown = replace(shown, intro=(*shown.intro, *notes))
         if self.notice is not None and shown.error is None:
             shown = replace(shown, error=self.notice)
         return shown
@@ -159,9 +169,9 @@ class Session:
     def run(self) -> State:
         inp = self.inp
         state = flow.start(inp.catalog, inp.facts, saved=inp.saved, given=inp.given, over=inp.over)
-        first, note = state.screen, _earlier_note(inp)
+        first, notes = state.screen, _intro_notes(inp)
         while flow.outcome(state) is Outcome.RUNNING:
-            shown = self._view(state, first, note)
+            shown = self._view(state, first, notes)
             width = self.term.width()
             self.term.draw(render(shown, width=width, plain=self.plain, color=not self.plain))
             state, keys = self._keys(state, shown)

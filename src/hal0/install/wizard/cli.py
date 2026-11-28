@@ -31,7 +31,7 @@ from .document import (
 )
 from .facts import FactsError, load_facts
 from .flow_model import Outcome, State
-from .session import Inputs, Interrupted, run_screens
+from .session import SAVE_COPY, Inputs, Interrupted, run_screens
 from .term import can_open
 
 EXIT_OK = 0
@@ -95,7 +95,7 @@ def _read_inputs(args: argparse.Namespace, environ: Mapping[str, str]) -> Inputs
     except (CatalogError, FactsError, DocumentError) as exc:
         raise _Usage(str(exc)) from None
     assert catalog is not None and facts is not None
-    return Inputs(catalog, facts, saved, given, over, args.hal0_version)
+    return Inputs(catalog, facts, saved, given, over, args.hal0_version, args.facts is not None)
 
 
 def _now() -> str:
@@ -124,12 +124,17 @@ def _gpu_reason(inp: Inputs) -> str:
     return shown.intro[0] if shown.intro else "The graphics card on this box cannot be used."
 
 
-def _headless_stop(inp: Inputs) -> str | None:
-    """The message to stop with, or None when a headless run may go on."""
+def _headless_stop(inp: Inputs, doc: Document) -> str | None:
+    """The message to stop with, or None when a headless run may go on.
+
+    Consent to run without a GPU counts from the effective document: a flag or
+    variable, a given answers file or the saved answers of an earlier install.
+    """
     outcome = inp.facts.gpu_outcome
     if outcome == "stop":
         return _gpu_reason(inp)
-    consent = any(o.key == "hardware.allow_cpu_only" and o.value is True for o in inp.over)
+    question = inp.catalog.questions.get("cpu_only")
+    consent = question is not None and get(doc, question.answer_key) is True
     if outcome == "cpu_only_needs_consent" and not consent:
         return f"{_gpu_reason(inp)}\n{_CPU_CONSENT_LINE}"
     return None
@@ -151,11 +156,11 @@ def _gone_saved_folder(inp: Inputs, doc: Document) -> str | None:
 
 
 def _run_headless(inp: Inputs, out: Path) -> int:
-    stop = _headless_stop(inp)
+    doc = _document(inp, {})
+    stop = _headless_stop(inp, doc)
     if stop is not None:
         print(f"hal0 setup: {stop}", file=sys.stderr)
         return EXIT_STOPPED
-    doc = _document(inp, {})
     gone = _gone_saved_folder(inp, doc)
     if gone is not None:
         raise _Usage(f"the model folder {gone} from the saved answers no longer exists")
@@ -178,6 +183,17 @@ def _keep_token(inp: Inputs, doc: Document, token: str, secret_out: Path | None)
         print(f"hal0 setup: {exc}; add the token later", file=sys.stderr)
 
 
+def _refresh_copy(state: State, doc: Document) -> None:
+    """Write the saved copy again so it never holds answers the person later changed."""
+    path = flow.chosen(state).get(SAVE_COPY)
+    if path is None:
+        return
+    try:
+        write_document(doc, Path(str(path)))
+    except DocumentError as exc:
+        print(f"hal0 setup: {exc}", file=sys.stderr)
+
+
 def _finish(inp: Inputs, state: State, out: Path, secret_out: Path | None) -> int:
     status = flow.outcome(state)
     if status is Outcome.QUIT:
@@ -186,6 +202,7 @@ def _finish(inp: Inputs, state: State, out: Path, secret_out: Path | None) -> in
         return EXIT_STOPPED
     doc = _document(inp, flow.chosen(state))
     write_document(doc, out)
+    _refresh_copy(state, doc)
     token = flow.secret(state)
     if token is not None:
         _keep_token(inp, doc, token, secret_out)
