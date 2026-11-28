@@ -17,6 +17,7 @@ Standard library only.
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import sys
 from pathlib import Path
@@ -30,6 +31,16 @@ HEADERS = (
 )  # fmt: skip
 
 
+def _capped_reader():
+    """result.py's read_capped: one rule for how much of a file is ever read."""
+    spec = importlib.util.spec_from_file_location(
+        "_matrix_result", Path(__file__).resolve().with_name("result.py")
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.read_capped
+
+
 def shape_rows() -> dict[str, int]:
     try:
         data = json.loads(SHAPES_FILE.read_text(encoding="utf-8"))
@@ -40,10 +51,14 @@ def shape_rows() -> dict[str, int]:
 
 def load_results(root: Path) -> list[dict]:
     out: list[dict] = []
+    reader = _capped_reader()
     for path in sorted(root.glob("*/result.json")):
+        raw = reader(str(path), quiet=True)
         try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, ValueError) as exc:
+            if raw is None:
+                raise ValueError("missing, too large or not a regular file")
+            data = json.loads(raw.decode("utf-8"))
+        except ValueError as exc:  # also RecursionError's cousins below
             print(
                 f"report: skipping {path}: unreadable ({exc.__class__.__name__})", file=sys.stderr
             )

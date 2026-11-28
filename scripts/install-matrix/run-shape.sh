@@ -302,7 +302,7 @@ synth_driver() { # <exit code> <timed_out true|false>
 
 collect_post() {
   POST_DONE=1
-  ct_exec "$VMID" "bash /root/collect.sh post" >"${ART}/post.txt" 2>>"${ART}/collect.err" \
+  _PVE_STREAM=post ct_exec "$VMID" "bash /root/collect.sh post" >"${ART}/post.txt" 2>>"${ART}/collect.err" \
     || log "collect post failed"
 }
 
@@ -484,6 +484,7 @@ fi
 # run.txt is the harness's own note (not part of result.json): the container id,
 # and below the uninstall verdict. fresh-test-ct.sh reads it.
 printf 'vmid=%s\n' "$VMID" >"${ART}/run.txt"
+PVE_NOTE_FILE="${ART}/run.txt"  # a cut stream is noted there as truncated=<name>
 
 # ── step 3: from here on every exit path goes through cleanup ────────────────
 trap cleanup EXIT
@@ -570,7 +571,7 @@ PREREQS="$(printf '%s\n' "$prereq_out" | sed -n 's/^prereqs=//p' | head -n 1)"
 
 # ── step 7: baseline measurements ────────────────────────────────────────────
 ct_push "$VMID" "${HERE}/collect.sh" /root/collect.sh || { log "could not copy collect.sh"; exit 1; }
-ct_exec "$VMID" "bash /root/collect.sh pre" >"${ART}/pre.txt" 2>>"${ART}/collect.err" || log "collect pre failed"
+_PVE_STREAM=pre ct_exec "$VMID" "bash /root/collect.sh pre" >"${ART}/pre.txt" 2>>"${ART}/collect.err" || log "collect pre failed"
 
 # ── step 8: the install ──────────────────────────────────────────────────────
 ARGS="--summary-json=${SUMMARY_PATH}"
@@ -623,7 +624,12 @@ install_unattended() {
 }
 # The install keeps its own --timeout (run_bounded); the ssh under it gets a
 # little longer so the install's deadline is the one that fires.
-ct_exec_to_transcript() { CT_EXEC_TIMEOUT=$((TIMEOUT + 60)) ct_exec "$VMID" "$INSTALL_SCRIPT" >"${ART}/transcript.txt" 2>&1; }
+# What the guest prints is cut on this side: ct_exec caps each of its streams,
+# and the merged transcript is capped once more here.
+ct_exec_to_transcript() {
+  CT_EXEC_TIMEOUT=$((TIMEOUT + 60)) _PVE_STREAM=transcript ct_exec "$VMID" "$INSTALL_SCRIPT" 2>&1 \
+    | _pve_cap_stream transcript "$(_pve_cap)" >"${ART}/transcript.txt"
+}
 
 log "installing (${SHAPE_ENTRY}, ${SOURCE})"
 rc=0
@@ -638,18 +644,18 @@ log "install exited ${INSTALL_RC}"
 # ── step 9: what the install left behind ─────────────────────────────────────
 collect_post
 if [[ "$INSTALL_RC" == "0" ]]; then
-  CT_EXEC_TIMEOUT=$T_PROBE ct_exec "$VMID" "bash /root/collect.sh probe" >"${ART}/probe.txt" 2>>"${ART}/collect.err" || log "collect probe failed"
+  CT_EXEC_TIMEOUT=$T_PROBE _PVE_STREAM=probe ct_exec "$VMID" "bash /root/collect.sh probe" >"${ART}/probe.txt" 2>>"${ART}/collect.err" || log "collect probe failed"
 fi
 
 # ── step 10: optional uninstall and residue check ────────────────────────────
 if [[ "$UNINSTALL" == "1" ]]; then
   log "uninstalling"
   UNINSTALL_OK=0
-  CT_EXEC_TIMEOUT=$T_UNINSTALL ct_exec "$VMID" 'hal0 uninstall --purge --force || bash /usr/lib/hal0/current/installer/uninstall.sh --purge --force || bash /opt/hal0/installer/uninstall.sh --purge --force' \
-    >>"${ART}/transcript-uninstall.txt" 2>&1 && UNINSTALL_OK=1
+  CT_EXEC_TIMEOUT=$T_UNINSTALL _PVE_STREAM=transcript-uninstall ct_exec "$VMID" 'hal0 uninstall --purge --force || bash /usr/lib/hal0/current/installer/uninstall.sh --purge --force || bash /opt/hal0/installer/uninstall.sh --purge --force' 2>&1 \
+    | _pve_cap_stream transcript-uninstall "$(_pve_cap)" >>"${ART}/transcript-uninstall.txt" && UNINSTALL_OK=1
   # shellcheck disable=SC2016  # the guest shell expands these, not this one
   RESIDUE_SCRIPT='r=""; for p in /opt/hal0 /usr/lib/hal0/current /etc/hal0 /var/lib/hal0 /usr/local/bin/hal0 /usr/local/bin/hal0-agent; do [ -e "$p" ] && r="$r path:$p"; done; for u in hal0-api hal0-openwebui hal0-agent@; do systemctl list-unit-files 2>/dev/null | grep -q "^$u" && r="$r unit:$u"; done; getent group hal0 >/dev/null && r="$r group:hal0"; echo "$r"'
-  if residue="$(ct_exec "$VMID" "$RESIDUE_SCRIPT" 2>/dev/null)"; then
+  if residue="$(_PVE_STREAM=residue ct_exec "$VMID" "$RESIDUE_SCRIPT" 2>/dev/null)"; then
     residue="$(printf '%s' "$residue" | tr -cd 'A-Za-z0-9 :/@._-' | tr -s ' ' | sed -e 's/^ *//' -e 's/ *$//')"
     if [[ -z "$residue" ]]; then residue="clean"; else UNINSTALL_OK=0; fi
   else

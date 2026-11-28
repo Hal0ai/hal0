@@ -29,6 +29,7 @@ import importlib.util
 import json
 import os
 import re
+import stat
 import sys
 import tempfile
 from pathlib import Path
@@ -39,13 +40,63 @@ DEFAULT_INSTALL_SH = HERE.parents[1] / "installer" / "install.sh"
 _STEP = re.compile(r'^ui_step\s+"([^"]+)"', re.MULTILINE)
 
 
-def read_kv(path: str | None) -> dict[str, str] | None:
+DEFAULT_MAX_INPUT_BYTES = 8 * 1024 * 1024
+
+
+def max_input_bytes() -> int:
+    """HAL0_MATRIX_MAX_INPUT_BYTES (digits only), else 8 MiB."""
+    raw = os.environ.get("HAL0_MATRIX_MAX_INPUT_BYTES", "")
+    return int(raw) if re.fullmatch(r"[1-9][0-9]{0,14}", raw) else DEFAULT_MAX_INPUT_BYTES
+
+
+def read_capped(path: str | None, *, quiet: bool = False) -> bytes | None:
+    """The bytes of a regular file of at most max_input_bytes(), else None.
+
+    A guest chose what is in these files. A file that is missing is None
+    silently; one that is too large or not a regular file (a FIFO or a device
+    would block or never end) is None with one line on stderr unless ``quiet``
+    (report.py says its own line). The file is opened without blocking and
+    never read past the cap.
+    """
     if not path:
         return None
+    cap = max_input_bytes()
+
+    def refuse(why: str) -> None:
+        if not quiet:
+            print(f"result: {Path(path).name} is {why}; ignored", file=sys.stderr)
+
     try:
-        text = Path(path).read_text(encoding="utf-8", errors="replace")
+        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
     except OSError:
         return None
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode):
+            refuse("not a regular file")
+            return None
+        if info.st_size > cap:
+            refuse(f"larger than {cap} bytes")
+            return None
+        data = b""
+        while len(data) <= cap:
+            chunk = os.read(fd, min(65536, cap + 1 - len(data)))
+            if not chunk:
+                return data
+            data += chunk
+        refuse(f"larger than {cap} bytes")
+        return None
+    except OSError:
+        return None
+    finally:
+        os.close(fd)
+
+
+def read_kv(path: str | None) -> dict[str, str] | None:
+    raw = read_capped(path)
+    if raw is None:
+        return None
+    text = raw.decode("utf-8", errors="replace")
     out: dict[str, str] = {}
     for line in text.splitlines():
         key, sep, value = line.partition("=")
@@ -55,11 +106,12 @@ def read_kv(path: str | None) -> dict[str, str] | None:
 
 
 def read_json(path: str | None) -> dict | None:
-    if not path:
+    raw = read_capped(path)
+    if raw is None:
         return None
     try:
-        data = json.loads(Path(path).read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+        data = json.loads(raw.decode("utf-8"))
+    except ValueError:
         return None
     return data if isinstance(data, dict) else None
 

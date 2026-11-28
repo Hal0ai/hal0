@@ -16,9 +16,11 @@ ignored. Rules are tried in order against the output received since the last
 reply, with ANSI escapes removed; each rule fires at most once.
 
 Result JSON: {exit_code, questions_answered, timed_out, idle_timed_out,
-unanswered_tail}. unanswered_tail is the last 40 transcript lines when a
-timeout fired, else "". The transcript is the raw terminal output and may
-hold a secret, so it is created mode 0600.
+unanswered_tail, transcript_truncated}. unanswered_tail is the last 40 lines of
+the stream when a timeout fired, else "". The transcript is the raw terminal
+output and may hold a secret, so it is created mode 0600. It stops at
+HAL0_MATRIX_MAX_STREAM_BYTES (default 64 MiB, digits only); then
+transcript_truncated is true and the stream is still read.
 
 Exit status: the command's own (128+N if killed by signal N), or 124 on
 either timeout. Standard library only; Python 3.10+.
@@ -45,6 +47,7 @@ TIMEOUT_EXIT = 124
 KILL_GRACE = 5.0
 TAIL_LINES = 40
 TAIL_BYTES = 256 * 1024
+DEFAULT_MAX_STREAM_BYTES = 64 * 1024 * 1024
 WINDOW_BYTES = 16 * 1024
 EOF_GRACE = 3.0
 ROWS, COLS = 24, 80
@@ -104,15 +107,16 @@ def _decode_status(status: int) -> int:
     return os.WEXITSTATUS(status)
 
 
-def _tail(path: str) -> str:
-    """Last TAIL_LINES lines of the transcript, ANSI removed; reads the end only."""
-    try:
-        with open(path, "rb") as fh:
-            fh.seek(0, os.SEEK_END)
-            fh.seek(max(0, fh.tell() - TAIL_BYTES))
-            data = fh.read()
-    except OSError:
-        return ""
+def max_stream_bytes() -> int:
+    """The transcript cap: HAL0_MATRIX_MAX_STREAM_BYTES (digits only), else 64 MiB."""
+    raw = os.environ.get("HAL0_MATRIX_MAX_STREAM_BYTES", "")
+    if re.fullmatch(r"[1-9][0-9]{0,14}", raw):
+        return int(raw)
+    return DEFAULT_MAX_STREAM_BYTES
+
+
+def _tail(data: bytes) -> str:
+    """Last TAIL_LINES lines of the stream's last bytes, ANSI removed."""
     text = strip_ansi(data).replace("\r\n", "\n").replace("\r", "\n")
     return "\n".join(text.splitlines()[-TAIL_LINES:])
 
@@ -155,7 +159,11 @@ def run(args: argparse.Namespace) -> int:
         "timed_out": False,
         "idle_timed_out": False,
         "unanswered_tail": "",
+        "transcript_truncated": False,
     }
+    cap = max_stream_bytes()
+    written = 0
+    tail_buf = b""  # the end of the stream, kept in memory: the file may be cut
     stop_signal = 0
 
     def _on_signal(signum: int, _frame: object) -> None:
@@ -195,7 +203,16 @@ def run(args: argparse.Namespace) -> int:
                     eof = True  # every holder of the pty closed it
                     break
                 last_output = time.monotonic()
-                transcript.write(chunk)  # type: ignore[attr-defined]
+                # The guest decides how much it prints: the file stops at the cap,
+                # the stream is still read so prompts are answered and the
+                # command is not blocked.
+                room = cap - written
+                if room > 0:
+                    transcript.write(chunk[:room])  # type: ignore[attr-defined]
+                    written += min(len(chunk), room)
+                if len(chunk) > room:
+                    result["transcript_truncated"] = True
+                tail_buf = (tail_buf + chunk)[-TAIL_BYTES:]
                 if all(fired):
                     continue
                 # Only a trailing window can matter to a prompt; keeping it
@@ -242,10 +259,10 @@ def run(args: argparse.Namespace) -> int:
             signal.signal(sig, handler)
         if result["timed_out"] or result["idle_timed_out"]:
             result["exit_code"] = TIMEOUT_EXIT
-            result["unanswered_tail"] = _tail(args.transcript)
+            result["unanswered_tail"] = _tail(tail_buf)
         elif stop_signal:
             result["exit_code"] = 128 + stop_signal
-            result["unanswered_tail"] = _tail(args.transcript)
+            result["unanswered_tail"] = _tail(tail_buf)
         elif status is not None:
             result["exit_code"] = _decode_status(status)
         _write_result(args.result, result)

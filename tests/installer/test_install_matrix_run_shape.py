@@ -115,14 +115,18 @@ case "$plain" in
   *"cat > "*) exit 0 ;;
   *"mkdir -p /root/hal0-src"*) exit 0 ;;
   *"-o /root/install.sh"*) exit 0 ;;
-  *"collect.sh pre"*) printf 'disk_used_bytes=1000\nnet_rx_bytes=100\n'; exit 0 ;;
+  *"collect.sh pre"*)
+    [[ -z "${FAKE_BIG_PRE:-}" ]] || head -c "$FAKE_BIG_PRE" /dev/zero | tr '\0' x
+    printf 'disk_used_bytes=1000\nnet_rx_bytes=100\n'; exit 0 ;;
   *"collect.sh post"*)
     printf 'disk_used_bytes=5000\nnet_rx_bytes=900\nslot_count=2\nslots=a,b\nfailed_units=\ninstall_log=/var/log/hal0/install-1.log\nfailure_report=/tmp/hal0-install-report-1.txt\n'
     exit 0 ;;
   *"collect.sh probe"*)
     printf 'api_health_s=3\ndoctor_ok=10\ndoctor_warn=1\ndoctor_critical=0\ndoctor_exit=0\nchat_ok=1\nchat_first_token_s=0.5\nchat_model=m\nmemory_write_ok=1\nmemory_read_ok=1\nhermes_reply_ok=1\nhermes_reply_s=2\n'
     exit 0 ;;
-  *"cat /var/log/hal0/install-1.log"*) echo "the install log"; exit 0 ;;
+  *"cat /var/log/hal0/install-1.log"*)
+    [[ -z "${FAKE_BIG_LOG:-}" ]] || head -c "$FAKE_BIG_LOG" /dev/zero | tr '\0' x
+    echo "the install log"; exit 0 ;;
   *"cat /tmp/hal0-install-report-1.txt"*) echo "the failure report"; exit 0 ;;
   *"cat /root/hal0-summary.json"*)
     echo '{"hal0_version": "9.9.9", "elapsed_seconds": 7, "step_durations_seconds": {"Pre-flight checks": 2}, "warnings": 0, "errors": 0}'
@@ -132,6 +136,7 @@ case "$plain" in
   *"summary-json"*)
     touch "$FAKE_STATE/install-started"
     echo "installing hal0"
+    [[ -z "${FAKE_BIG_INSTALL:-}" ]] || head -c "$FAKE_BIG_INSTALL" /dev/zero | tr '\0' x
     if [[ -n "${FAKE_INSTALL_SLEEP:-}" ]]; then exec sleep "$FAKE_INSTALL_SLEEP"; fi
     exit "${FAKE_INSTALL_RC:-0}" ;;
 esac
@@ -281,6 +286,51 @@ def test_one_unreadable_reading_is_not_a_reason_to_abort(host):
     assert r.returncode == 0, r.stderr
     assert "aborted=" not in (host.out / "run.txt").read_text()
     assert json.loads((host.out / "result.json").read_text())["aborted"] is None
+
+
+def _capped(**extra):
+    return {"HAL0_MATRIX_MAX_STREAM_BYTES": "4096", **extra}
+
+
+def _notes(host) -> list[str]:
+    return (host.out / "run.txt").read_text().splitlines()
+
+
+def test_the_unattended_transcript_is_cut_at_the_cap(host):
+    r = host.run(
+        "u2604-cpu-unattended", "--vmid", "172", "--out", str(host.out),
+        **_capped(FAKE_BIG_INSTALL="20000"),
+    )  # fmt: skip
+    assert r.returncode == 0, r.stderr
+    assert (host.out / "transcript.txt").stat().st_size == 4096
+    assert "truncated=transcript" in _notes(host)
+    assert (host.out / "result.json").exists()
+
+
+def test_a_transcript_under_the_cap_is_not_noted(host):
+    r = host.run("u2604-cpu-unattended", "--vmid", "172", "--out", str(host.out), **_capped())
+    assert r.returncode == 0, r.stderr
+    assert not [x for x in _notes(host) if x.startswith("truncated=")]
+
+
+def test_collect_output_is_cut_at_the_cap(host):
+    r = host.run(
+        "u2604-cpu-unattended", "--vmid", "172", "--out", str(host.out),
+        **_capped(FAKE_BIG_PRE="20000"),
+    )  # fmt: skip
+    assert r.returncode == 0, r.stderr
+    assert (host.out / "pre.txt").stat().st_size == 4096
+    assert "truncated=pre" in _notes(host)
+
+
+def test_a_huge_install_log_pull_is_cut_at_the_cap(host):
+    r = host.run(
+        "u2604-cpu-unattended", "--vmid", "172", "--out", str(host.out),
+        **_capped(FAKE_BIG_LOG="20000"),
+    )  # fmt: skip
+    assert r.returncode == 0, r.stderr
+    assert (host.out / "install.log").stat().st_size == 4096
+    assert "truncated=install.log" in _notes(host)
 
 
 def test_refuses_a_vmid_that_already_exists(host):

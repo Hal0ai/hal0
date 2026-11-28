@@ -35,6 +35,7 @@ def drive(
     command: list[str] | None = None,
     stdin: str | None = None,
     wall: int = 30,
+    env: dict[str, str] | None = None,
 ) -> tuple[subprocess.CompletedProcess[str], dict, str]:
     (tmp_path / "script.sh").write_text(script)
     answers = tmp_path / "answers.tsv"
@@ -61,6 +62,7 @@ def drive(
         capture_output=True,
         text=True,
         input=stdin,
+        env={**os.environ, **env} if env else None,
         timeout=wall,
         check=False,
     )
@@ -331,3 +333,44 @@ def test_unanswered_tail_is_plain_text(tmp_path: Path) -> None:
     _, res, _ = drive(tmp_path, script, "", extra=["--idle-timeout", "2"])
     assert "Secret handshake?" in res["unanswered_tail"]
     assert "\x1b" not in res["unanswered_tail"]
+
+
+# --- F4: the transcript is capped on this side ------------------------------
+
+CAP_ENV = {"HAL0_MATRIX_MAX_STREAM_BYTES": "4096"}
+FLOOD = "head -c 20000 /dev/zero | tr '\\0' x\necho\n"
+
+
+def test_a_flood_stops_at_the_cap_and_is_flagged(tmp_path: Path) -> None:
+    script = FLOOD + PROMPT_SCRIPT
+    proc, res, _ = drive(tmp_path, script, "Continue\\?\ty\\n\n", env=CAP_ENV)
+    assert proc.returncode == 0
+    assert (tmp_path / "transcript.txt").stat().st_size == 4096
+    assert res["transcript_truncated"] is True
+    assert res["questions_answered"] == 1, "a prompt after the cut is still answered"
+
+
+def test_a_transcript_under_the_cap_is_not_flagged(tmp_path: Path) -> None:
+    _, res, _ = drive(tmp_path, "echo hi\n", "", env=CAP_ENV)
+    assert res["transcript_truncated"] is False
+
+
+def test_exactly_the_cap_is_not_a_cut(tmp_path: Path) -> None:
+    _, res, _ = drive(tmp_path, "head -c 4096 /dev/zero | tr '\\0' x\n", "", env=CAP_ENV)
+    # the pty adds nothing to the bytes the command wrote
+    assert (tmp_path / "transcript.txt").stat().st_size == 4096
+    assert res["transcript_truncated"] is False
+
+
+@pytest.mark.parametrize("bad", ["", "0", "-1", "9k", "1; id"])
+def test_a_bad_cap_variable_means_the_default(tmp_path: Path, bad: str) -> None:
+    _, res, _ = drive(tmp_path, FLOOD, "", env={"HAL0_MATRIX_MAX_STREAM_BYTES": bad})
+    assert res["transcript_truncated"] is False
+    assert (tmp_path / "transcript.txt").stat().st_size >= 20000
+
+
+def test_the_tail_after_a_cut_is_the_end_of_the_stream(tmp_path: Path) -> None:
+    script = FLOOD + "echo LASTLINE-OF-THE-STREAM\nsleep 30\n"
+    _, res, _ = drive(tmp_path, script, "", env=CAP_ENV, extra=["--idle-timeout", "2"])
+    assert res["transcript_truncated"] is True
+    assert "LASTLINE-OF-THE-STREAM" in res["unanswered_tail"]

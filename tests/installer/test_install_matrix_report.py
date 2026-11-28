@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -48,10 +49,13 @@ def put(results: Path, name: str, payload: dict | str) -> None:
     (d / "result.json").write_text(body)
 
 
-def run(results: Path, *extra: str) -> subprocess.CompletedProcess:
+def run(
+    results: Path, *extra: str, env: dict[str, str] | None = None
+) -> subprocess.CompletedProcess:
     return subprocess.run(
         [sys.executable, "-I", str(REPORT), str(results), *extra],
-        capture_output=True, text=True, check=False,
+        capture_output=True, text=True, check=False, timeout=30,
+        env={**os.environ, **env} if env else None,
     )  # fmt: skip
 
 
@@ -205,3 +209,26 @@ def test_a_null_abort_does_not_fail_a_clean_run(tmp_path):
         make_result("u2604-gpu", "2026-11-28T11:00:00Z", aborted=None, abort_detail=None),
     )  # fmt: skip
     assert "None." in run(tmp_path).stdout
+
+
+# --- F4: an input over the cap is never read ---------------------------------
+
+
+def test_a_result_over_the_cap_is_skipped_with_one_line_on_stderr(tmp_path):
+    put(tmp_path, "ok", make_result("u2604-cpu-terminal", "2026-11-28T10:00:00Z"))
+    big = make_result("u2604-gpu", "2026-11-28T11:00:00Z", hal0_version="v" * 5000)
+    put(tmp_path, "big", big)
+    proc = run(tmp_path, env={"HAL0_MATRIX_MAX_INPUT_BYTES": "2000"})
+    assert proc.returncode == 0
+    assert len(table_rows(proc.stdout)) == 1
+    assert proc.stderr.count("\n") == 1 and "big" in proc.stderr
+
+
+def test_a_result_that_is_a_fifo_is_skipped_not_waited_for(tmp_path):
+    put(tmp_path, "ok", make_result("u2604-cpu-terminal", "2026-11-28T10:00:00Z"))
+    (tmp_path / "pipe").mkdir()
+    os.mkfifo(tmp_path / "pipe" / "result.json")
+    proc = run(tmp_path)
+    assert proc.returncode == 0
+    assert len(table_rows(proc.stdout)) == 1
+    assert proc.stderr.count("\n") == 1

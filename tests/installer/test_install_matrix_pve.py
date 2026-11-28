@@ -115,6 +115,7 @@ class Fake:
             capture_output=True,
             text=True,
             check=False,
+            timeout=60,  # a red test must fail, never hang
         )
 
 
@@ -1035,7 +1036,10 @@ def test_push_and_pull_quote_paths(fake, tmp_path):
     push_inner = shlex.split(execs[0])[-1]
     pull_inner = shlex.split(execs[1])[-1]
     assert shlex.split(push_inner) == ["cat", ">", "/root/a b; id"]
-    assert shlex.split(pull_inner) == ["cat", "/root/a b; id"]
+    # A regular file only, tested in the same remote command as the read.
+    assert shlex.split(pull_inner) == [
+        "test", "-f", "/root/a b; id", "&&", "cat", "/root/a b; id",
+    ]  # fmt: skip
 
 
 def test_wait_network_succeeds_when_resolves(fake):
@@ -1372,3 +1376,156 @@ def test_pick_vmid_malformed_json_is_one_clear_line(fake):
     r = fake.run("pve_pick_vmid")
     assert r.returncode == 1
     assert r.stderr.strip() == "cannot parse the guest list from the host"
+
+
+# --- F4: what a guest sends is cut on this side -----------------------------
+
+CAP = "4096"
+
+
+def _noisy_ssh(fake: Fake, out: int = 0, err: int = 0, rc: int = 0) -> None:
+    """Replace the fake ssh with one that prints ``out`` bytes to stdout and
+    ``err`` bytes to stderr, whatever it is asked."""
+    ssh = fake.bin / "ssh"
+    ssh.write_text(
+        "#!/usr/bin/env bash\n"
+        f"head -c {out} /dev/zero | tr '\\0' o\n"
+        f"head -c {err} /dev/zero | tr '\\0' e >&2\n"
+        f"exit {rc}\n"
+    )
+
+
+def _cap_env(**extra: str) -> dict:
+    return {"HAL0_MATRIX_MAX_STREAM_BYTES": CAP, **extra}
+
+
+def test_a_stream_from_the_guest_is_cut_at_the_cap_and_noted(fake, tmp_path):
+    _noisy_ssh(fake, out=20000)
+    got, note = tmp_path / "got", tmp_path / "note.txt"
+    r = fake.run(
+        f"PVE_NOTE_FILE={shlex.quote(str(note))}\n"
+        f"_PVE_STREAM=pre pve_run x >{shlex.quote(str(got))}; echo rc=$?",
+        env=_cap_env(),
+    )
+    assert "rc=0" in r.stdout, r.stderr
+    assert got.stat().st_size == int(CAP)
+    assert "truncated=pre" in note.read_text().splitlines()
+
+
+def test_a_stream_of_exactly_the_cap_is_not_cut(fake, tmp_path):
+    _noisy_ssh(fake, out=int(CAP))
+    got, note = tmp_path / "got", tmp_path / "note.txt"
+    fake.run(
+        f"PVE_NOTE_FILE={shlex.quote(str(note))}\npve_run x >{shlex.quote(str(got))}",
+        env=_cap_env(),
+    )
+    assert got.stat().st_size == int(CAP)
+    assert not note.exists()
+
+
+def test_the_guests_stderr_is_cut_too(fake, tmp_path):
+    _noisy_ssh(fake, err=20000)
+    err, note = tmp_path / "err", tmp_path / "note.txt"
+    r = fake.run(
+        f"PVE_NOTE_FILE={shlex.quote(str(note))}\n"
+        f"_PVE_STREAM=post pve_run x 2>{shlex.quote(str(err))}; echo rc=$?",
+        env=_cap_env(),
+    )
+    assert "rc=0" in r.stdout
+    assert err.stat().st_size == int(CAP)
+    assert "truncated=post-stderr" in note.read_text().splitlines()
+
+
+def test_the_exit_status_survives_a_cut(fake, tmp_path):
+    _noisy_ssh(fake, out=20000, rc=3)
+    got = tmp_path / "got"
+    r = fake.run(f"pve_run x >{shlex.quote(str(got))}; echo rc=$?", env=_cap_env())
+    assert "rc=3" in r.stdout
+    assert got.stat().st_size == int(CAP)
+
+
+def test_the_cap_inside_a_command_substitution(fake):
+    _noisy_ssh(fake, out=20000)
+    r = fake.run('v="$(pve_run x)"; echo "len=${#v}"', env=_cap_env())
+    assert "len=4096" in r.stdout
+
+
+@pytest.mark.parametrize("bad", ["", "0", "-5", "10; id", "4k", "99999999999999999999"])
+def test_a_bad_cap_variable_means_the_default(fake, bad):
+    r = fake.run("_pve_cap", env={"HAL0_MATRIX_MAX_STREAM_BYTES": bad})
+    assert r.stdout == str(64 * 1024 * 1024)
+
+
+def test_a_good_cap_variable_is_used(fake):
+    r = fake.run("_pve_cap", env={"HAL0_MATRIX_MAX_STREAM_BYTES": "5000"})
+    assert r.stdout == "5000"
+
+
+def test_a_pull_is_cut_at_the_cap_and_leaves_no_temporary_file(fake, tmp_path):
+    _owned_rules(fake, 172)
+    fake.rule("pct exec 172", b"x" * 20000)
+    dst, note = tmp_path / "install.log", tmp_path / "note.txt"
+    r = fake.run(
+        f"PVE_NOTE_FILE={shlex.quote(str(note))}\nct_pull 172 /var/log/a.log {shlex.quote(str(dst))}",
+        env=_cap_env(),
+    )
+    assert r.returncode == 0, r.stderr
+    assert dst.stat().st_size == int(CAP)
+    assert "truncated=install.log" in note.read_text().splitlines()
+    assert sorted(p.name for p in tmp_path.iterdir() if p.name != "fake") == [
+        "install.log",
+        "note.txt",
+    ]
+
+
+def _running_ssh(fake: Fake) -> None:
+    """A fake ssh that runs the remote command for real, here, with a `pct`
+    that runs the command a `pct exec V -- bash -c X` carries."""
+    (fake.bin / "ssh").write_text(
+        "#!/usr/bin/env bash\n"
+        'cmd="${*: -1}"\n'
+        'case "$cmd" in\n'
+        '  "pct config "*) printf "hostname: hal0-mx-172\\ntags: hal0-matrix\\n"; exit 0;;\n'
+        '  "{ pct config "*) cmd="${cmd#*; \\} && }";;\n'
+        "esac\n"
+        'pct() { shift 3; "$@"; }\n'
+        "export -f pct\n"
+        # Bounded: a read of a FIFO must end by itself, not hang the test.
+        'exec timeout -s KILL 5 bash -c "$cmd"\n'
+    )
+
+
+def test_a_pull_takes_a_regular_file(fake, tmp_path):
+    _running_ssh(fake)
+    src = tmp_path / "report.txt"
+    src.write_bytes(b"the report\n")
+    dst = tmp_path / "out.txt"
+    r = fake.run(f"ct_pull 172 {shlex.quote(str(src))} {shlex.quote(str(dst))}")
+    assert r.returncode == 0, r.stderr
+    assert dst.read_bytes() == b"the report\n"
+
+
+@pytest.mark.parametrize("kind", ["char-device", "fifo", "symlink-to-device", "directory"])
+def test_a_pull_never_follows_a_guest_path_to_a_device_or_fifo(fake, tmp_path, kind):
+    import os
+
+    _running_ssh(fake)
+    target = tmp_path / "chosen"
+    if kind == "char-device":
+        target = Path("/dev/zero")
+    elif kind == "fifo":
+        os.mkfifo(target)
+    elif kind == "symlink-to-device":
+        target.symlink_to("/dev/zero")
+    else:
+        target.mkdir()
+    dst = tmp_path / "out.txt"
+    r = fake.run(
+        f"ct_pull 172 {shlex.quote(str(target))} {shlex.quote(str(dst))}; echo rc=$?",
+        env=_cap_env(HAL0_MATRIX_TIMEOUT_PULL="8"),
+    )
+    assert "rc=0" not in r.stdout, "the pull must fail"
+    assert not dst.exists()
+    assert sorted(p.name for p in tmp_path.iterdir() if p.name != "fake") == sorted(
+        [target.name] if target.parent == tmp_path else []
+    )

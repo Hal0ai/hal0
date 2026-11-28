@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import stat
 import subprocess
 import sys
 from pathlib import Path
+
+import pytest
 
 REPO = Path(__file__).resolve().parents[2]
 RESULT = REPO / "scripts" / "install-matrix" / "result.py"
@@ -30,7 +33,7 @@ def titles() -> list[str]:
 
 
 def assemble(
-    tmp_path: Path, **files: str | None
+    tmp_path: Path, env: dict[str, str] | None = None, **files: str | None
 ) -> tuple[subprocess.CompletedProcess, dict | None]:
     out = tmp_path / "result.json"
     cmd = [
@@ -45,7 +48,14 @@ def assemble(
         if content is not None:
             path.write_text(content)
         cmd += [f"--{name}", str(path)]  # a path that may not exist
-    proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
+    proc = subprocess.run(
+        cmd,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=30,  # a red test must fail, never hang
+        env={**os.environ, **env} if env else None,
+    )
     return proc, (json.loads(out.read_text()) if out.exists() else None)
 
 
@@ -197,3 +207,41 @@ def test_missing_run_note_or_option_gives_nulls(tmp_path):
     assert res["aborted"] is None and res["abort_detail"] is None
     _, res = assemble(tmp_path)  # no --run at all
     assert res["aborted"] is None and res["abort_detail"] is None
+
+
+# --- F4 and F13: inputs are capped, and a result is always written ----------
+
+SMALL = {"HAL0_MATRIX_MAX_INPUT_BYTES": "2000"}
+
+
+def test_an_input_over_the_cap_is_unreadable_with_one_line_on_stderr(tmp_path):
+    big_post = "slot_count=2\n" + "x" * 5000 + "\n"
+    big_summary = json.dumps({"hal0_version": "1.8.2", "pad": "y" * 5000})
+    proc, res = assemble(tmp_path, env=SMALL, post=big_post, summary=big_summary)
+    assert proc.returncode == 0, proc.stderr
+    assert res["slot_count"] is None and res["hal0_version"] is None
+    lines = [x for x in proc.stderr.splitlines() if x]
+    assert len(lines) == 2  # one per unreadable input
+    assert all("larger than" in x for x in lines)
+
+
+def test_an_input_at_the_cap_is_read(tmp_path):
+    post = "slot_count=2\n" + "#" * (2000 - len("slot_count=2\n"))
+    assert len(post) == 2000
+    proc, res = assemble(tmp_path, env=SMALL, post=post)
+    assert res["slot_count"] == 2
+    assert proc.stderr == ""
+
+
+@pytest.mark.parametrize("bad", ["", "0", "-1", "8k", "1; id"])
+def test_a_bad_input_cap_variable_means_the_default(tmp_path, bad):
+    big = "slot_count=2\n" + "x" * 5000
+    _, res = assemble(tmp_path, env={"HAL0_MATRIX_MAX_INPUT_BYTES": bad}, post=big)
+    assert res["slot_count"] == 2
+
+
+def test_a_fifo_is_never_read(tmp_path):
+    os.mkfifo(tmp_path / "post.in")
+    proc, res = assemble(tmp_path)
+    assert proc.returncode == 0, proc.stderr
+    assert res["slot_count"] is None

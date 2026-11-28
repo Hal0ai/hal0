@@ -84,6 +84,33 @@ _pve_t() {
   printf '%s' "$v"
 }
 
+# Everything a guest prints comes back through ssh, so the cap on how many
+# bytes may land here is applied on THIS side of the pipe. The default is
+# 64 MiB per stream; HAL0_MATRIX_MAX_STREAM_BYTES changes it (digits only,
+# else the default). A stream over the cap is cut, never an error by itself,
+# and the cut is noted as `truncated=<name>` in PVE_NOTE_FILE when it is set.
+PVE_NOTE_FILE=""
+_pve_cap() {
+  local v="${HAL0_MATRIX_MAX_STREAM_BYTES:-}"
+  [[ "$v" =~ ^[1-9][0-9]{0,14}$ ]] || v=67108864
+  printf '%s' "$v"
+}
+
+# _pve_cap_stream <name> <cap>: copy stdin to stdout, at most <cap> bytes. The
+# rest is read and thrown away, so the sender finishes with its own status.
+_pve_cap_stream() {
+  local name="$1" cap="$2" extra=""
+  head -c "$cap" || true
+  extra="$(head -c 1 | od -An -tx1)" || true
+  if [[ -n "${extra//[[:space:]]/}" ]]; then
+    cat >/dev/null || true
+    [[ -z "$PVE_NOTE_FILE" ]] || printf 'truncated=%s\n' "$name" >>"$PVE_NOTE_FILE"
+    # (not for the stderr copy: its output goes to the stream just cut)
+    [[ "$name" == *-stderr ]] || printf 'output cut at %s bytes (%s)\n' "$cap" "$name" >&2
+  fi
+  return 0
+}
+
 # _pve_ssh <stdin: 0|1> <command string>. `--` ends ssh options so the alias
 # can never be read as one; stdin is closed (-n) unless the caller feeds it,
 # so a caller's `while read` loop keeps its input. ServerAlive* drops a dead
@@ -93,18 +120,31 @@ _pve_t() {
 # function named ssh (the dry run's shadow) cannot run under timeout, so it is
 # called directly.
 _pve_ssh() {
-  local host="${HAL0_PVE:-pve}" nflag=() tmo=() dl rc=0
+  local host="${HAL0_PVE:-pve}" nflag=() tmo=() dl rc=0 cap name errfd errpid had_pf=0
   if [[ "$host" == -* || ! "$host" =~ ^[^[:space:]]+$ ]]; then
     _pve_err "bad HAL0_PVE alias: ${host}"
     return 1
   fi
+  cap="$(_pve_cap)"
+  name="${_PVE_STREAM:-ssh}"
+  [[ "$name" =~ ^[A-Za-z0-9._-]{1,60}$ ]] || name="ssh"
   [[ "$1" == "1" ]] || nflag=(-n)
   dl="${_PVE_DEADLINE:-$(_pve_t READ 120)}"
   if [[ "$(type -t ssh)" != "function" ]]; then
     tmo=(timeout --foreground -s KILL "$dl")
   fi
+  # stdout and stderr each pass a local cap before they reach the caller.
+  exec {errfd}> >(_pve_cap_stream "${name}-stderr" "$cap" >&2)
+  errpid=$!
+  # pipefail makes ssh's own failure reach the `||`; the caller's setting is put back.
+  [[ -o pipefail ]] && had_pf=1
+  set -o pipefail
   "${tmo[@]}" ssh "${nflag[@]}" -o BatchMode=yes -o ConnectTimeout=10 \
-    -o ServerAliveInterval=15 -o ServerAliveCountMax=4 -- "$host" "$2" || rc=$?
+    -o ServerAliveInterval=15 -o ServerAliveCountMax=4 -- "$host" "$2" 2>&"$errfd" \
+    | _pve_cap_stream "$name" "$cap" || rc="${PIPESTATUS[0]}"
+  [[ "$had_pf" == 1 ]] || set +o pipefail
+  exec {errfd}>&-
+  wait "$errpid" 2>/dev/null || true
   if [[ "${#tmo[@]}" -gt 0 && ( "$rc" -eq 124 || "$rc" -eq 137 ) ]]; then
     _pve_err "the call to the host passed its ${dl}s deadline and was stopped"
   fi
@@ -510,7 +550,9 @@ ct_pull() {
   _ct_require_owned "$vmid" || return 1
   [[ -n "$src" && -n "$dst" ]] || { _pve_err "ct_pull: need a remote and a local path"; return 1; }
   tmp="$(mktemp "${dst}.XXXXXX")" || { _pve_err "cannot create a temporary file beside ${dst}"; return 1; }
-  if pve_run "$(ct_guard "$vmid")pct exec ${vmid} -- bash -c $(_pve_q "cat $(_pve_q "$src")")" >"$tmp"; then
+  # The path may come from the guest: only a regular file is read (test -f is
+  # false for a device, a FIFO or a symlink to one), in the same remote command.
+  if _PVE_STREAM="$(basename -- "$dst")" pve_run "$(ct_guard "$vmid")pct exec ${vmid} -- bash -c $(_pve_q "test -f $(_pve_q "$src") && cat $(_pve_q "$src")")" >"$tmp"; then
     mv -f -- "$tmp" "$dst"
   else
     rc=$?
