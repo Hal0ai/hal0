@@ -47,7 +47,7 @@ FULL = {
     "hardware": {"allow_cpu_only": True},
     "network": {
         "port": 8181,
-                "hostname": "box-1",
+        "hostname": "box-1",
         "public_url": "chat.example.com",
         "allowed_origins": ["https://a.example.com", "http://192.0.2.5:8080"],
     },
@@ -312,6 +312,64 @@ def test_huge_values_are_not_echoed_whole(tmp_path: Path) -> None:
     assert proc.returncode == 2 and len(proc.stderr) < 1000
 
 
+def test_fifo_manifest_does_not_hang(tmp_path: Path) -> None:
+    import os
+    import time
+
+    fifo = tmp_path / "ladder.fifo"
+    os.mkfifo(fifo)
+    start = time.monotonic()
+    proc = run({"version": 1, "models": {"brain": "any-id"}}, tmp_path, manifest=fifo)
+    assert time.monotonic() - start < 2
+    assert lines(proc)[-1] == "HAL0_BRAIN_MODEL=any-id"
+    assert proc.stderr.count("model list") == 1
+
+
+def test_oversize_manifest_is_unreadable(tmp_path: Path) -> None:
+    big = tmp_path / "big.json"
+    big.write_bytes(b'{"model_ladder": [], "pad": "' + b"a" * (1024 * 1024) + b'"}')
+    proc = run({"version": 1}, tmp_path, manifest=big)
+    assert proc.returncode == 0 and proc.stderr.count("model list") == 1
+
+
+def test_long_key_is_capped_in_messages(tmp_path: Path) -> None:
+    key = "k" * 200_000
+    doc = {"version": 1, "x": {key: {"y": "bad\x1bvalue"}}}
+    proc = run(doc, tmp_path)
+    assert proc.returncode == 2 and proc.stdout == ""
+    assert len(proc.stderr.encode()) < 1000
+    deep = {"version": 1, "n": {key: {key: "bad\x1b"}}}
+    assert len(run(deep, tmp_path).stderr.encode()) < 1000
+
+
+def test_strict_unknown_key_escaped_once(tmp_path: Path) -> None:
+    proc = run({"version": 1, "strict": True, "bad\x1bkey": 1}, tmp_path)
+    assert proc.returncode == 2
+    assert "\\x1b" in proc.stderr and "\\\\x1b" not in proc.stderr
+
+
+def test_reader_via_symlink_finds_manifest_beside_real_file(tmp_path: Path) -> None:
+    import shutil
+
+    real = tmp_path / "installer" / "lib"
+    real.mkdir(parents=True)
+    shutil.copy(READER, real / "answers_reader.py")
+    (tmp_path / "installer" / "manifests").mkdir()
+    (tmp_path / "installer" / "manifests" / "setup-models.json").write_text(
+        json.dumps(LADDER), encoding="utf-8"
+    )
+    link = tmp_path / "elsewhere" / "reader.py"
+    link.parent.mkdir()
+    link.symlink_to(real / "answers_reader.py")
+    doc = tmp_path / "d.json"
+    doc.write_text(json.dumps({"version": 1, "models": {"brain": "nope"}}), encoding="utf-8")
+    proc = subprocess.run(
+        [sys.executable, "-I", str(link), "--origin", "file", str(doc)],
+        capture_output=True, text=True, check=False,
+    )
+    assert proc.returncode == 2 and "models.brain" in proc.stderr
+
+
 def test_path_percent_and_dotdot_rejected(tmp_path: Path) -> None:
     for bad in ("/mnt/%h", "/mnt/../etc", "/mnt/a/../b", "/.."):
         proc = run({"version": 1, "model_store": {"path": bad}}, tmp_path)
@@ -481,7 +539,7 @@ def test_bad_usage_and_missing_file(tmp_path: Path) -> None:
 
 
 def test_only_allow_listed_names_are_printed(tmp_path: Path) -> None:
-    names = {ln.split("=", 1)[0] for ln in lines(run(FULL, tmp_path))}
+    names = {ln.split("=", 1)[0] for ln in lines(run(FULL, tmp_path, manifest=_manifest(tmp_path)))}
     src = READER.read_text(encoding="utf-8")
     ns: dict = {}
     exec(compile(src.split("MAX_BYTES")[0], str(READER), "exec"), ns)  # noqa: S102

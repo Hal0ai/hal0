@@ -43,7 +43,7 @@ ALLOWED_NAMES = (
     "HAL0_AGENT_MODEL",
     "HAL0_ALLOW_CPU_ONLY",
     "HAL0_PORT",
-        "HAL0_HOSTNAME",
+    "HAL0_HOSTNAME",
     "HAL0_PUBLIC_URL",
     "HAL0_ALLOWED_ORIGINS",
     "HAL0_ADMIN_KEY_MODE",
@@ -103,7 +103,7 @@ _GEN_MODES = ("off", "scaffold_only", "scaffold_and_download")
 # Generated beside the reader (scripts/gen_setup_models.py); located from this
 # file, never from the working directory.
 _MANIFEST = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "manifests", "setup-models.json"
+    os.path.dirname(os.path.dirname(os.path.realpath(__file__))), "manifests", "setup-models.json"
 )
 
 
@@ -193,6 +193,11 @@ def _has_control(text: str) -> bool:
     return False
 
 
+def _where(text: str) -> str:
+    """Cap a location path so a long or deep key cannot flood a message."""
+    return text if len(text) <= 160 else text[:160] + "..."
+
+
 def _walk_strings(node: Any, where: str, problems: _Problems) -> None:
     """Reject control characters and unencodable text anywhere in the document."""
     if isinstance(node, str):
@@ -205,8 +210,8 @@ def _walk_strings(node: Any, where: str, problems: _Problems) -> None:
                 problems.error(f"{where}: is not valid text")
     elif isinstance(node, dict):
         for key, value in node.items():
-            _walk_strings(key, f"{where} key {_q(key)}"[:120], problems)
-            _walk_strings(value, f"{where}.{key}" if where else str(key), problems)
+            _walk_strings(key, _where(f"{where} key {_q(key)}"), problems)
+            _walk_strings(value, _where(f"{where}.{_esc(key)}" if where else _esc(key)), problems)
     elif isinstance(node, list):
         for index, value in enumerate(node):
             _walk_strings(value, f"{where}[{index}]", problems)
@@ -266,7 +271,7 @@ def _unknown(obj: dict[str, Any], known: frozenset[str], where: str, strict: boo
     for key in sorted(set(obj) - known):
         full = f"{where}.{_esc(key)}" if where else _esc(key)
         if strict:
-            problems.error(f"unknown key {_q(full)} (strict is true)")
+            problems.error(f"unknown key '{full}' (strict is true)")
         else:
             problems.warn(f"answers key '{full}' is not recognized and was ignored")
 
@@ -407,8 +412,13 @@ def _load_manifest(path: str, problems: _Problems) -> dict[str, set[str]] | None
     model_ladder, counts as unreadable.
     """
     try:
+        if not stat.S_ISREG(os.stat(path).st_mode):
+            raise OSError("not a regular file")
         with open(path, "rb") as handle:
-            data = json.loads(handle.read(MAX_BYTES).decode("utf-8"))
+            raw = handle.read(MAX_BYTES + 1)
+        if len(raw) > MAX_BYTES:
+            raise ValueError("too large")
+        data = json.loads(raw.decode("utf-8"))
         rows = data["model_ladder"]
         if not isinstance(rows, list):
             raise TypeError("model_ladder is not a list")
@@ -427,6 +437,10 @@ def _load_manifest(path: str, problems: _Problems) -> dict[str, set[str]] | None
         return None
 
 
+def _a(word: str) -> str:
+    return ("an " if word[:1] in "aeiou" else "a ") + word
+
+
 def _model_id(value: Any, full: str, role: str, manifest: dict[str, set[str]] | None,
               problems: _Problems, *, require_rows: bool = True) -> str | None:
     ident = _ident(value, full, problems)
@@ -439,7 +453,7 @@ def _model_id(value: Any, full: str, role: str, manifest: dict[str, set[str]] | 
         known = manifest.get(role, set())
         if ident not in known:
             problems.error(
-                f"{full}: {_q(value)} is not a {role} model this installer offers"
+                f"{full}: {_q(value)} is not {_a(role)} model this installer offers"
                 f" (known: {', '.join(sorted(known)) or 'none'})"
             )
             return None
