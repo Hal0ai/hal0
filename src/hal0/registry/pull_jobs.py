@@ -186,18 +186,26 @@ def resolve_pull_source(request: Request, model_id: str) -> tuple[str, str]:
     empty coordinates (``qwen3-4b-npu``).
     """
     registry = request.app.state.model_registry
+    stored: tuple[str, str] | None = None
     try:
         existing = registry.get(model_id)
         repo = (existing.hf_repo or "").strip()
         filename = (existing.hf_filename or "").strip()
         if repo and filename:
-            return repo, filename
+            stored = (repo, filename)
     except Exception:
         pass
+    if stored is not None:
+        # A stored file name is held to the same rule as one sent with the
+        # request (:func:`check_body_hf_coordinates`): it is joined under the
+        # models tree, so it must be a relative path inside the repo.
+        check_body_hf_coordinates(hf_file=stored[1])
+        return stored
     curated = get_curated(model_id)
     # A curated stub without HF coordinates (qwen3-4b-npu) is not pullable;
     # refuse it like an unknown id rather than queue a job that cannot run (#2723).
     if curated is not None and curated.hf_repo.strip() and curated.hf_file.strip():
+        check_body_hf_coordinates(hf_file=curated.hf_file.strip())
         return curated.hf_repo.strip(), curated.hf_file.strip()
     raise PullInvalidSource(
         f"no hugging face source for model {model_id!r} — set hf_repo + hf_filename"
@@ -411,6 +419,8 @@ def resolve_pull_source_with_body(
                 draft_repo = (
                     draft_repo or (getattr(curated, "draft_repo", "") or "").strip() or None
                 )
+        # Companion names from the catalogue get the request's rule too.
+        check_body_hf_coordinates(mmproj_file=mmproj, draft_file=draft, draft_repo=draft_repo)
     return PullSource(repo, file, mmproj, False, draft, (draft_repo or repo) if draft else None)
 
 
