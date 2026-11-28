@@ -5301,10 +5301,13 @@ else
             warn "hermes-gateway unit not installed (${GATEWAY_UNIT_DST} missing) — Telegram/Discord bridge unavailable"
             warn "  retry with 'sudo ${HAL0_BIN} agent install hermes'"
         fi
-    elif [[ -f "${AGENT_UNIT_DST}" && "${_hermes_stop_signal}" -ne 1 ]]; then
+    elif [[ -f "${AGENT_UNIT_DST}" ]]; then
         # No venv after the provision block: it was skipped (HAL0_SKIP_HERMES=1)
         # or failed. The warnings above already explain; this is the summary line.
-        info "hal0-agent@hermes not enabled — provision with '${HAL0_BIN} agent install hermes'"
+        # (Not after a stop: the stop step above already said what it did.)
+        if [[ "${_hermes_stop_signal}" -ne 1 ]]; then
+            info "hal0-agent@hermes not enabled — provision with '${HAL0_BIN} agent install hermes'"
+        fi
     fi
 
     # ── Optional: pi coding agent (cli-kind bundled agent; spec 2026-08-31) ──
