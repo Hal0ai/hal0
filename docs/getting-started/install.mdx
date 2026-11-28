@@ -81,8 +81,9 @@ in order:
 9. **Container slot seeds** — copies default slot TOMLs into
    `/etc/hal0/slots/` (never overwriting operator edits).
 10. **Hardware probe** — detects CPU/RAM/GPU/NPU, writes
-    `/etc/hal0/hardware.json`, and scaffolds the capability slots
-    (chat, embed, rerank, speech, vision) with no model bound.
+    `/etc/hal0/hardware.json`, and scaffolds the `agent` and `brain`
+    slots with no model bound (`memory` comes from its seed in step 9; the other
+    slots are created when their job is switched on).
 11. **Steward + agent models** — pulls the small brain model that backs the
     dashboard's steward chat (skip with `--no-brain-model`), offers the
     optional agent model `[y/N]` with its download size shown, and offers a

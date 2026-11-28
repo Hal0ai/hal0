@@ -61,7 +61,7 @@ curl -fsSL https://hal0.dev/install.sh | sudo bash
 
 The bootstrap fetches the release manifest, SHA-256- and cosign-verifies
 the tarball, then hands off to the installer, which installs podman, builds
-the venv, writes systemd units, scaffolds the capability slots from the hardware probe, pulls the small brain model, and
+the venv, writes systemd units, scaffolds the `agent` and `brain` slots from the hardware probe, pulls the small brain model, and
 starts `hal0-api` on port `8080`. See [Install hal0](/docs/getting-started/install/)
 for the full sequence and every environment variable and flag.
 
