@@ -3953,6 +3953,63 @@ if [[ "${DEV_MODE}" -eq 1 || "${NO_START}" -eq 1 ]]; then
     warn "not starting services automatically (dev / --no-start)."
     warn "  start manually: ${HAL0_BIN} serve --host ${API_BIND_HOST} --port ${HAL0_PORT}"
 else
+    # Keep root's runtime directory pinned (#1814). podman stores every
+    # container's network namespace as a bind mount under /run/user/0/netns.
+    # That tmpfs belongs to user-runtime-dir@0.service, which logind STOPS —
+    # unmounting the tmpfs — as soon as root's last login session ends. One root
+    # SSH login/logout cycle therefore strands the netns of every container that
+    # was running at the time, and the next stop/restart of any of them fails
+    # teardown with "netavark: open container netns: ... No such file or
+    # directory" (exit 125). netavark then leaves that container's DNAT rule
+    # behind, and because nftables is first-match, the dead rule permanently
+    # shadows the live one: the slot's published port black-holes while the
+    # container inside is perfectly healthy, and neither `podman rm -f` nor
+    # `podman network reload` clears it.
+    #
+    # `loginctl enable-linger root` keeps user-runtime-dir@0 up for the life of
+    # the boot, independent of sessions, so the netns survives. Measured on a
+    # live box (podman 5.7.0): before linger, a container's SandboxKey is valid
+    # in the session that created it and dangling in the next one, and removing
+    # it leaks the rule; after linger, the SandboxKey survives the session cycle
+    # and removal is clean. Idempotent, reversible with `disable-linger`, and a
+    # no-op on boxes that already lingered. Repair for boxes that already
+    # accumulated leaks: `hal0 doctor ports --fix`.
+    #
+    # This runs BEFORE anything below starts a long-lived container (#3968).
+    # Enabling linger from a run with no root login session (`pct exec`,
+    # cloud-init, a CI runner) makes logind mount a fresh /run/user/0 over the
+    # plain directory podman had been using, which strands the netns of every
+    # container already running — the same leak, caused by the installer.
+    if command -v loginctl >/dev/null 2>&1; then
+        if [[ -e /var/lib/systemd/linger/root ]]; then
+            info "root linger already enabled (container netns survive login cycles)"
+        elif loginctl enable-linger root >/dev/null 2>&1; then
+            # enable-linger returns before user-runtime-dir@0 has mounted the
+            # tmpfs. Wait for it, so no container below starts on the bare
+            # directory the mount is about to cover.
+            for _ in 1 2 3 4 5 6 7 8 9 10; do
+                mountpoint -q /run/user/0 2>/dev/null && break
+                sleep 1
+            done
+            if mountpoint -q /run/user/0 2>/dev/null; then
+                info "root linger enabled — keeps /run/user/0/netns alive for podman (#1814)"
+            else
+                warn "root linger enabled, but /run/user/0 is not mounted yet; if 'hal0 doctor all' reports a stranded netns, restart that container"
+            fi
+            # A re-run on a box whose linger was off: containers already up
+            # were started on the directory the mount just covered, and nothing
+            # here can move their netns. Name them so the operator restarts them.
+            _pre_linger="$(podman ps --format '{{.Names}}' 2>/dev/null | tr '\n' ' ' || true)"
+            if [[ -n "${_pre_linger// /}" ]]; then
+                warn "these containers were running before root linger was enabled and must be restarted once: ${_pre_linger}"
+                warn "  until then their next stop leaks a port rule; check with '${HAL0_BIN} doctor all' (Container netns)"
+            fi
+        else
+            warn "could not enable root linger; container netns may be destroyed on root logout"
+            warn "  run: loginctl enable-linger root   (see 'hal0 doctor ports')"
+        fi
+    fi
+
     start_or_restart_api
     if wait_active hal0-api 15; then
         info "hal0-api is running"
@@ -4241,38 +4298,6 @@ else
             info "hal0-podman-forward enabled (keeps podman ports reachable alongside Docker)"
         else
             warn "hal0-podman-forward did not enable; check 'journalctl -u hal0-podman-forward'"
-        fi
-    fi
-
-    # Keep root's runtime directory pinned (#1814). podman stores every
-    # container's network namespace as a bind mount under /run/user/0/netns.
-    # That tmpfs belongs to user-runtime-dir@0.service, which logind STOPS —
-    # unmounting the tmpfs — as soon as root's last login session ends. One root
-    # SSH login/logout cycle therefore strands the netns of every container that
-    # was running at the time, and the next stop/restart of any of them fails
-    # teardown with "netavark: open container netns: ... No such file or
-    # directory" (exit 125). netavark then leaves that container's DNAT rule
-    # behind, and because nftables is first-match, the dead rule permanently
-    # shadows the live one: the slot's published port black-holes while the
-    # container inside is perfectly healthy, and neither `podman rm -f` nor
-    # `podman network reload` clears it.
-    #
-    # `loginctl enable-linger root` keeps user-runtime-dir@0 up for the life of
-    # the boot, independent of sessions, so the netns survives. Measured on a
-    # live box (podman 5.7.0): before linger, a container's SandboxKey is valid
-    # in the session that created it and dangling in the next one, and removing
-    # it leaks the rule; after linger, the SandboxKey survives the session cycle
-    # and removal is clean. Idempotent, reversible with `disable-linger`, and a
-    # no-op on boxes that already lingered. Repair for boxes that already
-    # accumulated leaks: `hal0 doctor ports --fix`.
-    if command -v loginctl >/dev/null 2>&1; then
-        if [[ -e /var/lib/systemd/linger/root ]]; then
-            info "root linger already enabled (container netns survive login cycles)"
-        elif loginctl enable-linger root >/dev/null 2>&1; then
-            info "root linger enabled — keeps /run/user/0/netns alive for podman (#1814)"
-        else
-            warn "could not enable root linger; container netns may be destroyed on root logout"
-            warn "  run: loginctl enable-linger root   (see 'hal0 doctor ports')"
         fi
     fi
 
