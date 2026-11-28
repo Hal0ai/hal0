@@ -388,3 +388,13 @@ def test_wrapper_ignores_with_models_once(host):
     r = host.run("--vmid", "172", "--with-models", "--with-models", "--out", str(host.out),
                  script=WRAPPER)  # fmt: skip
     assert r.stderr.count("--with-models") == 1
+
+
+def test_wrapper_fails_when_the_destroy_failed(host):
+    r = host.run("--vmid", "172", "--out", str(host.out), script=WRAPPER, FAKE_DESTROY_FAILS="1")
+    assert "LEFT BEHIND: 172" in r.stderr
+    assert r.returncode != 0, "an orphaned container must never read as a pass"
+    row = json.loads(r.stdout.strip().splitlines()[-1])
+    assert set(row) == {
+        "row", "clone_id", "install_ok", "smoke_ok", "uninstall_ok", "residue", "ip", "elapsed_s",
+    }  # fmt: skip

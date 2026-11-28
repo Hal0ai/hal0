@@ -71,10 +71,12 @@ elapsed=$(($(date +%s) - start))
 # No result file means the run was refused before a container existed; the
 # message is already on stderr and there is no row to append.
 if [[ ! -f "$result" ]]; then
-  exit "$rc"
+  exit $((rc != 0 ? rc : 1))
 fi
 
-python3 -I - "$result" "$elapsed" <<'PY' || exit 1
+# run-shape's own status is ANDed in below and again after the row: a failed
+# destroy (LEFT BEHIND) makes it non-zero even when every result field is clean.
+python3 -I - "$result" "$elapsed" "$rc" <<'PY' || exit 1
 import json
 import os
 import sys
@@ -107,7 +109,8 @@ print(
     )
 )
 ok = (
-    result.get("install_exit_code") == 0
+    int(sys.argv[3]) == 0
+    and result.get("install_exit_code") == 0
     and chat.get("ok") is True
     and uninstall.get("ok") is True
     and uninstall.get("residue") == "clean"
