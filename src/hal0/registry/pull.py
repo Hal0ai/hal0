@@ -1516,6 +1516,10 @@ async def run_pull(
                 final = final.parent / _canonical_name(hf_file)
         else:
             final = _final_path_for_entry(job.model_id, hf_file, capability)
+            # A destination hal0 derives itself always lies inside the store.
+            # Checked, not replaced: the recorded path keeps the store root as
+            # configured (which may be a link to a data disk).
+            store.assert_under_store(final, severity="fail")
         model_finals = _shard_dests(final, len(model_recs)) if shard_names else [final]
         final = model_finals[0]
         revision = "main"
