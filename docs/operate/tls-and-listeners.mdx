@@ -12,7 +12,7 @@ This page continues [Authentication](/docs/operate/auth): the proxy, public-URL 
 ## TLS still needs a proxy
 
 hal0 doesn't terminate TLS or manage certificates — the admin-key/session
-model above governs *who* can call the API, not *how* the connection is
+model on [Authentication](/docs/operate/auth) governs *who* can call the API, not *how* the connection is
 encrypted. If you're reaching hal0 over anything other than a trusted LAN,
 put a reverse proxy in front that owns TLS:
 
@@ -69,7 +69,7 @@ server {
 </Tabs>
 
 If your proxy forwards `X-Forwarded-For`, set `HAL0_TRUST_FORWARDED_FOR=true`
-(see the Rate limiting section above) once you've confirmed the proxy itself
+(see Rate limiting on [Authentication](/docs/operate/auth)) once you've confirmed the proxy itself
 strips any client-supplied value — otherwise treat hal0's own admin-key auth
 as the access control and skip proxy-level basic auth entirely.
 
