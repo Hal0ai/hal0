@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 import re
 import subprocess
 import sys
@@ -232,6 +233,40 @@ def test_collect_answers_applies_a_given_file_through_the_setup_screens(tmp_path
         tmp_path,
     )
     assert proc.stdout.splitlines() == ["rc=0", "1 unset 1 file"], proc.stderr
+
+
+def test_the_closing_screens_inputs_are_never_taken_from_the_environment(
+    tmp_path: Path,
+) -> None:
+    # Only installer code in this run may set them; a value inherited in root's
+    # environment must not make the closing screen show the admin key or the
+    # first-account line.
+    full = f"""
+set -u
+source "{ANSWERS_SH}"
+for name in _HAL0_ADMIN_KEY_MINTED _HAL0_OPENWEBUI_SIGNIN; do
+    if [[ -n "${{!name+x}}" ]]; then echo "$name=set"; else echo "$name=unset"; fi
+done
+env | grep -c '^_HAL0_ADMIN_KEY_MINTED=\\|^_HAL0_OPENWEBUI_SIGNIN=' || true
+"""
+    proc = subprocess.run(
+        ["bash", "-c", full],
+        capture_output=True,
+        text=True,
+        check=False,
+        cwd=tmp_path,
+        timeout=60,
+        env={
+            "PATH": os.environ["PATH"],
+            "_HAL0_ADMIN_KEY_MINTED": "1",
+            "_HAL0_OPENWEBUI_SIGNIN": "first account line",
+        },
+    )
+    assert proc.stdout.splitlines() == [
+        "_HAL0_ADMIN_KEY_MINTED=unset",
+        "_HAL0_OPENWEBUI_SIGNIN=unset",
+        "0",
+    ], proc.stderr
 
 
 def test_allow_lists_match() -> None:

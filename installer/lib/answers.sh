@@ -25,11 +25,15 @@
 # would otherwise pass the document to every child process. The same goes for
 # what the setup screens hand back (the token, and the two reasons a model
 # store counts as the operator's own choice): they are set only by
-# hal0_run_wizard in this process, never taken from the environment.
+# hal0_run_wizard in this process, never taken from the environment. So are the
+# two the closing screen reads (that an admin key was minted in this run, and
+# the first-account line): only installer code in this run may set them, so a
+# value in root's environment cannot make the screen show the key or the line.
 unset HAL0_ANSWERS_SAVED HAL0_ANSWERS_APPLIED HAL0_ANSWERS_EXPORTED _HAL0_ANSWERS_PY \
     HAL0_WIZARD_RAN HAL0_ANSWERS_ORIGIN _HAL0_WIZARD_HF_TOKEN \
     _HAL0_WIZARD_CHOSEN_STORE _HAL0_SAVED_STORE _HAL0_WIZARD_ENTRY_PATH \
-    _HAL0_WIZARD_CATALOG_PATH _HAL0_WIZARD_MODELS_PATH _HAL0_WIZARD_INT
+    _HAL0_WIZARD_CATALOG_PATH _HAL0_WIZARD_MODELS_PATH _HAL0_WIZARD_INT \
+    _HAL0_ADMIN_KEY_MINTED _HAL0_OPENWEBUI_SIGNIN
 
 # Where the reader lives, and the names it may emit. Assigned unconditionally
 # (never taken from the environment); tests override them after sourcing.
