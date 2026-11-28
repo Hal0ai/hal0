@@ -166,11 +166,31 @@ declare -A UI_STEP_DURATIONS 2>/dev/null || true
 _UI_STEP_LAST_TITLE=""
 _UI_STEP_LAST_START=0
 
+# _ui_step_done SECONDS — the one-line finish note under a step. Nothing for
+# a step that took 0 seconds. Always returns 0 (the installer runs under set -e).
+_ui_step_done() {
+    local secs="$1" took
+    if [[ "$secs" -le 0 ]]; then
+        return 0
+    fi
+    if [[ "$secs" -lt 60 ]]; then
+        took="${secs}s"
+    else
+        took="$((secs / 60))m $((secs % 60))s"
+    fi
+    if [[ "${UI_PLAIN:-0}" == "1" ]]; then
+        printf '   done in %s\n' "$took"
+        return 0
+    fi
+    printf '   %sdone in %s%s\n' "${DIM}" "$took" "${RST}"
+}
+
 ui_step() {
     local title="$1" estimate="${2:-}"
 
     if [[ -n "${_UI_STEP_LAST_TITLE}" ]]; then
         UI_STEP_DURATIONS["${_UI_STEP_LAST_TITLE}"]=$((SECONDS - _UI_STEP_LAST_START))
+        _ui_step_done "${UI_STEP_DURATIONS["${_UI_STEP_LAST_TITLE}"]}"
     fi
     _UI_STEP_LAST_TITLE="$title"
     _UI_STEP_LAST_START="$SECONDS"
@@ -205,6 +225,7 @@ ui_step() {
 ui_step_finalize() {
     if [[ -n "${_UI_STEP_LAST_TITLE}" ]]; then
         UI_STEP_DURATIONS["${_UI_STEP_LAST_TITLE}"]=$((SECONDS - _UI_STEP_LAST_START))
+        _ui_step_done "${UI_STEP_DURATIONS["${_UI_STEP_LAST_TITLE}"]}"
         _UI_STEP_LAST_TITLE=""
     fi
 }
