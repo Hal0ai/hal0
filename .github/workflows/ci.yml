@@ -139,16 +139,21 @@ jobs:
         run: uv run pytest tests/ -n 4 -q --durations=30 --shard ${{ matrix.shard }}/4 ${{ github.event_name == 'pull_request' && '-m "not podman and not network"' || '' }}
 
   # The checks branch protection requires: "python (3.12)" and "python (3.14)"
-  # (plus "python (3.13)" on main). Green when every shard passed, or when the
-  # shards were skipped for a PR that cannot touch the package; red when any
-  # shard failed, timed out or was cancelled, or when the diff classifier
-  # itself failed. A matrix job skipped by its own `if:` never creates its
-  # contexts (#3148), so this job always runs.
+  # (plus "python (3.13)" on main). Green when every shard of THAT interpreter
+  # passed, or when the shards were skipped for a PR that cannot touch the
+  # package; red when one of its own shards failed, timed out or was
+  # cancelled, or when the diff classifier itself failed. A shard of another
+  # interpreter failing leaves this one green (#4069). A matrix job skipped by
+  # its own `if:` never creates its contexts (#3148), so this job always runs.
   python:
     runs-on: ubuntu-latest
     needs: [changes, python-shard]
     if: always()
     timeout-minutes: 5
+    # Read-only access to this run's own job list (#4069), for the one case
+    # where a leg has to look past the matrix's combined result.
+    permissions:
+      actions: read
     strategy:
       fail-fast: false
       matrix:
@@ -158,16 +163,49 @@ jobs:
         env:
           CHANGES: ${{ needs.changes.result }}
           SHARDS: ${{ needs.python-shard.result }}
+          PY: ${{ matrix.python-version }}
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+          # Shards per interpreter: the length of python-shard's `shard` list.
+          SHARD_COUNT: "4"
         run: |
-          echo "changes: ${CHANGES}, shards: ${SHARDS}"
+          set -euo pipefail
+          echo "changes: ${CHANGES}, shards (all interpreters): ${SHARDS}"
           case "${CHANGES}" in
             success|skipped) ;;
             *) echo "::error::diff classifier result is '${CHANGES}'"; exit 1 ;;
           esac
           case "${SHARDS}" in
             success|skipped) exit 0 ;;
-            *) echo "::error::python suite failed: shards result is '${SHARDS}'"; exit 1 ;;
           esac
+          # `needs.python-shard.result` is ONE value for the whole matrix: a
+          # failed 3.12 shard used to turn "python (3.14)" red as well, so the
+          # red check could name an interpreter whose shards all passed
+          # (#4069). Something failed; ask the run which shards, and judge
+          # this leg on its own. Every doubt fails the leg: an unreadable job
+          # list, a shard of this interpreter missing from it, or one that did
+          # anything but succeed. Never a false green. `filter=latest` is each
+          # job's most recent execution, so a re-run of only the failed jobs
+          # still sees the shards that passed the first time.
+          if ! mine="$(gh api "repos/${REPO}/actions/runs/${RUN_ID}/jobs?filter=latest&per_page=100" \
+                --paginate \
+                --jq ".jobs[] | select(.name | startswith(\"py ${PY} shard \")) | \"\(.name)=\(.conclusion // \"none\")\"")"; then
+            echo "::error::could not read this run's jobs; shards result is '${SHARDS}'"
+            exit 1
+          fi
+          echo "${mine:-(no shard job listed for python ${PY})}"
+          found="$(grep -c . <<<"${mine}" || true)"
+          if [[ "${found}" != "${SHARD_COUNT}" ]]; then
+            echo "::error::found ${found} of ${SHARD_COUNT} shard jobs for python ${PY}; shards result is '${SHARDS}'"
+            exit 1
+          fi
+          bad="$(grep -v '=success$' <<<"${mine}" || true)"
+          if [[ -n "${bad}" ]]; then
+            echo "::error::python ${PY} suite failed: $(tr '\n' ' ' <<<"${bad}")"
+            exit 1
+          fi
+          echo "::notice::python ${PY}: all of its shards passed; the failure is in another interpreter's shards."
 
   ui:
     runs-on: ubuntu-latest
