@@ -21,7 +21,7 @@ from types import FrameType
 
 import pytest
 
-from hal0.install.wizard import cli
+from hal0.install.wizard import cli, flow
 from hal0.install.wizard.catalog import Catalog
 from hal0.install.wizard.document import DocumentError
 from hal0.install.wizard.facts import Facts
@@ -2217,3 +2217,75 @@ def test_the_help_lists_the_marker_option() -> None:
     assert "write a one-line file when the screens were shown and confirmed" in " ".join(
         r.stdout.split()
     )
+
+
+@pytest.mark.parametrize("flag", ["--dev", "--no-start"])
+def test_the_flags_that_provision_nothing_reach_the_inputs(catalog_path: Path, flag: str) -> None:
+    args = cli._build_parser().parse_args(["--catalog", str(catalog_path), "--", "--bare", flag])
+    assert cli._read_inputs(args, {}).mode == flag
+    plain = cli._build_parser().parse_args(["--catalog", str(catalog_path)])
+    assert cli._read_inputs(plain, {}).mode == ""
+
+
+# ------------------------------------------- the marker is created exclusively
+
+
+def _pretend_absent_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make the pre-check see no file once: something appears after it, before the create."""
+    real = os.path.lexists
+    calls: list[object] = []
+
+    def lexists(path: object) -> bool:
+        calls.append(path)
+        return False if len(calls) == 1 else real(path)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(os.path, "lexists", lexists)
+
+
+def _confirmed(catalog: Catalog, usable_facts: Facts) -> tuple[Inputs, flow.State]:
+    inp = Inputs(catalog, usable_facts, None, None, (), "1.0")
+    state = flow.start(catalog, usable_facts)
+    return inp, state
+
+
+@pytest.mark.parametrize("kind", ["file", "symlink", "dangling"])
+def test_a_marker_path_taken_after_the_check_is_never_replaced(
+    kind: str,
+    catalog: Catalog,
+    usable_facts: Facts,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    inp, state = _confirmed(catalog, usable_facts)
+    shown, out = _existing(kind, tmp_path), tmp_path / "a.json"
+    before = (shown.is_symlink(), os.readlink(shown) if shown.is_symlink() else "")
+    _pretend_absent_once(monkeypatch)
+    with pytest.raises(DocumentError) as raised:
+        cli._finish(inp, state, out, None, None, shown)
+    assert str(shown) in str(raised.value) and "\n" not in str(raised.value)
+    assert not out.exists()
+    assert before == (shown.is_symlink(), os.readlink(shown) if shown.is_symlink() else "")
+    if kind == "file":
+        assert shown.read_text() == "mine"
+    if kind == "symlink":
+        assert (tmp_path / "target").read_text() == "mine"
+    if kind == "dangling":
+        assert not (tmp_path / "nowhere").exists()
+    assert sorted(p.name for p in tmp_path.iterdir() if p.name.startswith(".")) == []
+
+
+def test_a_marker_write_that_fails_after_the_create_leaves_no_file(
+    catalog: Catalog, usable_facts: Facts, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, state = _confirmed(catalog, usable_facts)
+    shown = tmp_path / "shown"
+
+    def broken(fd: int) -> None:
+        raise OSError(errno.EIO, "disk")
+
+    monkeypatch.setattr(os, "fsync", broken)
+    with pytest.raises(DocumentError) as raised:
+        cli._write_marker(state, shown)
+    assert str(shown) in str(raised.value)
+    assert not shown.exists()

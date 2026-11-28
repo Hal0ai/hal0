@@ -44,7 +44,6 @@ from .paths import check_copy, check_store_text, validate_folder
 
 _DOWNLOAD_MBIT = 100
 _NPU_JOB = "npu"
-_ASSISTANT_JOB = "hermes"
 _TERMINAL_ON = "ON: the assistant can run commands as a root-equivalent user"
 _NO_DOWNLOADS = "nothing yet; models are added after install"
 _NO_CHAT_DOWNLOAD = "no chat model to download"
@@ -323,14 +322,12 @@ def _access_rows(s: State, doc: Document) -> list[Row]:
 
 
 def _terminal_rows(s: State, doc: Document) -> list[Row]:
-    """The terminal-tool row: shown when the assistant is on in the document, or the tool is.
+    """The terminal-tool row, on every review: what the document says, ON or off.
 
-    It reads the document, not what can run here, and a true answer is never hidden.
+    It reads the document, not what can run here, so what the review says is what
+    the box gets.
     """
     on = maybe_value(s, doc, "terminal_tool") is True
-    assistant = any(c.id == _ASSISTANT_JOB for c in jobs_wanted(s, doc))
-    if not (on or assistant):
-        return []
     return [make_row("terminal_tool", "Terminal tool", _TERMINAL_ON if on else "off")]
 
 

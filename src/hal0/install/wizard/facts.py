@@ -191,6 +191,12 @@ def _lies_under(mount: str, parent: str) -> bool:
 
 
 def _same_pool(mount: str, st: os.statvfs_result, other: str, other_st: os.statvfs_result) -> bool:
+    """Whether two mounts are one pool of space, so they show as one row.
+
+    A deliberate approximation: two nested mounts that report exactly the same free
+    bytes count as one, so two unrelated nested filesystems that happen to match
+    would be shown as one row and one of them would not be offered.
+    """
     if _same_filesystem(st, other_st):
         return True
     free = st.f_bavail * st.f_frsize

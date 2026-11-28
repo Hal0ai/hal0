@@ -74,6 +74,7 @@ class State:
     token: str | None = dataclasses.field(default=None, repr=False)
     proceed: bool = False
     step: int = 0
+    mode: str = ""  # --dev or --no-start: no assistant or image models are set up
 
 
 DEFAULT_HOST = "hal0.local"
@@ -136,7 +137,13 @@ def effective_doc(s: State) -> Document:
         hal0_version="",
         now="",
         install_state=s.facts.install_state,
+        mode=s.mode,
     )
+
+
+def no_provision_reason(s: State) -> str:
+    """Why the terminal tool and image models cannot be set up (the flag), else empty."""
+    return s.catalog.reasons.get(s.mode, f"not set up with {s.mode}") if s.mode else ""
 
 
 def key_of(s: State, question: str) -> str:

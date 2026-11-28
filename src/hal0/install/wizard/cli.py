@@ -9,6 +9,7 @@ error messages goes to standard error and nothing to standard output except
 from __future__ import annotations
 
 import argparse
+import contextlib
 import os
 import re
 import sys
@@ -27,6 +28,7 @@ from .document import (
     is_gone_starter,
     load_document,
     overrides,
+    provision_mode,
     write_document,
     write_private_text,
 )
@@ -112,7 +114,10 @@ def _read_inputs(args: argparse.Namespace, environ: Mapping[str, str]) -> Inputs
     except (CatalogError, FactsError, DocumentError) as exc:
         raise _Usage(str(exc)) from None
     assert catalog is not None and facts is not None
-    return Inputs(catalog, facts, saved, given, over, args.hal0_version, args.facts is not None)
+    mode = provision_mode(args.flags)
+    return Inputs(
+        catalog, facts, saved, given, over, args.hal0_version, args.facts is not None, mode
+    )
 
 
 def _now() -> str:
@@ -129,6 +134,7 @@ def _document(inp: Inputs, chosen: Mapping[str, object]) -> Document:
         hal0_version=inp.hal0_version,
         now=_now(),
         install_state=inp.facts.install_state,
+        mode=inp.mode,
     )
 
 
@@ -273,7 +279,25 @@ def _write_marker(state: State, path: Path) -> None:
     copy = flow.chosen(state).get(flow.SAVE_COPY_KEY)
     if os.path.lexists(path) or (copy is not None and _same(str(copy), path)):
         raise DocumentError(f"{path}: {_SHOWN_TAKEN}")
-    write_private_text(_SHOWN_TEXT, path)
+    # An exclusive create of the final path: whatever appeared after the check above
+    # is never replaced, and a symlink there is not followed. The file is six bytes,
+    # so it is written in place rather than through a temporary file and a rename.
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(path, flags, 0o600)
+    except FileExistsError:
+        raise DocumentError(f"{path}: {_SHOWN_TAKEN}") from None
+    except OSError as exc:
+        raise DocumentError(f"{path}: cannot be written ({exc.strerror or 'error'})") from None
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(_SHOWN_TEXT.encode())
+            handle.flush()
+            os.fsync(handle.fileno())
+    except OSError as exc:
+        with contextlib.suppress(OSError):
+            os.unlink(path)
+        raise DocumentError(f"{path}: cannot be written ({exc.strerror or 'error'})") from None
 
 
 def _same(a: str | Path, b: str | Path) -> bool:

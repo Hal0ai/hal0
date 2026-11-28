@@ -706,11 +706,25 @@ def test_the_recommended_review_says_the_terminal_tool_is_off(
     assert row.detail == "off"
 
 
-def test_the_minimal_review_has_no_terminal_tool_row(catalog: Catalog, usable_facts: Facts) -> None:
+def test_the_minimal_review_shows_the_terminal_tool_row_as_off(
+    catalog: Catalog, usable_facts: Facts
+) -> None:
     over = [Override("install.type", "minimal", "--bare")]
     rows = view(run(start(catalog, usable_facts, over=over), "ENTER", "ENTER")).rows
-    assert _terminal_rows(rows) == []
-    assert all(r.id != "terminal_tool" for r in rows)
+    (row,) = _terminal_rows(rows)
+    assert (row.id, row.detail) == ("terminal_tool", "off")
+
+
+def test_the_minimal_review_fits_a_terminal_of_80_by_24(
+    catalog: Catalog, usable_facts: Facts
+) -> None:
+    over = [Override("install.type", "minimal", "--bare")]
+    review = view(run(start(catalog, usable_facts, over=over), "ENTER", "ENTER"))
+    assert review.screen is Screen.REVIEW
+    for plain in (False, True):
+        lines = render(review, width=80, plain=plain, color=False)
+        assert len(lines) <= 24, (plain, len(lines))
+        assert any("Terminal tool" in strip_ansi(x) for x in lines)
 
 
 def test_a_terminal_tool_fixed_on_shows_on_in_the_recommended_review(
