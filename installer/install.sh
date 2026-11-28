@@ -196,6 +196,10 @@ gateway_install_note() {
     esac
 }
 
+# The release tree this script runs from (set before the flag loop: whether the
+# setup screens are part of it decides how an unknown flag is treated).
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
 DEV_MODE=0
 NO_START=0
 # ROCmFP4 + MTP note: the old `--rocmfp4` power pack (a host-side fork
@@ -234,9 +238,29 @@ COMPONENT_FLAG_GIVEN=0
 # The installer's own arguments, kept as given: the setup screens
 # (hal0_run_wizard) get the flags they know after their `--`.
 _HAL0_INSTALL_ARGS=("$@")
+# --reconfigure: ask the setup questions again on an upgrade. Set by the flag
+# only, never from the environment.
+_HAL0_RECONFIGURE=0
+# When this release tree has the setup screens, a flag the installer does not
+# know stops the run before anything else happens: a mistyped flag must not
+# silently mean the defaults. A tree without them keeps the old warn-and-ignore.
+if hal0_wizard_present 2>/dev/null; then
+    for arg in "$@"; do
+        case "$arg" in
+            --dev | --no-start | --models-dir=* | --summary-json=* | --answers=* | --no-owui \
+                | --no-comfyui | --no-hermes | --no-pi | --no-agents | --no-memory \
+                | --no-brain-model | --bare | --bare-inference | --help | -h | --reconfigure) ;;
+            *)
+                err "unknown flag: ${arg//[^[:print:]]/?} (run with --help for the list)"
+                exit 1
+                ;;
+        esac
+    done
+fi
 for arg in "$@"; do
     case "$arg" in
         --dev) DEV_MODE=1 ;;
+        --reconfigure) _HAL0_RECONFIGURE=1 ;;
         --no-start) NO_START=1 ;;
         --models-dir=*) MODELS_DIR="${arg#--models-dir=}"; MODELS_DIR_FLAG_GIVEN=1 ;;
         --summary-json=*) SUMMARY_JSON_PATH="${arg#--summary-json=}" ;;
@@ -259,7 +283,7 @@ for arg in "$@"; do
         --help|-h)
             cat <<EOF
 Usage: install.sh [--dev] [--no-start] [--models-dir=PATH] [--summary-json=PATH]
-                  [--answers=PATH]
+                  [--answers=PATH] [--reconfigure]
                   [--bare] [--no-owui] [--no-comfyui] [--no-hermes] [--no-pi]
                   [--no-agents] [--no-memory] [--no-brain-model]
   --dev               install under \$PWD/.hal0ai/, no systemd setup
@@ -278,6 +302,8 @@ Usage: install.sh [--dev] [--no-start] [--models-dir=PATH] [--summary-json=PATH]
                       checked in full first; a bad one stops the install
                       before anything changes. It never carries a key or a
                       token, and cannot turn on the Hermes terminal tool.
+  --reconfigure       on an upgrade, ask the setup questions again instead of
+                      reusing the answers saved by the last install.
 
 Components (each flag skips one optional piece; env twin in parentheses):
   --no-owui           skip Open WebUI (HAL0_SKIP_OPENWEBUI=1)
@@ -334,8 +360,6 @@ PY="${HAL0_PYTHON:-python3}"
 # loopback-only bind: 127.0.0.1 breaks the zero-config LAN dashboard.
 # ==========================================================================
 API_BIND_HOST="0.0.0.0"
-
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 # Root-run chown/chmod/mkdir/write under ${VAR_DIR} goes through this (#2975).
 # ${VAR_DIR} is hal0-owned and not sticky, so the hal0 account can swap any

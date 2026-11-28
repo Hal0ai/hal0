@@ -313,6 +313,71 @@ def test_a_good_saved_copy_is_handed_over_as_a_copy(tmp_path: Path, stub: dict[s
     assert _state(proc)["LEFT"] == ""
 
 
+# ── unknown flags ───────────────────────────────────────────────────────────
+
+
+def _flag_loop(tmp_path: Path, args: list[str], env: dict[str, str]) -> subprocess.CompletedProcess:
+    block = _slice('SUMMARY_JSON_PATH=""', "# Banner first")
+    script = f"""
+set -euo pipefail
+REPO_ROOT="{ROOT}"
+source "{ANSWERS_SH}"
+info() {{ printf 'INFO: %s\\n' "$*"; }}
+warn() {{ printf 'WARN: %s\\n' "$*" >&2; }}
+err() {{ printf 'ERR: %s\\n' "$*" >&2; }}
+MODELS_DIR=""
+DEV_MODE=0
+NO_START=0
+{block}
+echo "LOOP DONE reconfigure=${{_HAL0_RECONFIGURE}} args=${{#_HAL0_INSTALL_ARGS[@]}}"
+"""
+    return subprocess.run(["bash", "-c", script, "bash", *args], capture_output=True, text=True,
+                          env={"PATH": os.environ["PATH"], **env}, check=False)
+
+
+def test_unknown_flag_stops_when_wizard_present(tmp_path: Path, stub: dict[str, str]) -> None:
+    for args in (["--no-hermse"], ["--no-owui", "--no-tls"], ["--box"], ["--answers", "/x"]):
+        proc = _flag_loop(tmp_path, args, stub)
+        assert proc.returncode == 1, args
+        bad = next(a for a in args if a not in ("--no-owui",))
+        assert proc.stderr.strip().splitlines() == [
+            f"ERR: unknown flag: {bad} (run with --help for the list)"
+        ], proc.stderr
+        assert "LOOP DONE" not in proc.stdout
+        assert "HAL0_SKIP_OPENWEBUI" not in proc.stdout
+
+
+def test_unknown_flag_stops_before_help_runs(tmp_path: Path, stub: dict[str, str]) -> None:
+    proc = _flag_loop(tmp_path, ["--help", "--bogus"], stub)
+    assert proc.returncode == 1 and "Usage:" not in proc.stdout
+
+
+def test_every_accepted_flag_passes_when_wizard_present(tmp_path: Path,
+                                                         stub: dict[str, str]) -> None:
+    args = ["--dev", "--no-start", "--models-dir=/srv/m", "--summary-json=/tmp/x.json",
+            "--answers=/tmp/a.json", "--no-owui", "--no-comfyui", "--no-hermes", "--no-pi",
+            "--no-agents", "--no-memory", "--no-brain-model", "--bare", "--bare-inference",
+            "--reconfigure"]
+    proc = _flag_loop(tmp_path, args, stub)
+    assert proc.returncode == 0, proc.stderr
+    assert f"LOOP DONE reconfigure=1 args={len(args)}" in proc.stdout
+    for flag in ("--help", "-h"):
+        proc = _flag_loop(tmp_path, [flag], stub)
+        assert proc.returncode == 0 and "--reconfigure" in proc.stdout
+
+
+def test_unknown_flag_only_warns_when_wizard_absent(tmp_path: Path) -> None:
+    proc = _flag_loop(tmp_path, ["--no-tls", "--no-owui"], {})
+    assert proc.returncode == 0, proc.stderr
+    assert "WARN: unknown flag: --no-tls (ignored)" in proc.stderr
+    assert "LOOP DONE reconfigure=0 args=2" in proc.stdout
+
+
+def test_reconfigure_is_documented_in_the_usage_text() -> None:
+    usage = _slice("--help|-h)", "exit 0")
+    assert "[--reconfigure]" in usage and "  --reconfigure " in usage
+
+
 # ── exit 0 ──────────────────────────────────────────────────────────────────
 
 
