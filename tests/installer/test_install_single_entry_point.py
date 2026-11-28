@@ -281,30 +281,35 @@ def test_agent_pull_is_never_unconditional(agent_block: str) -> None:
     assert guard_idx < pull_idx, "the agent pull is not behind the consent flag"
 
 
-def test_agent_prompt_sits_behind_the_same_interactive_gate(agent_block: str) -> None:
-    """A headless install must never block here.
+def test_agent_step_never_asks(agent_block: str) -> None:
+    """The setup screens ask; this step only applies the answer.
 
-    ``_interactive`` tests stdin, so ``curl | bash``, a tty-less ssh install,
-    and ``HAL0_NONINTERACTIVE=1`` all fall through to the non-interactive
-    branch without asking anything.
+    No terminal read, no interactive gate, and a branch for the unattended case
+    so that nothing is pulled unasked.
     """
-    assert "elif _interactive; then" in agent_block
-    prompt_idx = agent_block.index("_tty_read _agent_answer")
-    gate_idx = agent_block.index("elif _interactive; then")
-    assert gate_idx < prompt_idx, "the agent prompt is not inside the _interactive branch"
-    assert "Non-interactive install" in agent_block, "no headless branch — it would fall through"
+    code = "\n".join(ln for ln in agent_block.splitlines() if not ln.lstrip().startswith("#"))
+    assert "_tty_read" not in code
+    assert "_interactive" not in code
+    assert "/dev/tty" not in code
+    assert "_agent_answer" not in code
+    assert "not pulling" in code, "no unattended branch: it would fall through"
 
 
-def test_agent_prompt_defaults_to_skip(agent_block: str) -> None:
-    """Bare Enter must mean NO. ``_tty_read``'s third argument is the default it
-    substitutes for an empty answer, and only an explicit y/yes proceeds."""
-    m = re.search(r'_tty_read _agent_answer "([^"]*)" "([^"]*)"', agent_block)
-    assert m, "the agent prompt is gone or changed shape"
-    prompt, default = m.group(1), m.group(2)
-    assert default == "n", f"agent prompt default is {default!r}, must be 'n'"
-    assert "[y/N]" in prompt, f"prompt does not show a skip-by-default hint: {prompt!r}"
-    assert re.search(r"\[Yy\]\|\[Yy\]\[Ee\]\[Ss\]\)\s*_agent_wanted=1", agent_block), (
-        "only an explicit y/yes may set the consent flag"
+def test_agent_consent_flag_is_set_only_from_the_variables(agent_block: str) -> None:
+    """``_agent_wanted=1`` is reachable only under ``HAL0_PULL_AGENT_MODEL=1``.
+
+    ``HAL0_AGENT_MODEL`` picks which model that is (it reaches ``--plan``); the
+    setup screens always set both together.
+    """
+    lines = agent_block.splitlines()
+    setters = [i for i, ln in enumerate(lines) if ln.strip() == "_agent_wanted=1"]
+    assert len(setters) == 1, setters
+    guard = next(
+        ln for ln in reversed(lines[: setters[0]]) if ln.lstrip().startswith(("if ", "elif "))
+    )
+    assert 'HAL0_PULL_AGENT_MODEL:-}" == "1"' in guard, guard
+    assert "_agent_wanted=1" not in "\n".join(
+        ln for i, ln in enumerate(lines) if i != setters[0] and not ln.lstrip().startswith("#")
     )
 
 

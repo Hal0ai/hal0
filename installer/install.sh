@@ -232,8 +232,8 @@ MODELS_DIR_FROM_DOC=0
 # Empty means "don't write one" (the default).
 SUMMARY_JSON_PATH=""
 # Component flags (--bare, --no-*) only export the env knobs the gates further
-# down already honour. COMPONENT_FLAG_GIVEN=1 tells the interactive component
-# picker that the operator already chose on the command line.
+# down already honour. COMPONENT_FLAG_GIVEN=1 records that a component was
+# chosen on the command line (no code reads it now; a test pins it).
 COMPONENT_FLAG_GIVEN=0
 # The installer's own arguments, kept as given: the setup screens
 # (hal0_run_wizard) get the flags they know after their `--`.
@@ -257,6 +257,7 @@ if hal0_wizard_present 2>/dev/null; then
         esac
     done
 fi
+# shellcheck disable=SC2034  # COMPONENT_FLAG_GIVEN: recorded, no longer read
 for arg in "$@"; do
     case "$arg" in
         --dev) DEV_MODE=1 ;;
@@ -3316,93 +3317,19 @@ else
         || warn "first-run seeding failed — slots can still be created from the dashboard; see the output above"
 fi
 
-# ── Components: interactive checklist ──
-# A fresh interactive install asks which optional components to lay down. Every
-# answer only exports the same env knobs the --no-* flags set (and the gates
-# further down already honour); there is no separate gate logic downstream
-# except the Pi gate. Never shown on --dev, --no-start, an upgrade, a non-TTY,
-# HAL0_NONINTERACTIVE=1, or when any component flag was given.
-#
-# Rows whose prerequisite is missing are passed greyed with a reason and count
-# as off. COMPONENT_STATES (id -> selected | skipped | unavailable:<reason>) is
-# filled from the effective environment on EVERY run, gated or not, so the
-# install summary has a record on headless runs too.
+# ── Components: record the choices ──
+# The setup screens (or the --no-* flags and env knobs) decide which optional
+# components get laid down; each choice arrives as the same env knobs the gates
+# further down already honour. This block only RECORDS the outcome:
+# COMPONENT_STATES (id -> selected | skipped | unavailable:<reason>) is filled
+# from the effective environment on every run, for the install summary and
+# --summary-json, and one "Components:" line is logged.
 declare -A COMPONENT_STATES=()
 declare -A _cp_unavail=()
 # HAL0_SKIP_SETUP=1 skips the brain pull and the starter image models whatever
-# the rows say, so those two rows are unavailable, not a tickable false promise.
+# the choices say, so those two components are unavailable, not "selected".
 _cp_setup_reason=""
 [[ "${HAL0_SKIP_SETUP:-0}" == "1" ]] && _cp_setup_reason="HAL0_SKIP_SETUP=1"
-if [[ "${DEV_MODE}" -eq 0 && "${NO_START}" -eq 0 && "${IS_UPGRADE}" -eq 0 \
-      && "${COMPONENT_FLAG_GIVEN}" -eq 0 ]] && _interactive; then
-    _cp_owui_reason=""
-    if ! { command -v podman >/dev/null 2>&1 && podman info >/dev/null 2>&1; }; then
-        _cp_owui_reason="needs podman"
-    fi
-    _cp_img_reason=""
-    _cp_img_plan="$("${VENV_DIR}/bin/python" -I -m hal0.install.image_models --plan 2>/dev/null || true)"
-    if [[ -z "${_cp_img_plan}" ]]; then
-        _cp_img_reason="image models cannot be planned on this box"
-    elif [[ "${_cp_img_plan%%$'\t'*}" == "none" ]]; then
-        _cp_img_reason="${_cp_img_plan#none}"
-        _cp_img_reason="${_cp_img_reason#$'\t'}"
-        _cp_img_reason="${_cp_img_reason%%$'\n'*}"
-        [[ -n "${_cp_img_reason}" ]] || _cp_img_reason="image models cannot be planned on this box"
-    fi
-    [[ -n "${_cp_setup_reason}" ]] && _cp_img_reason="${_cp_setup_reason}"
-    _cp_pi_reason=""
-    # pi already on the box needs no npm; only a fresh install does.
-    if ! command -v pi >/dev/null 2>&1 && ! command -v npm >/dev/null 2>&1; then
-        _cp_pi_reason="needs npm (Node.js)"
-    fi
-
-    # Row defaults follow knobs already set in the environment, so the operator
-    # is never shown "on" for something that will not install.
-    _cp_d_owui=on; [[ "${HAL0_SKIP_OPENWEBUI:-0}" == 1 ]] && _cp_d_owui=off
-    _cp_d_img=on; [[ "${HAL0_IMAGE_MODELS:-}" == none || "${HAL0_IMAGE_MODELS:-}" == 0 ]] && _cp_d_img=off
-    _cp_d_hermes=on; [[ "${HAL0_SKIP_HERMES:-0}" == 1 ]] && _cp_d_hermes=off
-    _cp_d_pi=off; [[ "${HAL0_INSTALL_PI:-0}" == 1 && "${HAL0_SKIP_PI:-0}" != 1 ]] && _cp_d_pi=on
-    _cp_d_hind=on; [[ "${HAL0_SKIP_HINDSIGHT:-0}" == 1 ]] && _cp_d_hind=off
-    _cp_d_brain=on; [[ "${HAL0_SKIP_BRAIN_MODEL:-0}" == 1 ]] && _cp_d_brain=off
-    _cp_rows=(
-        "openwebui"$'\t'"Open WebUI"$'\t'"chat UI, podman container"$'\t'"${_cp_d_owui}"$'\t'"${_cp_owui_reason}"
-        "comfyui"$'\t'"ComfyUI"$'\t'"image/video generation, starter models"$'\t'"${_cp_d_img}"$'\t'"${_cp_img_reason}"
-        "hermes"$'\t'"Hermes agent"$'\t'"venv + config + gateway; brings the Operator Board and MCP wiring"$'\t'"${_cp_d_hermes}"$'\t'
-        "pi"$'\t'"Pi agent"$'\t'"terminal coding agent (CLI/TUI)"$'\t'"${_cp_d_pi}"$'\t'"${_cp_pi_reason}"
-        "hindsight"$'\t'"Hindsight memory"$'\t'"hindsight-api unit, Memory tab, Hermes memory bank"$'\t'"${_cp_d_hind}"$'\t'"${HINDSIGHT_UNAVAILABLE_REASON}"
-        "brain"$'\t'"Brain model"$'\t'"~1-3 GB pull; steward chat and tools"$'\t'"${_cp_d_brain}"$'\t'"${_cp_setup_reason}"
-    )
-    declare -A _cp_res=()
-    ui_component_picker _cp_rows _cp_res
-    # The answer on screen wins over a knob already in the environment: a row
-    # ticked on clears the skip knob that would otherwise still skip it.
-    if [[ "${_cp_res[openwebui]:-on}" == "on" ]]; then unset HAL0_SKIP_OPENWEBUI; else export HAL0_SKIP_OPENWEBUI=1; fi
-    if [[ "${_cp_res[comfyui]:-on}" == "on" ]]; then
-        [[ "${HAL0_IMAGE_MODELS:-}" == none || "${HAL0_IMAGE_MODELS:-}" == 0 ]] && unset HAL0_IMAGE_MODELS
-    else
-        export HAL0_IMAGE_MODELS=none
-    fi
-    if [[ "${_cp_res[hermes]:-on}" == "on" ]]; then unset HAL0_SKIP_HERMES; else export HAL0_SKIP_HERMES=1; fi
-    if [[ "${_cp_res[pi]:-off}" == "on" ]]; then
-        unset HAL0_SKIP_PI
-        export HAL0_INSTALL_PI=1
-    else
-        export HAL0_SKIP_PI=1
-    fi
-    if [[ "${_cp_res[hindsight]:-on}" == "on" ]]; then unset HAL0_SKIP_HINDSIGHT; else export HAL0_SKIP_HINDSIGHT=1; fi
-    if [[ "${_cp_res[brain]:-on}" == "on" ]]; then unset HAL0_SKIP_BRAIN_MODEL; else export HAL0_SKIP_BRAIN_MODEL=1; fi
-    info "Components: openwebui ${_cp_res[openwebui]:-on}, comfyui ${_cp_res[comfyui]:-on}, hermes ${_cp_res[hermes]:-on}, pi ${_cp_res[pi]:-off}, hindsight ${_cp_res[hindsight]:-on}, brain ${_cp_res[brain]:-on}"
-    _cp_reasons=(
-        "openwebui=${_cp_owui_reason}" "comfyui=${_cp_img_reason}"
-        "pi=${_cp_pi_reason}" "hindsight=${HINDSIGHT_UNAVAILABLE_REASON}"
-        "brain=${_cp_setup_reason}"
-    )
-    for _cp_kv in "${_cp_reasons[@]}"; do
-        [[ "${_cp_res[${_cp_kv%%=*}]:-}" == "unavailable" ]] && _cp_unavail["${_cp_kv%%=*}"]="${_cp_kv#*=}"
-    done
-    unset _cp_d_owui _cp_d_img _cp_d_hermes _cp_d_pi _cp_d_hind _cp_d_brain
-    unset _cp_owui_reason _cp_img_reason _cp_img_plan _cp_pi_reason _cp_rows _cp_res _cp_reasons _cp_kv
-fi
 _cp_state() {  # _cp_state ID SKIPPED(0|1): unavailable beats skipped beats selected
     if [[ -n "${_cp_unavail[$1]:-}" ]]; then
         COMPONENT_STATES["$1"]="unavailable:${_cp_unavail[$1]}"
@@ -3412,10 +3339,9 @@ _cp_state() {  # _cp_state ID SKIPPED(0|1): unavailable beats skipped beats sele
         COMPONENT_STATES["$1"]="selected"
     fi
 }
-# A box that cannot run Hindsight is "unavailable", not merely skipped, even on
-# a headless run where the picker never computed the reason.
+# A box that cannot run Hindsight is "unavailable", not merely skipped.
 [[ -n "${HINDSIGHT_UNAVAILABLE_REASON}" ]] && _cp_unavail[hindsight]="${HINDSIGHT_UNAVAILABLE_REASON}"
-# Likewise HAL0_SKIP_SETUP=1 on a headless run.
+# Likewise HAL0_SKIP_SETUP=1.
 if [[ -n "${_cp_setup_reason}" ]]; then
     _cp_unavail[brain]="${_cp_setup_reason}"
     _cp_unavail[comfyui]="${_cp_setup_reason}"
@@ -3429,56 +3355,34 @@ _cp_state hindsight "$([[ "${HAL0_SKIP_HINDSIGHT:-0}" == 1 ]] && echo 1 || echo 
 _cp_state brain "$([[ "${HAL0_SKIP_BRAIN_MODEL:-0}" == 1 ]] && echo 1 || echo 0)"
 unset -f _cp_state
 unset _cp_unavail _cp_setup_reason
+_cp_line=""
+for _cp_id in openwebui comfyui hermes pi hindsight brain; do
+    case "${COMPONENT_STATES[${_cp_id}]}" in
+        selected) _cp_word=on ;;
+        skipped) _cp_word=off ;;
+        *) _cp_word=unavailable ;;
+    esac
+    _cp_line+="${_cp_line:+, }${_cp_id} ${_cp_word}"
+done
+info "Components: ${_cp_line}"
+unset _cp_line _cp_id _cp_word
 
 # ── Hermes terminal tool: explicit opt-in, DEFAULTS OFF ─────────────────────
 # The bundled agent can be given a terminal tool. Its only viable backend on
 # this box is `local`, which runs commands as the hal0 service user — and that
 # user is root-equivalent here (rootful podman + the hal0-systemctl /
 # hal0-agentenv sudo wrappers). The agent also reads untrusted content (web
-# pages, stored memories, MCP output), so this is asked out loud instead of
-# being switched on silently.
+# pages, stored memories, MCP output), so it is never switched on silently.
 #
-# Non-interactive / piped / CI installs never reach this prompt and therefore
-# default OFF. HAL0_HERMES_TERMINAL=1 in the environment is the unattended
-# opt-in; the value is exported so `hal0 agent install hermes` (and the
-# privilege-dropped provisioning under it) sees the same answer.
-#
-# Not asked on an upgrade (the hermes venv already exists): that box already
-# has a recorded answer, and the provisioner preserves it. Re-asking would let
-# a distracted Enter silently disable a working agent.
-#
-# Also not asked when this run will not provision Hermes at all (--dev,
-# --no-start — the provisioning block lives inside the service-start branch —
-# or HAL0_SKIP_HERMES=1): the answer lives only in this shell's environment, so
-# asking for consent we would then drop on the floor is worse than not asking —
-# the operator answers again on the deferred `hal0 agent install hermes
-# --terminal-tool`.
-_ht_answer=""
-if [[ -z "${HAL0_HERMES_TERMINAL:-}" ]] \
-   && [[ "${DEV_MODE}" -eq 0 ]] \
-   && [[ "${NO_START}" -eq 0 ]] \
-   && [[ "${HAL0_SKIP_HERMES:-0}" -ne 1 ]] \
-   && [[ ! -x /var/lib/hal0/venvs/hermes/bin/hermes ]] \
-   && _interactive; then
-    printf '\n' >/dev/tty 2>/dev/null || true
-    info "Hermes can be given a terminal tool. If you enable it, the agent will be able to run"
-    info "commands as the hal0 user on this box — that user is root-equivalent here, so this"
-    info "effectively gives the agent full control of the machine, including anything it is"
-    info "talked into running by a web page or a stored memory. There is no sandboxed option:"
-    info "the bundled host-management skills (hal0-service-management, hal0-bench, hal0-tune)"
-    info "need the real host, so a container would break them by design."
-    info "Leave it off unless you want that; you can turn it on later with"
-    info "  hal0 agent install hermes --terminal-tool"
-    _tty_read _ht_answer "Enable Hermes' terminal tool (run commands as a root-equivalent user)? [y/N]" "N"
-    if [[ "${_ht_answer}" =~ ^[Yy]([Ee][Ss])?$ ]]; then
-        export HAL0_HERMES_TERMINAL=1
-        warn "Hermes terminal tool ENABLED at your request — the agent can run root-equivalent commands."
-    else
-        export HAL0_HERMES_TERMINAL=0
-        info "Hermes terminal tool disabled (default)."
-    fi
-    unset _ht_answer
-elif [[ -n "${HAL0_HERMES_TERMINAL:-}" ]]; then
+# Nothing in this script turns the tool on by itself: it stays OFF unless an
+# explicit HAL0_HERMES_TERMINAL value arrives, either in the environment or as
+# the answer the setup screens recorded (the screens carry the warning and ask
+# for consent). The value is exported so `hal0 agent install hermes` (and the
+# privilege-dropped provisioning under it) sees the same answer. With no value
+# the provisioner keeps its default (off) and preserves any answer an existing
+# install already has; `hal0 agent install hermes --terminal-tool` turns it on
+# later.
+if [[ -n "${HAL0_HERMES_TERMINAL:-}" ]]; then
     export HAL0_HERMES_TERMINAL
     info "Hermes terminal tool: taken from the environment (HAL0_HERMES_TERMINAL=${HAL0_HERMES_TERMINAL})"
 fi
@@ -3502,7 +3406,7 @@ fi
 # forces a specific variant instead of the default (lfm2.5-2.6b — 2.87 GB,
 # plain GGUF, every runner class; hal0-brain-sft-f16 is the override).
 #
-# The AGENT anchor offer below shares this step (no extra ui_step banner, so
+# The AGENT anchor model below shares this step (no extra ui_step banner, so
 # UI_STEP_TOTAL is unchanged) because it is the second half of one story: the
 # brain pull makes the steward work out of the box (chat AND native tool
 # calls); the agent pull adds the bigger fallback tool-caller.
@@ -3530,29 +3434,26 @@ fi
 # target — and a bound agent model is also simply a much bigger tool-caller
 # than the ~1B brain.
 #
-# That is what this offer provides — and the shape of the offer is the whole
+# That is what this model provides — and the shape of the choice is the whole
 # point. Unlike the brain pull (unconditional, ~1-3 GB) the anchor is ~18.5 GB,
 # so:
 #
-#   * it is ASKED, never assumed, and the exact GB figure is printed first;
-#   * the default answer is NO (bare Enter skips);
-#   * it sits behind `_interactive`, so `curl | bash`, a tty-less ssh install
-#     and HAL0_NONINTERACTIVE=1 all skip WITHOUT BLOCKING — a prompt that can
-#     hang CI is a broken install;
+#   * it is OPT-IN, never assumed: the setup screens show the exact GB figure
+#     and record the answer, and an unattended run never pulls it unasked;
+#   * with no answer the default is NO, and the step says so and moves on;
 #   * declining, skipping, or failing all leave the slot model-less, print
 #     what that costs, and let the install SUCCEED (ruling 7).
 #
 # The size string comes from `python -m hal0.install.agent_model --plan`, which
 # reads it off the curated row. Bash never hardcodes a GB number, so the figure
-# the operator consents to is the figure that gets downloaded.
+# shown is the figure that gets downloaded.
 #
-# HAL0_PULL_AGENT_MODEL=1 opts in unattended (automation that wants the bytes);
-# =0 forces the skip even on a terminal. HAL0_AGENT_MODEL=<curated-id> forces a
-# specific rung of the ladder instead of the hardware-derived pick.
+# HAL0_PULL_AGENT_MODEL=1 opts in (the setup screens set it, and automation
+# that wants the bytes can); =0 forces the skip. HAL0_AGENT_MODEL=<curated-id>
+# forces a specific rung of the ladder instead of the hardware-derived pick.
 _agent_plan=""
 _agent_id=""
 _agent_desc=""
-_agent_answer=""
 _agent_wanted=0
 
 if [[ "${DEV_MODE}" -eq 1 ]]; then
@@ -3580,18 +3481,8 @@ else
         if [[ "${HAL0_PULL_AGENT_MODEL:-}" == "1" ]]; then
             info "Agent model opt-in via HAL0_PULL_AGENT_MODEL=1: ${_agent_desc}"
             _agent_wanted=1
-        elif _interactive; then
-            printf '\n' >/dev/tty 2>/dev/null || true
-            info "The brain steward chats and calls tools on its own. An agent model adds a bigger tool-caller and gives the [brain_chat] tool_model fallback (default hal0/agent) a live target."
-            info "Optional download: ${_agent_desc}"
-            _tty_read _agent_answer "Download the agent model now? [y/N]" "n"
-            case "${_agent_answer}" in
-                [Yy]|[Yy][Ee][Ss]) _agent_wanted=1 ;;
-                *) _agent_wanted=0 ;;
-            esac
-            unset _agent_answer
         else
-            info "Non-interactive install — not pulling the ${_agent_desc%% —*} agent model (set HAL0_PULL_AGENT_MODEL=1 to opt in)."
+            info "Agent model not requested — not pulling the ${_agent_desc%% —*} agent model (set HAL0_PULL_AGENT_MODEL=1 to opt in)."
         fi
     fi
 
@@ -3612,31 +3503,27 @@ fi
 
 # ── starter image models — OPT-IN, RAM-aware, default SKIP ──────────────────
 # Image generation works the moment a catalog model is on disk and selected, but
-# the models are large, so — like the agent anchor above — this is ASKED, never
+# the models are large, so — like the agent anchor above — this is OPT-IN, never
 # assumed:
 #
-#   * the menu is the catalog models the API can render, with the one that suits
-#     this box's memory marked [recommended]; any of them can be picked instead;
-#   * the default answer is NONE (bare Enter skips);
-#   * it sits behind `_interactive`, so `curl | bash`, a tty-less ssh install and
-#     HAL0_NONINTERACTIVE=1 all skip WITHOUT BLOCKING;
+#   * the setup screens show the catalog models the API can render, with the
+#     one that suits this box's memory marked [recommended], and record the
+#     answer in HAL0_IMAGE_MODELS;
+#   * with no answer the default is NONE: the step says so and downloads nothing;
 #   * a failed download warns and the install continues.
 #
-# Every menu line, size included, comes from
-# `python -m hal0.install.image_models --plan`, and every answer is validated by
-# `--resolve`: bash never hardcodes a figure or parses the grammar itself.
+# Every size comes from `python -m hal0.install.image_models --plan`, and the
+# answer is validated by `--resolve`: bash never hardcodes a figure or parses
+# the grammar itself.
 #
-# HAL0_IMAGE_MODELS opts in unattended: `recommended`, or catalog ids / menu
-# numbers separated by commas or spaces. `none` or `0` forces the skip even on a
-# terminal. --no-start skips the step: it starts the img slot. The first model
-# that lands becomes the image-generation model, and
+# HAL0_IMAGE_MODELS opts in: `recommended`, or catalog ids / menu numbers
+# separated by commas or spaces. `none` or `0` forces the skip. --no-start
+# skips the step: it starts the img slot. The first model that lands becomes the
+# image-generation model, and
 # Open WebUI's environment is re-rendered for it (a running Open WebUI restarts;
 # a skipped or stopped one stays down).
 _img_plan=""
-_img_answer=""
 _img_ids=""
-_img_rc=0
-_img_n=0
 _img_list=()
 
 if [[ "${DEV_MODE}" -eq 1 ]]; then
@@ -3660,38 +3547,8 @@ else
             warn "HAL0_IMAGE_MODELS=${HAL0_IMAGE_MODELS} did not resolve to any image model (see above) — none downloaded"
             _img_ids=""
         fi
-    elif _interactive; then
-        printf '\n' >/dev/tty 2>/dev/null || true
-        info "Optional: download a starter image model so the img slot can generate images. The recommended pick suits this box's memory."
-        while IFS=$'\t' read -r _img_id _img_desc _img_rec; do
-            _img_n=$((_img_n + 1))
-            if [[ "${_img_rec}" == "1" ]]; then
-                info "  ${_img_n}) ${_img_id}: ${_img_desc} [recommended]"
-            else
-                info "  ${_img_n}) ${_img_id}: ${_img_desc}"
-            fi
-        done <<< "${_img_plan}"
-        while :; do
-            _tty_read _img_answer "Image models to download (numbers, 'recommended', or Enter to skip)" ""
-            if [[ -z "${_img_answer}" ]]; then
-                break
-            fi
-            # --resolve exits 2 for an answer it cannot resolve (ask again) and 1 for
-            # an internal failure (asking again would not help: skip the step).
-            _img_rc=0
-            _img_ids="$("${VENV_DIR}/bin/python" -I -m hal0.install.image_models --resolve "${_img_answer}")" || _img_rc=$?
-            if [[ "${_img_rc}" -eq 0 ]]; then
-                break
-            elif [[ "${_img_rc}" -eq 2 ]]; then
-                warn "Not a valid choice (see above) — try again, or press Enter to skip."
-            else
-                warn "The image model step failed (see above) — skipping it; install a model later with 'hal0 comfyui models install <id>' or from the dashboard"
-                _img_ids=""
-                break
-            fi
-        done
     else
-        info "Non-interactive install — no image model downloaded (set HAL0_IMAGE_MODELS=recommended to opt in)."
+        info "No image model requested — none downloaded (set HAL0_IMAGE_MODELS=recommended to opt in)."
     fi
 
     if [[ -n "${_img_ids}" ]]; then
@@ -5191,8 +5048,8 @@ else
     # path (`hal0 agent install pi` → POST /api/agents/install), so it must
     # run AFTER hal0-api is up (start_or_restart_api + wait_active above),
     # not merely after the Hermes block. Skipped on --dev / --no-start (no
-    # daemon listening). There is no prompt here: the component checklist (or
-    # HAL0_INSTALL_PI=1) is the opt-in, and HAL0_SKIP_PI=1 the opt-out.
+    # daemon listening). There is no prompt here: the setup screens (or
+    # HAL0_INSTALL_PI=1) are the opt-in, and HAL0_SKIP_PI=1 the opt-out.
     if [[ "${DEV_MODE}" -eq 0 && "${NO_START}" -eq 0 ]] \
        && ! command -v pi >/dev/null 2>&1; then
         if [[ "${HAL0_SKIP_PI:-0}" != 1 && "${HAL0_INSTALL_PI:-0}" == 1 ]]; then
