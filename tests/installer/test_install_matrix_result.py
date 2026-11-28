@@ -245,3 +245,37 @@ def test_a_fifo_is_never_read(tmp_path):
     proc, res = assemble(tmp_path)
     assert proc.returncode == 0, proc.stderr
     assert res["slot_count"] is None
+
+
+# --- F13: a result is always written ----------------------------------------
+
+
+def test_deeply_nested_summary_still_gives_a_result(tmp_path):
+    proc, res = assemble(tmp_path, summary="[" * 200000)
+    assert proc.returncode == 0, proc.stderr
+    assert res is not None and res["hal0_version"] is None
+    assert res["schema"] == "hal0.install-matrix.v1"
+
+
+def test_nested_values_that_load_do_not_stop_the_result(tmp_path):
+    deep = '{"components": ' + "[" * 900 + "]" * 900 + ', "warnings": {"a": 1}, "hal0_version": 7}'
+    proc, res = assemble(tmp_path, summary=deep)
+    assert proc.returncode == 0, proc.stderr
+    assert res is not None
+    assert res["components"] is None and res["warnings"] is None and res["hal0_version"] is None
+
+
+def test_the_result_is_written_whatever_the_inputs_are(tmp_path):
+    proc, res = assemble(
+        tmp_path,
+        pre="\x00\xff=1\n=\n",
+        post="slot_count=\x00\n",
+        probe="doctor_ok=" + "9" * 400 + "\nchat_first_token_s=1" + "9" * 400 + "\n",
+        driver='{"exit_code": {"a": [1]}}',
+        summary='{"step_durations_seconds": {"A": {"b": 1}}, "errors": [1], "elapsed_seconds": 1e999}',
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert res is not None
+    assert res["step_durations_seconds"] is None and res["errors"] is None
+    assert res["install_exit_code"] is None and res["elapsed_seconds"] is None
+    assert res["chat"]["first_token_seconds"] is None  # inf is not a measurement

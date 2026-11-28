@@ -19,6 +19,7 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import json
+import math
 import sys
 import unicodedata
 from pathlib import Path
@@ -59,7 +60,7 @@ def load_results(root: Path) -> list[dict]:
             if raw is None:
                 raise ValueError("missing, too large or not a regular file")
             data = json.loads(raw.decode("utf-8"))
-        except ValueError as exc:  # also RecursionError's cousins below
+        except Exception as exc:  # ValueError, RecursionError, MemoryError: all unreadable
             print(
                 f"report: skipping {path}: unreadable ({exc.__class__.__name__})", file=sys.stderr
             )
@@ -81,7 +82,7 @@ def started(res: dict) -> str:
 
 
 def is_num(value: object) -> bool:
-    return isinstance(value, (int, float)) and not isinstance(value, bool)
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
 
 
 MAX_VALUE_CHARS = 80

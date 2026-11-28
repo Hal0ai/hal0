@@ -310,6 +310,25 @@ def test_ordinary_values_are_unchanged(tmp_path):
     assert "stable 1.8.2" in out
 
 
+def test_a_deeply_nested_result_is_skipped_not_a_crash(tmp_path):
+    put(tmp_path, "ok", make_result("u2604-cpu-terminal", "2026-11-28T10:00:00Z"))
+    put(tmp_path, "deep", "[" * 200000)
+    proc = run(tmp_path)
+    assert proc.returncode == 0, proc.stderr
+    assert len(table_rows(proc.stdout)) == 1
+    assert proc.stderr.count("\n") == 1
+
+
+def test_a_non_finite_number_does_not_crash_the_report(tmp_path):
+    body = json.dumps(make_result("u2604-gpu", "2026-11-28T10:00:00Z"))
+    body = body.replace('"elapsed_seconds": 321', '"elapsed_seconds": Infinity')
+    body = body.replace('"api_health_seconds": 4.5', '"api_health_seconds": NaN')
+    put(tmp_path, "inf", body)
+    proc = run(tmp_path)
+    assert proc.returncode == 0, proc.stderr
+    assert len(table_rows(proc.stdout)) == 1
+
+
 def test_a_result_that_is_a_fifo_is_skipped_not_waited_for(tmp_path):
     put(tmp_path, "ok", make_result("u2604-cpu-terminal", "2026-11-28T10:00:00Z"))
     (tmp_path / "pipe").mkdir()

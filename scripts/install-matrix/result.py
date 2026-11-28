@@ -111,7 +111,7 @@ def read_json(path: str | None) -> dict | None:
         return None
     try:
         data = json.loads(raw.decode("utf-8"))
-    except ValueError:
+    except Exception:  # ValueError, RecursionError, MemoryError: all mean unreadable
         return None
     return data if isinstance(data, dict) else None
 
@@ -124,7 +124,42 @@ def num(kv: dict[str, str] | None, key: str, *, as_float: bool = False):
         value = float(kv[key]) if as_float else int(kv[key])
     except ValueError:
         return None
-    return None if value < 0 else value
+    return None if value < 0 or value != value or value == float("inf") else value
+
+
+# What a guest wrote is checked for its type before it goes into result.json:
+# a wrong type or an unbounded shape becomes null, never an error.
+def _int(value: object):
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+def _real(value: object):
+    ok = isinstance(value, (int, float)) and not isinstance(value, bool)
+    return value if ok and value == value and abs(value) != float("inf") else None
+
+
+def _bool(value: object):
+    return value if isinstance(value, bool) else None
+
+
+def _str(value: object):
+    return value if isinstance(value, str) and len(value) <= 200 else None
+
+
+def _flat_map(value: object, *, numbers_only: bool):
+    """A small flat dict of strings, numbers and booleans, else None."""
+    if not isinstance(value, dict) or len(value) > 200:
+        return None
+    for key, item in value.items():
+        if not isinstance(key, str) or len(key) > 200:
+            return None
+        if numbers_only:
+            ok = _real(item) is not None
+        else:
+            ok = _str(item) is not None or _real(item) is not None or isinstance(item, bool)
+        if not ok:
+            return None
+    return dict(value)
 
 
 def flag(kv: dict[str, str] | None, key: str):
@@ -187,20 +222,20 @@ def assemble(args: argparse.Namespace) -> dict:
     driver, summary = read_json(args.driver), read_json(args.summary)
     summary = summary or {}
     note = read_kv(args.run)
-    durations = summary.get("step_durations_seconds")
+    durations = _flat_map(summary.get("step_durations_seconds"), numbers_only=True)
     prereqs = [p for p in re.split(r"[,\s]+", args.prereqs or "") if p]
     return {
         "schema": SCHEMA,
         "shape": args.shape,
         "row": shape_row(args.shape),
         "source": args.source,
-        "hal0_version": summary.get("hal0_version"),
+        "hal0_version": _str(summary.get("hal0_version")),
         "started_at": args.started,
-        "install_exit_code": driver.get("exit_code") if driver else None,
-        "timed_out": driver.get("timed_out") if driver else None,
-        "idle_timed_out": driver.get("idle_timed_out") if driver else None,
-        "questions_asked": driver.get("questions_answered") if driver else None,
-        "elapsed_seconds": summary.get("elapsed_seconds"),
+        "install_exit_code": _int(driver.get("exit_code")) if driver else None,
+        "timed_out": _bool(driver.get("timed_out")) if driver else None,
+        "idle_timed_out": _bool(driver.get("idle_timed_out")) if driver else None,
+        "questions_asked": _int(driver.get("questions_answered")) if driver else None,
+        "elapsed_seconds": _real(summary.get("elapsed_seconds")),
         "step_durations_seconds": durations if isinstance(durations, dict) else None,
         "last_step": last_step(durations, installer_steps(Path(args.install_sh))),
         "disk_used_bytes": delta(post, pre, "disk_used_bytes"),
@@ -237,9 +272,9 @@ def assemble(args: argparse.Namespace) -> dict:
             "reply_seconds": num(probe, "hermes_reply_s", as_float=True),
         },
         "harness_prereqs": prereqs,
-        "warnings": summary.get("warnings"),
-        "errors": summary.get("errors"),
-        "components": summary.get("components"),
+        "warnings": _int(summary.get("warnings")),
+        "errors": _int(summary.get("errors")),
+        "components": _flat_map(summary.get("components"), numbers_only=False),
         "aborted": text(note, "aborted") or None,
         "abort_detail": text(note, "abort_detail") or None,
     }
@@ -272,7 +307,12 @@ def main(argv: list[str]) -> int:
     a.add_argument("--out", required=True)
     a.add_argument("--install-sh", default=str(DEFAULT_INSTALL_SH))
     args = ap.parse_args(argv)
-    write_private(args.out, assemble(args))
+    try:
+        payload = assemble(args)
+    except Exception:  # a result is always written: fall back to no inputs at all
+        blank = {name: None for name in ("pre", "post", "probe", "driver", "summary", "run")}
+        payload = assemble(argparse.Namespace(**{**vars(args), **blank}))
+    write_private(args.out, payload)
     return 0
 
 
