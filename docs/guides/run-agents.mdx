@@ -304,8 +304,7 @@ hal0 update component hermes --clear-override      # return to the pin
 runs. Plain `reprovision` re-converges the agent, including its managed
 virtualenv, so it is the command to reach for when the agent is running
 but its MCP tools are missing. `--repair` forces every phase instead of
-converging: it builds a fresh Hermes release, re-writes the persona seeds
-and re-renders the config.
+converging: it builds a fresh Hermes release and re-renders the config.
 
 Every build lands in its own release directory under `/var/lib/hal0/hermes`
 and is checked before anything switches. Activating it stops the agent and

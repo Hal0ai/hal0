@@ -33,7 +33,7 @@ hal0 bench <verb> [flags]
   and the API (`/api/benchmarks/...`, including `/api/benchmarks/regressions`).
 - **Backends (lanes):** `rocm` and `vulkan_radv` share the `standard` runner image
   (`ghcr.io/hal0ai/hal0-runner-standard`); `cpu` runs the `cpu` runner image
-  (`ghcr.io/hal0ai/hal0-runner-cpu`). Both use `/opt/hal0/bin/llama-bench`, and each image
+  (`ghcr.io/hal0ai/hal0-runner-cpu`). Both run the `llama-bench` inside the runner image (`RUNNER_BIN_DIR` in `hal0.bench.harness`), and each image
   is the `manifest.json` pin (or its `HAL0_RUNNER_IMAGE_<KEY>` override) — the matrix is
   `hal0.bench.harness.lane_specs()`, not a shell config file.
 
@@ -94,7 +94,7 @@ regression detection.
   `ok` is a measured/publishable value; don't report the others as real numbers.
 
 **Sanity gate:** a real GPU run shows `lane`=`rocm`/`vulkan_radv` and a GPU device in the
-run's `host` block naming the Radeon 8060S. CPU-low t/s with no GPU device means the run
+run's `host` block naming the box's GPU. CPU-low t/s with no GPU device means the run
 landed on the `cpu` lane or was contended — don't report it as a GPU number.
 
 ## How this fits hal0 (D hardened-perms)

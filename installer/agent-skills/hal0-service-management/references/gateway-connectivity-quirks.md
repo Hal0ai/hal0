@@ -1,59 +1,43 @@
-# Gateway connectivity quirks — hal0
+# Gateway connectivity — what hal0 can tell you
 
-## Telegram fallback IP mechanism
+## Where the gateway's output goes
 
-The gateway auto-discovers Telegram datacenter fallback IPs at startup. When the primary DNS/proxy route to `api.telegram.org` returns a "Bad Gateway" (typical when routing through Traefik/CLIProxyAPI on CT200), the gateway falls back to direct IP connections.
+`hermes-gateway.service` sends stdout and stderr to journald (`StandardOutput=journal`,
+`StandardError=journal` in the unit hal0 renders), so the platform connect and error lines are read with:
 
-Evidence from gateway.log on hal0 (2026-06-02 22:06):
-```
-INFO gateway.platforms.telegram: [Telegram] Auto-discovered Telegram fallback IPs: 149.154.166.110
-INFO gateway.platforms.telegram: [Telegram] Telegram fallback IPs active: 149.154.166.110
-INFO gateway.platforms.telegram: [Telegram] Connected to Telegram (polling mode)
-```
-
-This means a "Telegram network error: Bad Gateway" followed by silence (no reconnection log in journalctl, but `tail -f gateway.log` shows success) is normal. The fallback IPs resolved it.
-
-### When it fails
-If the fallback IPs also fail, check:
 ```bash
-curl -s --connect-timeout 5 https://149.154.167.91/ -H "Host: api.telegram.org"
-```
-Firewall rules on the LXC or Proxmox host may block outbound connections to Telegram's IP ranges.
-
-## Gateway log file locations
-
-All paths relative to `/var/lib/hal0/agents/hermes/logs/`:
-
-| File | Owner | Content |
-|------|-------|---------|
-| `gateway.log` | root | Application output: connection status, platform events, cron ticks, kanban dispatcher |
-| `gateway-exit-diag.log` | root | JSON-line lifecycle events per PID: gateway.start, gateway.exit_nonzero, atexit.hook |
-| `gateway-shutdown-diag.log` | root | Verbose shutdown/teardown diagnostics from last stop |
-| `agent.log` | hal0 | Agent-level messages (model calls, tool use, errors) |
-| `errors.log` | hal0 | Stack traces and error details |
-
-**Critical**: `journalctl --user -u hermes-gateway` shows ONLY systemd messages (`Started`, `Stopped`, `Main process exited`). To see whether Telegram actually connected, read `gateway.log`. The journalctl output being silent beyond systemd messages is NORMAL.
-
-## Kanban dispatcher
-
-The kanban dispatcher is embedded in the gateway process and ticks every 60 seconds. Startup line:
-```
-INFO gateway.run: kanban dispatcher: embedded in gateway (interval=60.0s)
+hal0 doctor logs --unit hermes-gateway -n 100
 ```
 
-When a `kanban` toolset is assigned to a platform (e.g., `telegram: [kanban, ...]` in config.yaml), cards are managed in-process — no separate kanban service to start or monitor.
+You are not in the `systemd-journal` group, so `journalctl` is denied to you; a person with root can
+run `journalctl -u hermes-gateway -n 100 --no-pager`.
 
-## Process fd layout (for debugging)
+Hermes also keeps a `logs/` directory in its home, `/var/lib/hal0/.hermes/logs/`, which hal0
+creates. hal0 does not document the file names Hermes writes there. Look at what is in it before
+you rely on a name.
 
-From `/proc/<pid>/fd/` of a healthy gateway:
-```
-0 → /dev/null            (stdin)
-1 → socket:[...]         (stdout → journald socket)
-2 → socket:[...]         (stderr → journald socket)
-3 → agent.log
-13 → gateway.log
-14 → state.db
-19 → gateway.lock
-```
+## A platform that does not connect
 
-stdout/stderr go to journald (but hermes writes nothing useful there). Application output always goes to fd 13 (gateway.log).
+Work from the cause outward:
+
+1. **Is the credential set?** You cannot read the vault or any `.env` file. See
+   `hermes-gateway-platform-tokens.md` for the key-names check and for the `$HERMES_HOME/.env`
+   override.
+2. **Is the SDK in the live release?** "requirements not met" for the platform in the log means
+   it is not. Ask the person to run `sudo hal0 agent reprovision hermes`, which builds a release
+   when a configured platform's SDK is missing. `--repair` forces a build and restarts the agent
+   and the gateway (your session drops, and it needs the network); say so before asking for it
+   (see `../SKILL.md`).
+3. **Is the network the problem?** The gateway needs outbound HTTPS to the platform. A firewall,
+   proxy or DNS fault on the box or its network shows up as a network error in the journal. Test
+   reachability of the platform's public host name from the box with the platform's own public
+   endpoint; never put the token in the request you show the person.
+4. **Is another gateway polling the same token?** hal0 refuses to enable its own gateway while a
+   foreign `hermes-gateway` is live, because two pollers on one Telegram token make it answer
+   HTTP 409 (`hal0 agent install hermes` prints how to stop the other one).
+
+## What hal0 does not document
+
+Hermes's own retry and fallback behaviour for a platform, its kanban dispatcher timing, and the file
+descriptors of the gateway process are Hermes internals. If one of them matters, say what you saw and
+ask the person to check Hermes's documentation for the pinned release.

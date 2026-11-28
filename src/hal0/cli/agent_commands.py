@@ -2382,8 +2382,8 @@ def agent_reprovision(
         False,
         "--repair",
         help=(
-            "Force re-run of every phase: rebuilds the managed venv, re-writes "
-            "persona seeds, re-renders config. The venv rebuild is what recovers a "
+            "Force re-run of every phase: rebuilds the managed venv and re-renders "
+            "config. The venv rebuild is what recovers a "
             "box whose agent has no MCP tools."
         ),
     ),

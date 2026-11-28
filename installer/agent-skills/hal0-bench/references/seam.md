@@ -21,7 +21,7 @@ composition, no retries, no shell evaluation — the grant in
 | `/var/lib/hal0-bench/` | `hal0:hal0` | the v2 result store — `records.jsonl` (source of truth), `bench.db` (derived index), `artifacts/` (per-run sweep/server-ab logs, meta.json) |
 | `/var/lib/hal0/benchmarks/v2/artifacts/<run_id>/` | `root:root` | where the `telemetry` verb actually writes its 1 Hz GPU sampler JSON — a separate, older tree from the v2 result store above (see the `telemetry` verb note) |
 
-The seam script itself lives on a **local root-owned path** (not the `/mnt` NFS mount)
+The seam script itself lives on a **local root-owned path** (not a network mount)
 precisely so the agent can't tamper with a script that runs as root. There is no
 root-owned harness directory to protect any more — the harness is the ordinary
 `hal0.bench` package the unprivileged `hal0-api`/CLI process already runs; only the
@@ -68,8 +68,8 @@ longer part of `hal0-benchctl`'s job.
 Lives ONLY in `hal0.bench.harness.lane_specs()` (a pure dict of `LaneSpec`) — not in a
 shell config file. Images come from the runner registry (`hal0.runners.resolve_runner_image`:
 the `HAL0_RUNNER_IMAGE_<KEY>` override, else the `manifest.json` `runners` pin), so a bench
-measures exactly what an unpinned slot launches. The bench binary is `/opt/hal0/bin/llama-bench`
-on every lane.
+measures exactly what an unpinned slot launches. The bench binary is the `llama-bench` inside the runner image
+(`RUNNER_BIN_DIR` in `hal0.bench.harness`) on every lane.
 
 - `rocm` — the `standard` runner image, `GGML_HIP_ENABLE_UNIFIED_MEMORY=1`,
   `-ngl 99 -dev ROCm0`.
