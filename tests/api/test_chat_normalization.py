@@ -896,3 +896,45 @@ async def test_other_requests_sharing_memory_targets_are_not_tagged(model):
     await v1._normalize_chat_body(req, {"model": model, "messages": []})
     assert getattr(req.state, MEMORY_REQUEST_ATTR, False) is False
     assert read_timeout_override(req) is None
+
+
+# #4017: the dispatcher path names the model and slot that answered, since a
+# slot may be sent a model it serves in place of the one the caller named.
+
+
+class _RemappingDispatcher:
+    async def dispatch(self, request, body=None):
+        return SimpleNamespace(
+            upstream_name="embed",
+            requested_model="some-other-embedder",
+            resolved_model="qwen3-embedding-0-6b-q8-0",
+            slot_name="embed",
+            container_slot_name="",
+            streaming=False,
+        )
+
+    async def forward(self, call):
+        from fastapi.responses import Response as _Resp
+
+        return _Resp(content=b"", media_type="application/json")
+
+
+@pytest.mark.asyncio
+async def test_dispatch_and_forward_names_the_resolved_model_and_slot():
+    response = await v1._dispatch_and_forward(
+        _NonChatRequest(), _RemappingDispatcher(), body={"model": "some-other-embedder"}
+    )
+    assert response.headers["x-hal0-resolved-model"] == "qwen3-embedding-0-6b-q8-0"
+    assert response.headers["x-hal0-slot"] == "embed"
+
+
+def test_stamp_resolved_leaves_out_values_a_header_cannot_carry():
+    from fastapi.responses import Response as _Resp
+
+    response = _Resp(content=b"")
+    v1._stamp_resolved(response, model="mod\u00e8le", slot="bad\nslot")
+    assert "x-hal0-resolved-model" not in response.headers
+    assert "x-hal0-slot" not in response.headers
+    v1._stamp_resolved(response, model="", slot="agent")
+    assert "x-hal0-resolved-model" not in response.headers
+    assert response.headers["x-hal0-slot"] == "agent"

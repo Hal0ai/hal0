@@ -1170,6 +1170,26 @@ def _client_gone_response(request: Request) -> Response:
     return Response(status_code=499)
 
 
+#: Response headers naming what actually answered a ``/v1`` request (#4017).
+#: A caller may address a slot by name or alias, and the dispatcher may send a
+#: model the slot serves in place of the one named, so the request's ``model``
+#: is not proof of which model produced the reply. Additive: the body is
+#: unchanged.
+RESOLVED_MODEL_HEADER = "X-hal0-Resolved-Model"
+RESOLVED_SLOT_HEADER = "X-hal0-Slot"
+
+
+def _stamp_resolved(response: Response, *, model: str, slot: str) -> None:
+    """Add the resolved-model and slot headers to ``response`` when known.
+
+    Values that cannot be sent as a header (non-ASCII, control characters) are
+    left out rather than mangled.
+    """
+    for header, value in ((RESOLVED_MODEL_HEADER, model), (RESOLVED_SLOT_HEADER, slot)):
+        if value and value.isascii() and value.isprintable():
+            response.headers[header] = value
+
+
 async def _dispatch_and_forward(
     request: Request,
     dispatcher: DispatcherDep,
@@ -1251,6 +1271,12 @@ async def _dispatch_and_forward_probed(
         if seam is not None:
             seam.record_error(exc, call=call, request=request, t_entry=t_entry)
         raise
+    if isinstance(response, Response):
+        _stamp_resolved(
+            response,
+            model=getattr(call, "resolved_model", "") or "",
+            slot=getattr(call, "slot_name", "") or getattr(call, "container_slot_name", "") or "",
+        )
     if isinstance(response, StreamingResponse):
         response = _instrument_streaming_throughput(
             response,
@@ -2022,10 +2048,13 @@ async def _dispatch_via_npu_trio(
     # the request is still in flight (the counter increments on completion).
     _stamp_slot_last_used(request.app.state, "flm-embed")
     # Copy: the caller's dict is not ours to mutate.
-    body = {**body, "model": await _npu_embed_tag(request, body)}
+    tag = await _npu_embed_tag(request, body)
+    body = {**body, "model": tag}
     upstream_resp = await router_obj.dispatch_embed_npu(body=body)
     _touch_npu_shadow_count(request, "flm-embed")
-    return _wrap_npu_trio_response(upstream_resp)
+    response = _wrap_npu_trio_response(upstream_resp)
+    _stamp_resolved(response, model=tag, slot="flm-embed")
+    return response
 
 
 def _wrap_npu_trio_response(upstream: Any) -> Response:

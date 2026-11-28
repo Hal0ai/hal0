@@ -188,6 +188,17 @@ rendered through.
 - **`/v1/models` default filtering** — hides non-text-modality models unless
   `?show_all=true` is passed; `GET /v1/models/{id}` bypasses the filter.
 
+Every dispatched response carries two hal0 headers that name what answered:
+
+- **`X-hal0-Resolved-Model`**: the model id sent to the slot. It can differ
+  from the `model` you sent: a slot name or alias resolves to the slot's
+  model, and a slot that does not serve the named model is sent the one it
+  has loaded. The `model` field in the body is whatever the backend returns
+  and may echo your request, so read this header when the exact model
+  matters, for example before storing embeddings.
+- **`X-hal0-Slot`**: the slot that served the request. Absent for a remote
+  provider that is not a slot.
+
 ## Hermes models
 
 When the Hermes agent is installed, `GET /v1/models` lists `hermes-agent` for the default profile and one model id per additional served profile, next to the slot models. Each profile is a pinned, read-only upstream (`hermes` and `hermes.<profile>`, bearer auth) that hal0 registers at `http://127.0.0.1:8642/v1` and `/p/<profile>/v1`. A request for one of those ids goes to that upstream, streaming or not, and never falls back to a slot: if the upstream is offline or disabled the request fails with `502 dispatch.upstream_unavailable`. An id a Hermes profile owns is listed as Hermes's even when a slot alias has the same name. `X-Hermes-Session-Id` and `X-Hermes-Session-Key` request headers are forwarded to the upstream. `/v1/responses` is not available. See [Open WebUI](/docs/guides/open-webui/#talking-to-hermes).
