@@ -816,7 +816,16 @@ _hal0_resolve_main_python_or_die() {
     if [[ "${1:-}" != "install-first" ]] && ! command -v "${PY}" >/dev/null 2>&1; then
         die "python interpreter '${PY}' not found — install with: $(python_venv_hint)"
     fi
-    if resolved_py="$(HAL0_PY_AUTOINSTALL=1 resolve_main_python)" && [[ -n "${resolved_py}" ]]; then
+    local resolve_rc=0
+    resolved_py="$(HAL0_PY_AUTOINSTALL=1 resolve_main_python)" || resolve_rc=$?
+    # Ctrl-C while the interpreter is installed: neither "not found" nor "below
+    # the floor". hal0_run_interruptible (the caller's) turns this 130 into a
+    # quiet end; a child that died of the signal may report it before bash has
+    # seen it, so the status counts as much as the flag.
+    if [[ "${resolve_rc}" -eq 130 || "${_HAL0_WIZARD_INT:-0}" == "1" ]]; then
+        return 130
+    fi
+    if [[ "${resolve_rc}" -eq 0 && -n "${resolved_py}" ]]; then
         info "using ${resolved_py} for the main hal0 venv (default ${PY} is below hal0's 3.12 floor)"
         PY="${resolved_py}"
         export HAL0_PYTHON="${PY}"
@@ -984,7 +993,16 @@ if [[ "${_main_python_usable}" -eq 0 ]]; then
         && ! command -v python3.12 >/dev/null 2>&1; then
         info "Installing Python, which hal0 needs before it can ask anything."
     fi
-    _hal0_resolve_main_python_or_die install-first
+    # An interrupt here ends the install the way one in the seam does: status
+    # 130, quietly (no failure report), and the install does not carry on.
+    _python_first_rc=0
+    hal0_run_interruptible _hal0_resolve_main_python_or_die install-first || _python_first_rc=$?
+    if [[ "${_python_first_rc}" -eq 130 ]]; then
+        _HAL0_REPORT_WRITTEN=1
+        exit 130
+    fi
+    [[ "${_python_first_rc}" -eq 0 ]] || exit 1
+    unset _python_first_rc
     _main_python_usable=1
 fi
 # file-origin: end

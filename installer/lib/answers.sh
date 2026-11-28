@@ -8,8 +8,8 @@
 #          except the setup screens (hal0_run_wizard), which ask on the
 #          terminal and write only into a root-only work directory.
 # Provides: hal0_apply_answers, hal0_collect_answers, hal0_save_answers,
-#          hal0_wizard_present, hal0_run_wizard, hal0_answers_forget,
-#          hal0_answers_unset_doc_flm.
+#          hal0_wizard_present, hal0_run_wizard, hal0_run_interruptible,
+#          hal0_answers_forget, hal0_answers_unset_doc_flm.
 # Env:     HAL0_ANSWERS_FILE  path of an answers document (read here only).
 #          HAL0_FACTS_FILE    where the facts file goes; exported by
 #                             hal0_collect_answers with its default filled in.
@@ -311,6 +311,25 @@ hal0_collect_answers() {
     # nothing else applies one. hal0_run_wizard returns 0 only after it has.
     hal0_run_wizard || return $?
     return 0
+}
+
+# hal0_run_interruptible COMMAND [ARG...]: run COMMAND (a function of the
+# installer) under the interrupt rule of hal0_run_wizard. Ctrl-C reaches the
+# whole process group, so a child can die of it before bash has seen it, and
+# bash would then die of the signal too and the EXIT trap would write a failure
+# report. With an INT trap of its own the call returns 130 instead, whether the
+# trap ran or the command itself reported 130, and the caller ends the install
+# quietly. Any other status is the command's own. install.sh sets no INT trap of
+# its own, so `trap - INT` restores it. The same flag as the wizard's
+# (_HAL0_WIZARD_INT) records the signal, which COMMAND may also look at.
+hal0_run_interruptible() {
+    local rc=0
+    _HAL0_WIZARD_INT=0
+    trap '_HAL0_WIZARD_INT=1' INT
+    "$@" || rc=$?
+    trap - INT
+    if [[ "${_HAL0_WIZARD_INT}" == "1" ]]; then rc=130; fi
+    return "${rc}"
 }
 
 # ── The setup screens (the wizard) ──────────────────────────────────────────

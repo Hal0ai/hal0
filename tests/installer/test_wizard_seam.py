@@ -1069,6 +1069,99 @@ def test_a_child_that_dies_of_the_interrupt_before_bash_sees_it_is_a_quiet_130(
     )
 
 
+# The Python-first step runs before the seam on every run, so an interrupt there
+# ends the install the way an interrupt in the seam does: status 130, quietly,
+# no failure report, and the install does not carry on. resolve_main_python is
+# a stand-in with four behaviours; the real function and block are cut out of
+# install.sh.
+RESOLVE_STUBS = {
+    # a child that dies of the interrupt before bash has seen it
+    "child-dies": "kill -INT $BASHPID",
+    # bash itself gets the interrupt while the child runs, and the child then
+    # carries on and succeeds
+    "shell-gets-it": 'kill -INT $$; sleep 0.3; echo "python3.12"',
+    "fails": "return 1",
+    "works": 'echo "python3.12"',
+}
+
+
+def _python_first_script(tmp_path: Path, how: str) -> str:
+    fn_head = TEXT.index("_hal0_resolve_main_python_or_die() {")
+    fn = TEXT[fn_head : TEXT.index("\n}\n", fn_head) + 3]
+    region = _slice("# file-origin: begin", "# file-origin: end")
+    return f"""
+set -euo pipefail
+IFS=$'\\n\\t'
+PY="no-such-python-xyz"
+CURRENT_STEP="Pre-flight checks"
+source "{ROOT}/installer/lib/ui.sh"
+source "{ROOT}/installer/lib/failure-report.sh"
+source "{ANSWERS_SH}"
+hal0_write_failure_report() {{ echo "REPORT WRITTEN" >> "{tmp_path}/report.log"; echo "{tmp_path}/r.txt"; }}
+trap 'hal0_report_on_exit "$?"' EXIT
+trap 'echo "ERR TRAP" >> "{tmp_path}/report.log"; _HAL0_REPORT_WRITTEN=1; exit 1' ERR
+python_venv_hint() {{ echo hint; }}
+pkg_install_cmd() {{ echo install-python; }}
+resolve_main_python() {{ {RESOLVE_STUBS[how]}; }}
+_main_python_usable=0
+{fn}
+{region}
+echo "PAST THE STEP"
+"""
+
+
+@pytest.mark.parametrize("how", ["child-dies", "shell-gets-it"])
+def test_an_interrupt_while_python_is_installed_first_is_a_quiet_130(
+    tmp_path: Path, how: str
+) -> None:
+    proc = _run_group(
+        ["bash", "-c", _python_first_script(tmp_path, how)],
+        timeout=30,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env={"PATH": os.environ["PATH"], "HAL0_PLAIN": "1"},
+        cwd=tmp_path,
+    )
+    assert proc.returncode == 130, (proc.returncode, proc.stdout, proc.stderr)
+    assert "PAST THE STEP" not in proc.stdout
+    log = (tmp_path / "report.log").read_text() if (tmp_path / "report.log").exists() else ""
+    assert log == "", log
+    for text in ("not found", "below hal0", "using python3.12", "Failure report saved"):
+        assert text not in proc.stdout + proc.stderr, proc.stdout + proc.stderr
+
+
+def test_python_installed_first_still_dies_when_it_cannot_be_resolved(tmp_path: Path) -> None:
+    proc = _run_group(
+        ["bash", "-c", _python_first_script(tmp_path, "fails")],
+        timeout=30,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env={"PATH": os.environ["PATH"], "HAL0_PLAIN": "1"},
+        cwd=tmp_path,
+    )
+    assert proc.returncode == 1, (proc.stdout, proc.stderr)
+    assert "python interpreter 'no-such-python-xyz' not found" in proc.stderr
+    assert "PAST THE STEP" not in proc.stdout
+    assert "REPORT WRITTEN" in (tmp_path / "report.log").read_text()
+
+
+def test_python_installed_first_goes_on_when_it_is_resolved(tmp_path: Path) -> None:
+    proc = _run_group(
+        ["bash", "-c", _python_first_script(tmp_path, "works")],
+        timeout=30,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env={"PATH": os.environ["PATH"], "HAL0_PLAIN": "1"},
+        cwd=tmp_path,
+    )
+    assert proc.returncode == 0, (proc.stdout, proc.stderr)
+    assert "PAST THE STEP" in proc.stdout and not (tmp_path / "report.log").exists()
+    assert "using python3.12" in proc.stdout
+
+
 BLOCKED_ON_FIFO = """
 import os, sys
 with open(sys.argv[2], "w") as fh:

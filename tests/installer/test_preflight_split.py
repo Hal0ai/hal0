@@ -19,6 +19,7 @@ import pytest
 INSTALL_SH = Path(__file__).resolve().parents[2] / "installer" / "install.sh"
 TEXT = INSTALL_SH.read_text(encoding="utf-8")
 
+ANSWERS_SH = INSTALL_SH.parent / "lib" / "answers.sh"
 _STEP_START = '\nui_step "Pre-flight checks"'
 _STEP_END = '\nui_step "System user"'
 _SEAM = "\nhal0_collect_answers || _seam_rc=$?\n"
@@ -236,6 +237,7 @@ def _python_first_script(tmp_path: Path, *, usable: bool, py: str = "python3") -
     pre = "true" if usable else "false"
     return f"""
 set -uo pipefail
+source "{ANSWERS_SH}"
 PATH="{bin_dir}"
 LOG="{log}"
 info() {{ echo "info: $*" >> "$LOG"; }}
@@ -450,6 +452,7 @@ def _file_branch_run(tmp_path: Path, *, usable: int = 0, have: tuple[str, ...] =
         stub.chmod(0o755)
     script = f"""
 set -u
+source "{ANSWERS_SH}"
 PATH="{bin_dir}"
 info() {{ echo "INFO: $*"; }}
 _hal0_resolve_main_python_or_die() {{ echo "INSTALL_ATTEMPTED $*"; }}
