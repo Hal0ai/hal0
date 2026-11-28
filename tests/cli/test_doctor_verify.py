@@ -81,8 +81,11 @@ def test_check_capabilities_active_vs_none() -> None:
     assert dv.check_capabilities(None).status == "warn"
 
 
-def test_check_capabilities_all_disabled_warns_with_enable_step() -> None:
-    """#2736: every seeded group has children; all disabled is not '3 active'."""
+def test_check_capabilities_all_disabled_informs_with_enable_step() -> None:
+    """#2736: every seeded group has children; all disabled is not '3 active'.
+
+    Every job is optional (a fresh install switches none on), so the row is informational.
+    """
     fresh = {
         "selections": {
             "embed": {"default": _sel(False)},
@@ -91,7 +94,8 @@ def test_check_capabilities_all_disabled_warns_with_enable_step() -> None:
         }
     }
     c = dv.check_capabilities(fresh)
-    assert c.status == "warn" and c.detail == "none active"
+    assert c.status == "pass" and c.detail.startswith("none active")
+    assert "not set up" in c.detail
     assert any(s.label == "Enable a capability" for s in c.next_steps)
 
 

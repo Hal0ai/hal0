@@ -245,8 +245,15 @@ def check_capabilities(capabilities: dict[str, Any] | None) -> Check:
         and any(isinstance(sel, dict) and sel.get("enabled") for sel in children.values())
     ]
     if not active:
+        # Every capability job is optional, and its slot is created when the job is
+        # switched on. A box with none on (the fresh-install shape) is complete, not
+        # degraded: this row informs, and keeps the steps for whoever wants one.
         return Check(
-            "capabilities", "Capability slots", _WARN, "none active", next_steps=caps_steps
+            "capabilities",
+            "Capability slots",
+            _PASS,
+            "none active: embedding, speech and image jobs are not set up (optional)",
+            next_steps=caps_steps,
         )
     return Check(
         "capabilities",

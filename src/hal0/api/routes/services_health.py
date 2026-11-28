@@ -40,6 +40,7 @@ from hal0.api.routes.comfyui import (
     _queue_counts,
     _systemd_active,
 )
+from hal0.jobs import job_slot_present, not_set_up_detail
 from hal0.services.registry import SERVICES, ServiceDef
 
 log = structlog.get_logger(__name__)
@@ -138,6 +139,14 @@ async def _img_unit_state(request: Request) -> str:
     return await _unit_active_state(unit)
 
 
+async def _img_job_absent(request: Request) -> bool:
+    """True only when the slot manager answered and no image slot is configured."""
+    upstreams = getattr(request.app.state, "upstreams", None)
+    names = {u.name for u in upstreams.list()} if upstreams is not None else set()
+    manager = getattr(request.app.state, "slot_manager", None)
+    return await job_slot_present(manager, "image", upstream_names=names) is False
+
+
 # ── per-service probes ────────────────────────────────────────────────────────
 
 
@@ -231,7 +240,11 @@ async def _health_comfyui(request: Request) -> dict[str, Any]:
         # (idle-evicted / never started) is not an error condition. Only
         # consult the unit when the probe saw NOTHING listening; an HTTP-level
         # failure means something is running and stays down/red as-is.
-        if cu_detail == "unreachable":
+        if cu_detail == "unreachable" and await _img_job_absent(request):
+            # No img slot exists: the images job was never switched on. That is
+            # information (grey, like a deliberate stop), not a fault.
+            cu_state, cu_detail = "stopped", not_set_up_detail("image")
+        elif cu_detail == "unreachable":
             cu_state, cu_detail = _down_state(await _img_unit_state(request), cu_detail)
         else:
             cu_state = "down"
@@ -375,7 +388,8 @@ async def services_health(request: Request) -> dict[str, Any]:
         }
 
     ``state`` splits not-up into ``stopped`` (deliberate — unit inactive,
-    comes back on demand, renders grey) and ``down`` (unit failed / unknown /
+    comes back on demand, or the job was never switched on, so ``detail`` reads
+    ``not set up``; renders grey) and ``down`` (unit failed / unknown /
     unmonitored — renders red). ``up`` stays for older consumers.
 
     Iterates the registry table (not a hardcoded id list, #2028) so a new

@@ -41,10 +41,15 @@ def test_v1_completions_no_route_returns_typed_404(client: TestClient) -> None:
     assert r.json()["error"]["code"] == "dispatch.no_route"
 
 
-def test_v1_embeddings_no_route_returns_typed_404(client: TestClient) -> None:
+def test_v1_embeddings_without_an_embed_slot_says_the_job_is_not_set_up(
+    client: TestClient,
+) -> None:
+    """No embed slot at all (the fresh-install shape): 503, not a 404 that reads like a typo."""
     r = client.post("/v1/embeddings", json={"model": "embed", "input": "test"})
-    assert r.status_code == 404
-    assert r.json()["error"]["code"] == "dispatch.no_route"
+    assert r.status_code == 503
+    error = r.json()["error"]
+    assert error["code"] == "capability_not_enabled"
+    assert error["capability"] == "embed"
 
 
 def test_v1_models_specific_404_envelope(client: TestClient) -> None:

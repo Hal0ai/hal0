@@ -77,6 +77,12 @@ from hal0.dispatcher.single_flight import SingleFlightGroup
 from hal0.errors import Hal0Error
 from hal0.forwarded_headers import forwardable_request_headers
 from hal0.http_client import async_client
+from hal0.jobs import (
+    CapabilityNotEnabled,
+    job_for_path,
+    job_for_slot_name,
+    job_slot_present,
+)
 from hal0.services.models_service import is_alias
 from hal0.slots.state import SlotCrashLooping, SlotNpuConflict, SlotState
 from hal0.upstreams.catalog import NotEnabled, Resolved, participates, resolve_requested_model
@@ -1063,6 +1069,9 @@ class Dispatcher:
             raise not_enabled.error
 
         # ── Step 4: capability/path routing ──────────────────────────────
+        # A transcription request is not path-pinned below, so with no
+        # transcription slot it would end at the ``agent`` chat slot.
+        await self._refuse_absent_job(path, None, only="stt")
         try:  # TIER1 — narrow exception handling; log + re-raise typed errors
             slot_upstream = resolve_by_capability(
                 path,
@@ -1078,6 +1087,9 @@ class Dispatcher:
                 path=path,
                 error=exc.message,
             )
+            # The job's slot does not exist because the job was never switched on:
+            # say that, instead of a "not found" that reads like a caller typo.
+            await self._refuse_absent_job(path, exc.details.get("slot"))
             message = (
                 f"model {model_id!r} not found in registry, no upstream advertised it, "
                 f"and legacy slot resolution failed"
@@ -2054,6 +2066,25 @@ class Dispatcher:
             is_serving=self._slot_manager.is_ready_for_dispatch,
             advertised=lambda name: self._cached_models(name),
         )
+
+    async def _refuse_absent_job(
+        self, path: str, candidate: str | None, *, only: str | None = None
+    ) -> None:
+        """Raise :class:`CapabilityNotEnabled` when the job this request needs has no slot.
+
+        The job comes from the request path, or from the slot name capability routing
+        picked (a chat request whose model name says ``embed``). It only ever replaces a
+        refusal that was going to happen: ``None`` from the slot inventory (no manager,
+        unreadable) leaves the old answer, and a slot that exists but is not serving is
+        not "not set up". ``only`` limits the check to one job.
+        """
+        capability = job_for_path(path) or (job_for_slot_name(candidate) if candidate else None)
+        if capability is None or capability == "npu" or (only and capability != only):
+            return
+        registered = {u.name for u in self._upstreams.list()}
+        present = await job_slot_present(self._slot_manager, capability, upstream_names=registered)
+        if present is False:
+            raise CapabilityNotEnabled(capability)
 
     def _default_for_path(self, path: str) -> str:
         if "/embeddings" in path:

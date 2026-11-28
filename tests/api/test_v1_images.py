@@ -118,17 +118,16 @@ def _seed_img_upstream(client: TestClient, port: int = 8186) -> None:
 
 
 def test_v1_images_no_upstream_returns_envelope(client: TestClient) -> None:
-    """No img slot configured → dispatch errors out with a 404 envelope."""
+    """No img slot configured → the job is "not set up": a 503 capability envelope."""
     _install("sdxl-turbo")
     r = client.post(
         "/v1/images/generations",
         json={"model": "sdxl-turbo", "prompt": "a cat"},
     )
-    # NoRouteFound or LegacyResolutionFailed both surface as dispatch.* envelopes.
-    assert r.status_code in (404, 502, 503)
+    assert r.status_code == 503
     body = r.json()
-    assert "error" in body
-    assert body["error"]["code"].startswith(("dispatch.", "image."))
+    assert body["error"]["code"] == "capability_not_enabled"
+    assert body["error"]["capability"] == "image"
 
 
 def test_v1_images_empty_prompt_422(client: TestClient) -> None:
@@ -1133,6 +1132,7 @@ def test_v1_images_a_failed_dispatch_leaves_no_image_job_open(client: TestClient
     _install("sdxl-turbo")
     manager = _slot_manager_with_image_section({})  # ensure_img is a no-op; no upstream seeded
     client.app.state.slot_manager = manager
+    client.app.state.dispatcher._slot_manager = manager  # the box has an img slot, no upstream
 
     r = client.post("/v1/images/generations", json={"model": "sdxl-turbo", "prompt": "x"})
 

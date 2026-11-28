@@ -63,6 +63,7 @@ from hal0.cli.doctor_verify import (
     gather_payloads,
 )
 from hal0.config import paths
+from hal0.jobs import not_set_up_detail
 from hal0.system.seam_check import REMEDIATION, SeamStatus, probe_seams
 
 if TYPE_CHECKING:
@@ -1171,7 +1172,7 @@ def check_img_custom_nodes() -> Check:
     directory = paths.slots_config_dir()
     stem = resolve_slot_stem(directory, "img")
     if stem is None:
-        return Check(key, label, _PASS, "no img slot configured")
+        return Check(key, label, _PASS, not_set_up_detail("image"))
     try:
         cfg = tomllib.loads((directory / f"{stem}.toml").read_text())
     except ValueError:

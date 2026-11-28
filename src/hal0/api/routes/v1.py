@@ -2546,6 +2546,8 @@ async def images_generations(request: Request, dispatcher: DispatcherDep) -> Res
     * 422 ``image.invalid_size`` for a ``size`` that is not a string (``null`` and ``""`` mean
       "no size"); ``error.details.size_type`` names the type, the value is never echoed. A
       string the translator cannot read is not an error: it falls back to its default size.
+    * 503 ``capability_not_enabled`` (``error.capability`` is ``image``) when the box has no
+      image slot because the job was never switched on; the message says how to do that.
     * Model resolution (:func:`hal0.comfyui.resolve.resolve_image_model`) raises
       404 ``image.model_unknown``, 409 ``image.model_not_installed``, 422
       ``image.model_not_renderable`` or 422 ``image.model_required``; a models tree the hal0
@@ -2561,7 +2563,7 @@ async def images_generations(request: Request, dispatcher: DispatcherDep) -> Res
     A client that disconnects (the dashboard's Cancel) while the GPU switches is answered with
     an empty 499 and nothing is submitted to ComfyUI; the arbiter restores the GPU as usual.
     """
-    from hal0.api.routes.comfyui import record_gate_refusal
+    from hal0.api.routes.comfyui import record_gate_refusal, require_img_slot
     from hal0.comfyui.install import readable_tree
     from hal0.comfyui.resolve import resolve_image_model
     from hal0.dispatcher.router import NoRouteFound, UpstreamUnavailable
@@ -2589,6 +2591,11 @@ async def images_generations(request: Request, dispatcher: DispatcherDep) -> Res
             code="image.invalid_size",
             details={"size_type": type(size).__name__},
         )
+
+    # With no image slot the images job was never switched on. Say that after the request's
+    # own mistakes and before a model is resolved, so a request without a model is not told
+    # to pick one first.
+    await require_img_slot(request)
 
     # 1. Resolve the model first: a request that cannot render must fail before the GPU
     #    is arbitrated (a cold-start of the img container) on its behalf. The img

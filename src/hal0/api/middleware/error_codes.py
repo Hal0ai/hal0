@@ -41,8 +41,14 @@ from hal0.errors import (
 log = structlog.get_logger(__name__)
 
 
-def _envelope(code: str, message: str, details: dict[str, Any] | None = None) -> dict[str, Any]:
-    return {"error": {"code": code, "message": message, "details": details or {}}}
+def _envelope(
+    code: str,
+    message: str,
+    details: dict[str, Any] | None = None,
+    fields: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """The envelope; ``fields`` are extra keys beside ``code`` that one error type adds."""
+    return {"error": {"code": code, "message": message, "details": details or {}, **(fields or {})}}
 
 
 def _shape_validation_errors(exc: RequestValidationError) -> list[dict[str, Any]]:
@@ -83,7 +89,9 @@ def install(app: FastAPI) -> None:
             headers = {"Retry-After": str(int(retry_after))}
         return JSONResponse(
             status_code=exc.status,
-            content=_envelope(exc.code, exc.message, exc.details),
+            content=_envelope(
+                exc.code, exc.message, exc.details, getattr(exc, "envelope_fields", None)
+            ),
             headers=headers,
         )
 

@@ -90,6 +90,7 @@ from hal0.comfyui.picker import recommendation, recommended_id
 from hal0.hardware import gpu_view
 from hal0.hardware.memory_budget import MemoryBudget
 from hal0.http_client import async_client
+from hal0.jobs import CapabilityNotEnabled, capability_not_enabled_message, job_slot_present
 from hal0.providers import comfyui as comfyui_provider
 from hal0.providers.comfyui_workflows import effective_size
 from hal0.registry.pull import PullJob, make_job
@@ -194,6 +195,22 @@ async def _img_artefacts(request: Request) -> tuple[str, str]:
     manager = getattr(request.app.state, "slot_manager", None)
     token = await slot_token_for(manager, _IMG_SLOT) if manager is not None else _IMG_SLOT
     return slot_unit_name(token), slot_container_name(token)
+
+
+async def require_img_slot(request: Request) -> None:
+    """Raise :class:`CapabilityNotEnabled` when this box has no image slot.
+
+    An image slot is created when an image model is installed or the images job is
+    switched on, so a fresh install has none. A request that needs the engine answers
+    that plainly. With no slot manager the answer is unknown and nothing is refused.
+    """
+    upstreams = getattr(request.app.state, "upstreams", None)
+    names = {u.name for u in upstreams.list()} if upstreams is not None else set()
+    present = await job_slot_present(
+        getattr(request.app.state, "slot_manager", None), "image", upstream_names=names
+    )
+    if present is False:
+        raise CapabilityNotEnabled("image")
 
 
 def _build_client(timeout: httpx.Timeout) -> httpx.AsyncClient:
@@ -827,6 +844,14 @@ async def comfyui_switchover(
             f"a switch to {_switch['target']} is already running",
             code="comfyui.switch_in_progress",
         )
+    # Image mode needs the image slot. A box that never switched the job on has none:
+    # say so now, not as an error that only shows up later in /status.
+    if mode == "generation":
+        try:
+            await require_img_slot(request)
+        except CapabilityNotEnabled:
+            _record_gate_rejection(request, 503, capability_not_enabled_message("image"))
+            raise
     # Idempotency: the arbiter is the source of truth for the current mode
     # (D7). The img unit stays up in inference mode, so it cannot tell the
     # modes apart: when the arbiter cannot answer, refuse rather than guess.
@@ -1602,6 +1627,7 @@ async def comfyui_restart(request: Request, background_tasks: BackgroundTasks) -
     manager = getattr(request.app.state, "slot_manager", None)
     if manager is None or not hasattr(manager, "restart"):
         return _arbiter_unavailable()
+    await require_img_slot(request)
 
     async def _restart_img() -> None:
         try:

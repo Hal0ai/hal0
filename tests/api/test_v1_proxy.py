@@ -100,19 +100,21 @@ def test_v1_completions_no_route_returns_typed_404(client: TestClient) -> None:
     assert r.json()["error"]["code"] == "dispatch.no_route"
 
 
-def test_v1_embeddings_no_route_returns_typed_404(client: TestClient) -> None:
+def test_v1_embeddings_without_an_embed_slot_is_503_not_set_up(client: TestClient) -> None:
     r = client.post("/v1/embeddings", json={"model": "model-nobody-serves", "input": "x"})
-    assert r.status_code == 404
-    assert r.json()["error"]["code"] == "dispatch.no_route"
+    assert r.status_code == 503
+    assert r.json()["error"]["code"] == "capability_not_enabled"
+    assert r.json()["error"]["capability"] == "embed"
 
 
-def test_v1_rerankings_no_route_returns_typed_404(client: TestClient) -> None:
+def test_v1_rerankings_without_a_rerank_slot_is_503_not_set_up(client: TestClient) -> None:
     r = client.post(
         "/v1/rerankings",
         json={"model": "model-nobody-serves", "query": "q", "documents": ["d"]},
     )
-    assert r.status_code == 404
-    assert r.json()["error"]["code"] == "dispatch.no_route"
+    assert r.status_code == 503
+    assert r.json()["error"]["code"] == "capability_not_enabled"
+    assert r.json()["error"]["capability"] == "rerank"
 
 
 def test_v1_rerank_alias_is_routed_not_405(client: TestClient) -> None:
@@ -123,7 +125,7 @@ def test_v1_rerank_alias_is_routed_not_405(client: TestClient) -> None:
         "/v1/rerank",
         json={"model": "model-nobody-serves", "query": "q", "documents": ["d"]},
     )
-    # A typed dispatch 404 proves the route exists and resolves through the
-    # dispatcher; the pre-fix failure mode was a bare 405 Method Not Allowed.
-    assert r.status_code == 404
-    assert r.json()["error"]["code"] == "dispatch.no_route"
+    # A typed refusal from the dispatcher proves the route exists and resolves through it
+    # (this box has no rerank slot, so it says so); the pre-fix failure mode was a bare 405.
+    assert r.status_code == 503
+    assert r.json()["error"]["code"] == "capability_not_enabled"
