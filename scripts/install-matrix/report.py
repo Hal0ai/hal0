@@ -131,22 +131,33 @@ def row(res: dict) -> list[str]:
     ]  # fmt: skip
 
 
-def failed(res: dict) -> bool:
+def why_failed(res: dict) -> str | None:
+    """Why a run counts as failed, or None when it does not."""
     code = res.get("install_exit_code")
-    return (is_num(code) and code != 0) or bool(res.get("timed_out")) or bool(res.get("idle_timed_out"))
+    if res.get("idle_timed_out"):
+        return "idle timeout"
+    if res.get("timed_out"):
+        return "timeout"
+    if not is_num(code):
+        return "no driver result"
+    if code != 0:
+        return f"exit {code}"
+    if res.get("failed_units"):
+        return "failed units"
+    return None
 
 
 def render(results: list[dict]) -> str:
     lines = ["| " + " | ".join(HEADERS) + " |", "|" + "|".join(["---"] * len(HEADERS)) + "|"]
     lines += ["| " + " | ".join(row(r)) + " |" for r in results]
-    bad = [r for r in results if failed(r)]
+    bad = [r for r in results if why_failed(r)]
     lines += ["", "## Failed runs", ""]
     if not bad:
         lines.append("None.")
     for res in bad:
         units = res.get("failed_units")
         first = units[0] if isinstance(units, list) and units else None
-        why = "idle timeout" if res.get("idle_timed_out") else "timeout" if res.get("timed_out") else f"exit {d(res.get('install_exit_code'))}"
+        why = why_failed(res)
         lines.append(
             f"- {d(res.get('shape'))} ({started(res) or '-'}): {why}; last step: {d(res.get('last_step'))}; "
             f"first failed unit: {d(first)}"

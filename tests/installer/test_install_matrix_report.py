@@ -130,3 +130,27 @@ def test_failed_run_listed_with_last_step(tmp_path):
     assert "hal0-api.service" in failures
     assert "hal0-x.service" not in failures
     assert "u2604-cpu-terminal" not in failures
+
+
+def test_null_exit_code_listed_as_failed(tmp_path):
+    put(
+        tmp_path, "crashed",
+        make_result(
+            "u2604-gpu", "2026-11-28T11:00:00Z", install_exit_code=None, timed_out=None,
+            idle_timed_out=None, last_step="Install runners", failed_units=["hal0-api.service"],
+        ),
+    )  # fmt: skip
+    failures = run(tmp_path).stdout.split("\n\n", 1)[1]
+    assert "u2604-gpu" in failures
+    assert "no driver result" in failures
+    assert "Install runners" in failures
+    assert "hal0-api.service" in failures
+
+
+def test_exit_zero_with_failed_units_listed(tmp_path):
+    put(tmp_path, "units", make_result("u2604-gpu", "2026-11-28T11:00:00Z", failed_units=["hal0-x.service"]))
+    put(tmp_path, "clean", make_result("u2604-cpu-terminal", "2026-11-28T10:00:00Z"))
+    failures = run(tmp_path).stdout.split("\n\n", 1)[1]
+    assert "failed units" in failures
+    assert "hal0-x.service" in failures
+    assert "u2604-cpu-terminal" not in failures
