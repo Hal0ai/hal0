@@ -1007,8 +1007,8 @@ HELPER_NON_FEATURE_VARS = {
     "gpu",
 }
 # The helper never sets nesting: the engine does. Sources: README.md (the
-# ct/hal0.sh row of the file table) and docs/getting-started/proxmox.mdx lines
-# 106 (the features of the manual recipe) and 236 (nesting is already on).
+# ct/hal0.sh row of the file table) and docs/getting-started/proxmox.mdx (the
+# features line of the manual recipe, and the sentence saying nesting is on).
 HELPER_ENGINE_FEATURES = {"nesting": "1"}
 PROXMOX_MDX = REPO / "docs" / "getting-started" / "proxmox.mdx"
 
@@ -1046,9 +1046,14 @@ def test_feature_list_matches_proxmox_script():
         "",
     )
     assert "nesting" in readme_row, "README no longer lists nesting for ct/hal0.sh"
-    mdx = PROXMOX_MDX.read_text().splitlines()
-    assert "--features nesting=1,keyctl=1,fuse=1,mknod=1" in mdx[105]
-    assert "nesting is already on" in mdx[235]
+    mdx = PROXMOX_MDX.read_text()
+    assert re.search(r"--features\s+nesting=1,keyctl=1,fuse=1,mknod=1", mdx), (
+        "docs/getting-started/proxmox.mdx must contain the recipe line "
+        "`--features nesting=1,keyctl=1,fuse=1,mknod=1`"
+    )
+    assert re.search(r"nesting\s+is\s+already\s+on", mdx), (
+        "docs/getting-started/proxmox.mdx must contain a sentence saying 'nesting is already on'"
+    )
     mine = re.search(r'^_PVE_FEATURES="([^"]*)"', PVE_SH.read_text(), re.M)
     assert mine, "_PVE_FEATURES not found in pve.sh"
     assert mine.group(1) == theirs == FEATURES
