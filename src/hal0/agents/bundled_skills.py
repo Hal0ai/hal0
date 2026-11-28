@@ -37,6 +37,15 @@ RETIRED_BUNDLED_SKILLS: frozenset[str] = frozenset(
     }
 )
 
+#: Single files a shipped skill used to carry and no longer does, relative to the
+#: ship root. ``cp -rf`` leaves them in place inside a skill that is still shipped.
+RETIRED_BUNDLED_FILES: frozenset[str] = frozenset(
+    {
+        # Assumed user units and printed parts of tokens (#4013).
+        "hal0-service-management/scripts/check-service-env.sh",
+    }
+)
+
 SHIP_ROOT = Path("/usr/share/hal0/skills")
 
 
@@ -82,6 +91,15 @@ def prune_retired_skills(
                 removed.append(str(copy))
             except OSError as exc:
                 log.warning("skills.retired_remove_failed path=%s error=%s", copy, exc)
+    if ship_root is not None:
+        for rel in sorted(RETIRED_BUNDLED_FILES):
+            stale = ship_root / rel
+            if stale.is_file() and not stale.is_symlink():
+                try:
+                    stale.unlink()
+                    removed.append(str(stale))
+                except OSError as exc:
+                    log.warning("skills.retired_remove_failed path=%s error=%s", stale, exc)
     for path in removed:
         log.info("skills.retired_removed path=%s", path)
     return removed
@@ -113,4 +131,11 @@ if __name__ == "__main__":  # pragma: no cover
     sys.exit(main())
 
 
-__all__ = ["RETIRED_BUNDLED_SKILLS", "SHIP_ROOT", "main", "mirror_root", "prune_retired_skills"]
+__all__ = [
+    "RETIRED_BUNDLED_FILES",
+    "RETIRED_BUNDLED_SKILLS",
+    "SHIP_ROOT",
+    "main",
+    "mirror_root",
+    "prune_retired_skills",
+]
