@@ -11,6 +11,7 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -27,8 +28,19 @@ SSE = (
 CURL_STUB = r"""#!/usr/bin/env bash
 d="$STUB_DIR"
 url="${*: -1}"
+printf '%s\n' "$*" >> "$d/curl.args"
+printf '%s\n' "$url" >> "$d/curl.urls"
 want_code=0
-for a in "$@"; do [[ "$a" == -w ]] && want_code=1; done
+hdr=""
+prev=""
+for a in "$@"; do
+  [[ "$a" == -w ]] && want_code=1
+  [[ "$prev" == -H && "$a" == @- ]] && hdr="$(cat)"
+  prev="$a"
+done
+case "$url" in */v1/runs*)
+  [[ "$hdr" == *"Authorization: Bearer $STUB_KEY"* ]] || { printf '%s' '{"error":"unauthorized"}'; exit 0; } ;;
+esac
 code() { if ((want_code)); then printf '%s' "$1"; fi; }
 case "$url" in
   */api/health)
@@ -39,12 +51,13 @@ case "$url" in
     cat "$d/chat.sse" ;;
   */api/memory/add)
     [[ -e "$d/memory_fail" ]] && exit 7
+    for a in "$@"; do [[ "$a" == \{* ]] && printf '%s' "$a" > "$d/memory.body"; done
     code 200 ;;
   */v1/runs)
     [[ -e "$d/hermes_fail" ]] && exit 7
     printf '%s' '{"run_id":"run_1","status":"queued"}' ;;
   */v1/runs/run_1)
-    printf '%s' '{"run_id":"run_1","status":"completed","output":"ready"}' ;;
+    printf '%s' "$(cat "$d/run.json")" ;;
   *) exit 22 ;;
 esac
 """
@@ -56,10 +69,16 @@ if args[:2] == ["doctor", "--json"]:
     print(open(os.environ["STUB_DIR"] + "/doctor.json").read())
     sys.exit(int(os.environ.get("STUB_DOCTOR_EXIT", "1")))
 if args[:2] == ["memory", "recall"]:
-    print('{{"items":[{{"content":"note ' + args[2] + '"}}]}}')
+    if os.path.exists(os.environ["STUB_DIR"] + "/recall_empty"):
+        print('{{"items":[]}}')
+    else:
+        body = open(os.environ["STUB_DIR"] + "/memory.body").read()
+        print('{{"items":[{{"content":' + repr(body) + '}}]}}')
     sys.exit(0)
 sys.exit(3)
 """
+
+KEY = "0123456789abcdef0123"
 
 DOCTOR = (
     '[{"id":"a","severity":"ok"},{"id":"b","severity":"ok"},'
@@ -91,15 +110,21 @@ class Guest:
         self.write_bin("curl", CURL_STUB)
         # A shebang cannot hold a path with spaces, so reach the interpreter
         # through a symlink in the temp tree (the launcher's shebang in a guest).
+        # (a wrapper script, so the venv and its PyYAML stay visible).
         py = tmp_path / "py" / "python3"
         py.parent.mkdir()
-        py.symlink_to(sys.executable)
+        py.write_text(f'#!/usr/bin/env bash\nexec "{sys.executable}" "$@"\n')
+        py.chmod(0o755)
         self.write_bin("hal0", HAL0_STUB.format(python=py))
         (self.stubs / "chat.sse").write_text(SSE)
+        self.set_run('{"run_id":"run_1","status":"completed","output":"ready"}')
         (self.stubs / "doctor.json").write_text(DOCTOR)
         self.net("lo", 999)
         self.net("eth0", 1000)
         self.net("eth1", 234)
+
+    def set_run(self, body: str) -> None:
+        (self.stubs / "run.json").write_text(body)
 
     def write_bin(self, name: str, text: str) -> None:
         p = self.bin / name
@@ -128,6 +153,7 @@ class Guest:
             "HOME": str(self.root),
             "HAL0_COLLECT_ROOT": str(self.root),
             "STUB_DIR": str(self.stubs),
+            "STUB_KEY": KEY,
             "HAL0_COLLECT_HEALTH_TRIES": "2",
             "HAL0_COLLECT_HEALTH_SLEEP": "0.05",
             "HAL0_COLLECT_POLL_SLEEP": "0.05",
@@ -150,7 +176,7 @@ class Guest:
     def hermes_env(self) -> None:
         h = self.root / "hermes"
         h.mkdir()
-        (h / ".env").write_text("API_SERVER_KEY=0123456789abcdef0123\n")
+        (h / ".env").write_text(f"API_SERVER_KEY={KEY}\n")
 
 
 def parse(out: str) -> dict[str, str]:
@@ -266,6 +292,104 @@ def test_probe_hermes_reply(guest: Guest):
     _, kv = guest.run("probe")
     assert kv["hermes_reply_ok"] == "1"
     assert float(kv["hermes_reply_s"]) >= 0
+
+
+def test_probe_hermes_completed_with_empty_output_is_not_a_reply(guest: Guest):
+    guest.hermes_env()
+    for body in (
+        '{"run_id":"run_1","status":"completed","output":""}',
+        '{"run_id":"run_1","status":"completed","output":null}',
+        '{"run_id":"run_1","status":"completed","error":"boom"}',
+    ):
+        guest.set_run(body)
+        proc, kv = guest.run("probe")
+        assert proc.returncode == 0
+        assert (kv["hermes_reply_ok"], kv["hermes_reply_s"]) == ("0", "-1"), body
+
+
+def test_probe_hermes_failed_run(guest: Guest):
+    guest.hermes_env()
+    guest.set_run('{"run_id":"run_1","status":"failed","output":"partial"}')
+    proc, kv = guest.run("probe")
+    assert proc.returncode == 0
+    assert (kv["hermes_reply_ok"], kv["hermes_reply_s"]) == ("0", "-1")
+
+
+def test_probe_hermes_never_completes_times_out(guest: Guest):
+    guest.hermes_env()
+    guest.set_run('{"run_id":"run_1","status":"running","output":"thinking"}')
+    t0 = time.monotonic()
+    proc, kv = guest.run("probe", {"HAL0_COLLECT_HERMES_TIMEOUT": "1"})
+    assert time.monotonic() - t0 < 10
+    assert proc.returncode == 0
+    assert (kv["hermes_reply_ok"], kv["hermes_reply_s"]) == ("0", "-1")
+
+
+def test_probe_memory_never_recalled_ends_at_timeout(guest: Guest):
+    (guest.stubs / "recall_empty").write_text("")
+    t0 = time.monotonic()
+    proc, kv = guest.run("probe", {"HAL0_COLLECT_MEMORY_TIMEOUT": "1"})
+    assert time.monotonic() - t0 < 10
+    assert proc.returncode == 0
+    assert (kv["memory_write_ok"], kv["memory_read_ok"]) == ("1", "0")
+
+
+def test_memory_probe_stores_a_named_fact(guest: Guest):
+    guest.run("probe")
+    body = (guest.stubs / "memory.body").read_text()
+    assert "install check code is hal0check" in body
+
+
+def _hermes_urls(guest: Guest) -> list[str]:
+    return [u for u in (guest.stubs / "curl.urls").read_text().split() if "/v1/runs" in u]
+
+
+def test_hermes_endpoint_from_env_file(guest: Guest):
+    guest.hermes_env()
+    env = guest.root / "hermes" / ".env"
+    env.write_text(env.read_text() + "API_SERVER_HOST=10.9.8.7\nAPI_SERVER_PORT=8650\n")
+    _, kv = guest.run("probe")
+    assert kv["hermes_reply_ok"] == "1"
+    assert _hermes_urls(guest)[0] == "http://10.9.8.7:8650/v1/runs"
+
+
+def test_hermes_endpoint_and_key_from_config_yaml(guest: Guest):
+    h = guest.root / "hermes"
+    h.mkdir()
+    (h / "config.yaml").write_text(
+        "gateway:\n  platforms:\n    api_server:\n"
+        f"      host: 127.0.0.2\n      port: 9191\n      key: {KEY}\n"
+    )
+    (h / ".env").write_text("API_SERVER_PORT=8650\nAPI_SERVER_KEY=short\n")
+    _, kv = guest.run("probe")
+    assert kv["hermes_reply_ok"] == "1"
+    assert _hermes_urls(guest)[0] == "http://127.0.0.2:9191/v1/runs"
+
+
+def test_hermes_config_yaml_ignored_without_python(guest: Guest):
+    guest.hermes_env()
+    (guest.root / "hermes" / "config.yaml").write_text(
+        "gateway:\n  platforms:\n    api_server:\n      port: 9191\n"
+    )
+    guest.write_bin("hal0", "#!/usr/bin/env bash\nexit 1\n")
+    _, kv = guest.run("probe")
+    assert kv["hermes_reply_ok"] == "1"
+    assert _hermes_urls(guest)[0] == "http://127.0.0.1:8642/v1/runs"
+
+
+def test_hermes_key_stays_out_of_arguments_and_output(guest: Guest):
+    guest.hermes_env()
+    proc, kv = guest.run("probe")
+    assert kv["hermes_reply_ok"] == "1"
+    assert KEY not in proc.stdout + proc.stderr
+    assert KEY not in (guest.stubs / "curl.args").read_text()
+
+
+@pytest.mark.parametrize("mode", ["post", "probe"])
+def test_no_stray_stderr(guest: Guest, mode: str):
+    guest.hermes_env()
+    proc, _ = guest.run(mode)
+    assert proc.stderr == ""
 
 
 def test_probe_hermes_without_key_is_not_fatal(guest: Guest):

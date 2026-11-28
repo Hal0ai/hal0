@@ -9,7 +9,10 @@
 # the keys, not the exit code. It needs only bash, coreutils, curl, systemctl
 # and the hal0 command. JSON is parsed with the Python behind the hal0
 # launcher's shebang, run with -I; with no such Python the JSON-dependent keys
-# stay at their unknown value.
+# stay at their unknown value. Hermes's address and key come from the api_server
+# block of its config.yaml first, then its .env, then the defaults; that YAML is
+# read with the same Python, so without it a config.yaml-only key, host or port
+# is invisible and only .env and the defaults are used.
 #
 # Test seams (all optional):
 #   HAL0_COLLECT_ROOT          prefix for /sys/class/net, /etc/hal0/slots,
@@ -209,7 +212,7 @@ probe_chat() {
             -H 'Content-Type: application/json' -d "$body" \
             "$API/v1/chat/completions" 2>/dev/null
     ) || true
-    cpid=$!
+    cpid=$! # $! after a process substitution needs bash 4.4 or newer
     kill "$cpid" 2>/dev/null || true
     emit chat_ok "$ok"
     emit chat_first_token_s "$first"
@@ -224,12 +227,12 @@ probe_memory() {
     deadline_ns=$((start + MEMORY_TIMEOUT * 1000000000))
     code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 60 \
         -H 'Content-Type: application/json' \
-        -d '{"text":"Install matrix probe note: the verification token is '"$tok"'."}' \
+        -d '{"text":"The hal0 install check code is hal0check'"$tok"'."}' \
         "$API/api/memory/add" 2>/dev/null)" || code=""
     if [[ "$code" =~ ^2[0-9][0-9]$ ]]; then
         wok=1
         while :; do
-            out="$(timeout 60 hal0 memory recall "$tok" --json 2>/dev/null)" || out=""
+            out="$(timeout 60 hal0 memory recall "install check code" --json 2>/dev/null)" || out=""
             if [[ "$out" == *"$tok"* ]]; then
                 rok=1
                 break
@@ -260,33 +263,88 @@ dotenv_get() {
     printf '%s' "$out"
 }
 
+# usable_key VALUE -> true when hal0 would accept it (hermes_api.py _usable):
+# at least 16 characters and not a placeholder.
+usable_key() {
+    [[ "${#1}" -ge 16 ]] || return 1
+    case "$1" in changeme | placeholder | your-api-key | your_api_key | xxx) return 1 ;; esac
+    return 0
+}
+
 probe_hermes() {
-    local ok=0 secs=-1 home env key host port base start deadline_ns resp rid st
+    local ok=0 secs=-1 home key host port base start deadline_ns resp rid st cfg
+    local chost="" cport="" ckey="" ekey
     home="${HERMES_HOME:-/var/lib/hal0/.hermes}"
-    env="$home/.env"
-    key="$(dotenv_get "$env" API_SERVER_KEY)"
-    host="$(dotenv_get "$env" API_SERVER_HOST)"
-    port="$(dotenv_get "$env" API_SERVER_PORT)"
-    base="http://${host:-127.0.0.1}:${port:-8642}"
+    # Host, port and key resolve as hermes_api.py does: the api_server block of
+    # config.yaml first, then .env, then the defaults. Reading the YAML needs
+    # the installed Python; without it only .env and the defaults are seen.
+    if [[ -n "$PY" && -r "$home/config.yaml" ]]; then
+        cfg="$("$PY" -I -c '
+import sys
+try:
+    import yaml
+    node = yaml.safe_load(open(sys.argv[1], encoding="utf-8").read()) or {}
+    for part in ("gateway", "platforms", "api_server"):
+        node = node.get(part) if isinstance(node, dict) else None
+    blk = node if isinstance(node, dict) else {}
+except Exception:
+    blk = {}
+host = str(blk.get("host") or "").strip()
+try:
+    port = int(str(blk.get("port")).strip())
+    port = port if 0 < port < 65536 else ""
+except ValueError:
+    port = ""
+key = blk.get("key")
+key = key.strip() if isinstance(key, str) else ""
+print(host.replace("\n", " "))
+print(port)
+print(key.replace("\n", " "))
+' "$home/config.yaml" 2>/dev/null)" || cfg=""
+        {
+            read -r chost
+            read -r cport
+            read -r ckey
+        } <<<"$cfg" || true
+    fi
+    host="${chost:-$(dotenv_get "$home/.env" API_SERVER_HOST)}"
+    host="${host:-127.0.0.1}"
+    [[ "$host" == *:* && "$host" != \[* ]] && host="[$host]"
+    port="$cport"
+    if [[ -z "$port" ]]; then
+        port="$(dotenv_get "$home/.env" API_SERVER_PORT)"
+        [[ "$port" =~ ^[0-9]+$ ]] || port=""
+    fi
+    base="http://${host}:${port:-8642}"
+    key=""
+    if usable_key "$ckey"; then
+        key="$ckey"
+    else
+        ekey="$(dotenv_get "$home/.env" API_SERVER_KEY)"
+        usable_key "$ekey" && key="$ekey"
+    fi
     start="$(now_ns)"
     deadline_ns=$((start + HERMES_TIMEOUT * 1000000000))
     if [[ -n "$key" ]]; then
-        resp="$(curl -s --max-time 60 -H "Authorization: Bearer $key" \
+        # The key goes to curl on stdin (-H @-), never in a process argument.
+        resp="$(printf 'Authorization: Bearer %s\n' "$key" | curl -s --max-time 60 -H @- \
             -H 'Content-Type: application/json' -d '{"input":"'"$PROMPT"'"}' \
             "$base/v1/runs" 2>/dev/null)" || resp=""
         if [[ "$resp" =~ \"run_id\":\ *\"([A-Za-z0-9_.:-]+)\" ]]; then
             rid="${BASH_REMATCH[1]}"
             while :; do
-                resp="$(curl -s --max-time 30 -H "Authorization: Bearer $key" \
+                resp="$(printf 'Authorization: Bearer %s\n' "$key" | curl -s --max-time 30 -H @- \
                     "$base/v1/runs/$rid" 2>/dev/null)" || resp=""
                 st=""
                 [[ "$resp" =~ \"status\":\ *\"([a-z_]+)\" ]] && st="${BASH_REMATCH[1]}"
-                if [[ "$st" == completed ]]; then
+                # A reply is a completed run whose "output" (the run view's text
+                # field, hermes_client.py get_run, mcp/agents.py _view) holds text.
+                if [[ "$st" == completed && "$resp" =~ \"output\":\ *\"(\\[^nrt]|[^\"\\\ ]) ]]; then
                     ok=1
                     secs="$(fmt_ms "$start" "$(now_ns)")"
                     break
                 fi
-                case "$st" in failed | cancelled | interrupted) break ;; esac
+                case "$st" in failed | cancelled | interrupted | completed) break ;; esac
                 (($(now_ns) >= deadline_ns)) && break
                 sleep "$POLL_SLEEP"
             done
