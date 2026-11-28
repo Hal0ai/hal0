@@ -575,7 +575,8 @@ def real_memory_budget(memory_budget: MemoryBudgetStub, monkeypatch: pytest.Monk
 
 
 def _coverage_active(config: pytest.Config) -> bool:
-    """True when pytest-cov is tracing this run (``--cov``, the main-push CI leg)."""
+    """True when pytest-cov is tracing this run (``--cov``; CI no longer passes it, so in
+    practice a local coverage run)."""
     return config.pluginmanager.hasplugin("_cov") and bool(
         getattr(config.option, "cov_source", None)
     )

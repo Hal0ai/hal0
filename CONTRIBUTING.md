@@ -151,8 +151,9 @@ queue.
 
 Every PR runs the unit tier (α) and the UI checks in CI; the release-gate
 tier (γ) runs on a real box and is the last gate before a tagged release.
-The three checks GitHub requires before a PR to `main` can merge are the CI
-`python (3.12)` and `ui` jobs and the Playwright `γ-suite (chromium)` job
+The four checks GitHub requires before a PR to `main` can merge are the CI
+`python (3.12)`, `python (3.14)` and `ui` jobs and the Playwright
+`γ-suite (chromium)` job
 (see [E2E tests](#e2e-tests); despite the γ in its name, that suite runs
 against mocked backends and is not the release gate).
 
