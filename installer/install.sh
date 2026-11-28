@@ -3390,9 +3390,12 @@ fi
 # point. Unlike the brain pull (unconditional, ~1-3 GB) the anchor is ~18.5 GB,
 # so:
 #
-#   * it is OPT-IN, never assumed: the setup screens show the exact GB figure
-#     and record the answer, and an unattended run never pulls it unasked;
-#   * with no answer the default is NO, and the step says so and moves on;
+#   * it is never assumed: on the setup screens the Recommended setup includes
+#     it when it fits the box and the review screen shows the exact GB figure
+#     before anything downloads (Customize can leave it out); without screens
+#     it is pulled only when HAL0_PULL_AGENT_MODEL=1 or an answers document
+#     names it;
+#   * with no answer the step says so and moves on;
 #   * declining, skipping, or failing all leave the slot model-less, print
 #     what that costs, and let the install SUCCEED (ruling 7).
 #

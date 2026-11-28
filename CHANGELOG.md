@@ -41,21 +41,23 @@ applying. Add those subsections to a version's section to surface them; see
 - **The one-line install now shows the setup screens to a person at a terminal.** `curl -fsSL https://hal0.dev/install.sh | sudo bash` used to take every default when piped. A run with a terminal attached now shows the screens and waits there, so a script that runs the installer inside a terminal session must set `HAL0_NONINTERACTIVE=1` or pass `--answers=FILE` with a JSON answers document; a run with no terminal is unattended as before.
 - **An unknown installer flag now stops the run.** The installer used to warn and carry on with its defaults. It now prints one line (`unknown flag: ... (run with --help for the list)`) and exits with status 1 before anything changes, so fix a mistyped flag in your script.
 - **`hal0 setup` run by hand asks nothing.** It prints one line and stops. To change what was chosen at install, run the installer again with `--reconfigure`. The unattended forms the installer itself uses (`--auto`, `--answers`, `--plan`, `--emit-answers`) are unchanged.
+- **An image model given by number, or by an id the installer does not offer, now stops the install before anything changes.** An unknown id in `HAL0_BRAIN_MODEL` or `HAL0_AGENT_MODEL` does the same. These used to warn and carry on, with no image model downloaded. Image models in `HAL0_IMAGE_MODELS` are now checked as ids, so a menu number no longer works: use `recommended`, or the ids `hal0 comfyui models list` prints.
+- **The first upgrade run at a terminal on a box installed before this change shows the setup screens once, and confirming them sets the assistant's terminal tool to what the review screen says.** Like every `--reconfigure`, it leaves the tool off unless you tick it on the Customize screens, and the assistant restarts once. To keep it on, tick the `Terminal tool` row or set `HAL0_HERMES_TERMINAL=1`; to skip the screens, set `HAL0_NONINTERACTIVE=1`. (#4093)
+- **On the setup screens the Recommended setup now includes the large chat model when it fits the box.** It is Qwen3.8 27B, about 18.5 GB to download and 25 GB of GPU memory, and the review screen shows its size before anything downloads; the last release's question defaulted to no. To leave it out, choose Customize and then "No chat model for now". An unattended install downloads it only when asked (`HAL0_PULL_AGENT_MODEL=1`).
 
 ### Added
 
 - **`--answers=FILE` (`HAL0_ANSWERS_FILE`)** reads the install choices from a JSON answers document instead of asking. The file is checked in full first, and a bad one stops the install before anything changes. It never carries a key or a token.
 - **`--reconfigure`** shows the setup screens again on a box that already has hal0, instead of reusing the saved answers.
 
-### Fixed
-
-- **Running the setup screens again now turns the assistant's terminal tool off unless it is ticked again.** The review screen shows a `Terminal tool` line, and confirming it as off used to leave the tool on for a box that already had it. An explicit `HAL0_HERMES_TERMINAL` value on an install run is also applied on a box that already has the assistant, which restarts it once. (#4093)
-
 ### Changed
 
 - **The separate image-model menu at the terminal is gone.** Image models are chosen on the Customize screens or by setting `HAL0_IMAGE_MODELS` (`recommended`, or a list of ids); unset downloads none, as it already did for an unattended run.
 - **The installer's component checklist, model-folder question, Hugging Face token question, terminal-tool question and its agent-model and image-model offers are now screens of the one setup flow.** The Recommended path asks one thing, where models are stored; Customize adds screens for what the box does, models, storage, network and the assistant and memory.
 - **Getting started and the README describe the setup screens.** The install page, the beginner's guide, the first-model page and the README's flag table no longer describe the separate prompts.
+- **The installer stops with one line when its release tree lacks the setup screens.** That means a broken download; fetch the release again.
+- **The `Components:` line is logged on every run,** not only on an interactive one.
+
 ## [1.8.3] — 2026-11-28
 
 ### Highlights

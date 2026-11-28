@@ -226,8 +226,14 @@ at install time, not the outcome: a later step may still skip or fail (see
 Pi, not opted in: a default headless install skips Pi with no opt-out to pass
 (Pi is opt-in through `HAL0_INSTALL_PI=1`; the setup screens have no Pi row). A box where
 `pi` is already on `PATH` records Pi as `selected` even with `--no-pi`.
-`unavailable:<reason>` means the install could not offer it; headless runs
-report it only for Hindsight. It is additive to schema
+`unavailable:<reason>` means the install could not offer it. The states are
+worked out the same way on every run, from the choices in effect (the setup
+screens, flags and environment), and one `Components:` line is logged. Two
+causes report `unavailable:`: Hindsight on a box with no usable Python 3.11-3.14
+(`no usable Python 3.11-3.14`), and `HAL0_SKIP_SETUP=1`, which marks `brain` and
+`comfyui` (`unavailable:HAL0_SKIP_SETUP=1`). The reasons the old interactive
+checklist reported (no podman, no npm, an image plan that cannot be made) are
+not in the summary. It is additive to schema
 `hal0.install-summary.v1`, so the schema version does not change.
 
 `hardware_class` reads `/etc/hal0/hardware.json` — `id` is its `platform`

@@ -19,9 +19,12 @@ upgrade, until an operator picks something.
 
 This module is the bridge, and the shape of it is the whole point:
 
-**Opt-in, size disclosed, default SKIP.** Unlike the brain pull (which is
-unconditional and ~1-3 GB), the agent anchor is about 18.5 GB. The setup
-screens ask once, printing the exact size first, and the default answer is no.
+**Size disclosed, never pulled unasked.** Unlike the brain pull (which is
+unconditional and ~1-3 GB), the agent anchor is about 18.5 GB. On the setup
+screens the Recommended setup includes it when it fits the box, and the review
+screen shows the exact size before anything downloads; Customize can leave it
+out. Without screens it is pulled only when ``HAL0_PULL_AGENT_MODEL=1`` or an
+answers document names it.
 
 **A headless install must never block and never pull.** install.sh asks
 nothing itself (the setup screens ask), so ``curl | bash``,
