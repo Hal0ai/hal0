@@ -1617,9 +1617,7 @@ def test_no_npu_device_drops_a_documents_npu_folder() -> None:
 # ── Python first ────────────────────────────────────────────────────────────
 
 
-def _python_region(
-    tmp_path: Path, *, usable: int, wizard: bool, have: str = "", answers: str = ""
-) -> list[str]:
+def _python_region(tmp_path: Path, *, usable: int, have: str = "") -> list[str]:
     region = _slice("# file-origin: begin", "# file-origin: end")
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir(exist_ok=True)
@@ -1629,16 +1627,12 @@ def _python_region(
         p.chmod(0o755)
     log = tmp_path / "calls.log"
     log.unlink(missing_ok=True)
-    present = "return 0" if wizard else "return 1"
     script = f"""
 set -u
 PATH="{bin_dir}"
 LOG="{log}"
 PY=python3
-{answers}
 source "{ANSWERS_SH}"
-hal0_wizard_present() {{ {present}; }}
-hal0_answers_python() {{ return 1; }}
 info() {{ echo "info: $*" >> "$LOG"; }}
 _hal0_resolve_main_python_or_die() {{ echo "resolve $*" >> "$LOG"; }}
 _main_python_usable={usable}
@@ -1652,18 +1646,14 @@ echo "usable=$_main_python_usable" >> "$LOG"
 
 
 def test_python_installed_first_when_missing(tmp_path: Path) -> None:
-    calls = _python_region(tmp_path, usable=0, wizard=True)
+    calls = _python_region(tmp_path, usable=0)
     msg = "info: Installing Python, which hal0 needs before it can ask anything."
     assert calls == [msg, "resolve install-first", "usable=1"]
     # an interpreter that is new enough exists: resolved quietly, no message
-    calls = _python_region(tmp_path, usable=0, wizard=True, have="python3.13")
+    calls = _python_region(tmp_path, usable=0, have="python3.13")
     assert calls == ["resolve install-first", "usable=1"]
     # the default one is usable: nothing
-    assert _python_region(tmp_path, usable=1, wizard=True) == ["usable=1"]
-    # without the wizard the older rule stays: only for a given file
-    assert _python_region(tmp_path, usable=0, wizard=False) == ["usable=0"]
-    calls = _python_region(tmp_path, usable=0, wizard=False, answers="HAL0_ANSWERS_FILE=/x.json")
-    assert calls[0] == "info: Installing Python, which is needed to read your answers file."
+    assert _python_region(tmp_path, usable=1) == ["usable=1"]
 
 
 def test_the_wizard_refuses_an_old_python(tmp_path: Path, stub: dict[str, str]) -> None:

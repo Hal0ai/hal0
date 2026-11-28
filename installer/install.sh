@@ -975,28 +975,15 @@ if ! _facts_err="$(hal0_facts_write "${_facts_path}" 2>&1)"; then
 fi
 
 # file-origin: begin (the one place the detection half installs anything)
-# With the setup screens in this release tree, every run goes through them, and
-# they need Python 3.12 or newer, the same floor as hal0 itself: when ${PY} is
-# not usable, the interpreter is resolved now, before the seam, and installed
-# when the box has none (said in one line first).
-# Without them, only a person who passes an answers file has already chosen,
-# and reading it needs a Python. The reader runs on 3.10 and newer, so a
-# document is checked before anything changes whenever such an interpreter
-# exists (hal0_answers_python: ${PY}, else a python3 on PATH). Only when none
-# exists at all is one installed now, before the seam. A below-floor but 3.10+
-# interpreter is replaced by the normal resolution after the seam.
-if hal0_wizard_present; then
-    if [[ "${_main_python_usable}" -eq 0 ]]; then
-        if ! command -v python3.14 >/dev/null 2>&1 && ! command -v python3.13 >/dev/null 2>&1 \
-            && ! command -v python3.12 >/dev/null 2>&1; then
-            info "Installing Python, which hal0 needs before it can ask anything."
-        fi
-        _hal0_resolve_main_python_or_die install-first
-        _main_python_usable=1
+# Every run goes through the setup screens, and they need Python 3.12 or newer,
+# the same floor as hal0 itself: when ${PY} is not usable, the interpreter is
+# resolved now, before the seam, and installed when the box has none (said in
+# one line first).
+if [[ "${_main_python_usable}" -eq 0 ]]; then
+    if ! command -v python3.14 >/dev/null 2>&1 && ! command -v python3.13 >/dev/null 2>&1 \
+        && ! command -v python3.12 >/dev/null 2>&1; then
+        info "Installing Python, which hal0 needs before it can ask anything."
     fi
-elif [[ "${_main_python_usable}" -eq 0 && -n "${HAL0_ANSWERS_FILE:-}" ]] \
-    && ! hal0_answers_python >/dev/null; then
-    info "Installing Python, which is needed to read your answers file."
     _hal0_resolve_main_python_or_die install-first
     _main_python_usable=1
 fi

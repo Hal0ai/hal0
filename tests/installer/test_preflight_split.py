@@ -97,18 +97,19 @@ def test_file_origin_region_holds_only_the_python_install() -> None:
         "pip",
     ):
         assert name not in code, name
-    # once for the setup screens (Python 3.12 before any question), once for a
-    # given file when the tree has no setup screens
-    assert _code(region).count("_hal0_resolve_main_python_or_die") == 2
+    # once, for the setup screens (Python 3.12 before any question)
+    assert _code(region).count("_hal0_resolve_main_python_or_die") == 1
 
 
 def test_file_origin_branch_is_the_only_early_install() -> None:
     first = _first_half()
     assert first.count(_FILE_BEGIN) == 1
     branch = first[first.index(_FILE_BEGIN) : first.index(_FILE_END)]
-    assert "HAL0_ANSWERS_FILE" in branch
-    assert "Installing Python, which is needed to read your answers file." in branch
+    assert "Installing Python, which hal0 needs before it can ask anything." in branch
     assert "_hal0_resolve_main_python_or_die" in _code(branch)
+    # no second arm for a tree without the setup screens, and no answers file test
+    assert "HAL0_ANSWERS_FILE" not in _code(branch)
+    assert "hal0_wizard_present" not in _code(branch)
 
 
 def test_facts_written_before_seam() -> None:
@@ -221,20 +222,21 @@ def test_operator_input_region_rejects_a_relative_models_dir(tmp_path: Path) -> 
     assert "DIE: model store must be an absolute path" in proc.stderr
 
 
-# ── file origin without a usable Python ─────────────────────────────────────
+# ── no usable Python before the setup screens ───────────────────────────────
 
 
-def _python_first_script(
-    tmp_path: Path, *, usable: bool, answers_file: str, py: str = "python3"
-) -> str:
+def _python_first_script(tmp_path: Path, *, usable: bool, py: str = "python3") -> str:
     fn_head = TEXT.index("_hal0_resolve_main_python_or_die() {")
     fn = TEXT[fn_head : TEXT.index("\n}\n", fn_head) + 3]
     head = TEXT.index("# Detection only: is the default Python usable?")
     half = TEXT[head : TEXT.index(_SEAM, head)]
     log = tmp_path / "calls.log"
+    bin_dir = tmp_path / "empty-bin"
+    bin_dir.mkdir(exist_ok=True)
     pre = "true" if usable else "false"
     return f"""
 set -uo pipefail
+PATH="{bin_dir}"
 LOG="{log}"
 info() {{ echo "info: $*" >> "$LOG"; }}
 warn() {{ echo "warn: $*" >> "$LOG"; }}
@@ -251,7 +253,7 @@ PY={py}
 VAR_DIR=/var/lib/hal0
 HAL0_FHS_ROOT=/usr/lib/hal0
 PREFIX=/usr/lib/hal0/hal0-0
-{"HAL0_ANSWERS_FILE=" + answers_file if answers_file else "unset HAL0_ANSWERS_FILE"}
+unset HAL0_ANSWERS_FILE
 {fn}
 {half}
 {_SEAM}
@@ -263,35 +265,24 @@ def _calls(tmp_path: Path) -> list[str]:
     return (tmp_path / "calls.log").read_text().splitlines()
 
 
-def test_file_origin_without_python_installs_python_first(tmp_path: Path) -> None:
-    proc = _run(_python_first_script(tmp_path, usable=False, answers_file="/x/answers.json"))
+def test_without_python_the_interpreter_is_installed_before_the_seam(tmp_path: Path) -> None:
+    proc = _run(_python_first_script(tmp_path, usable=False))
     assert proc.returncode == 0, proc.stderr
     calls = _calls(tmp_path)
-    msg = "info: Installing Python, which is needed to read your answers file."
+    msg = "info: Installing Python, which hal0 needs before it can ask anything."
     assert msg in calls
     assert calls.index(msg) < calls.index("resolve autoinstall=1") < calls.index("seam")
     assert "PY=python3.12" in calls
 
 
-def test_no_file_without_python_defers_install_past_seam(tmp_path: Path) -> None:
-    proc = _run(_python_first_script(tmp_path, usable=False, answers_file=""))
-    assert proc.returncode == 0, proc.stderr
-    calls = _calls(tmp_path)
-    assert not any(c.startswith("resolve") for c in calls)
-    assert not any("answers file" in c for c in calls)
-    assert calls[-2:] == ["seam", "PY=python3"]
-
-
-def test_file_with_usable_python_installs_nothing_early(tmp_path: Path) -> None:
-    proc = _run(_python_first_script(tmp_path, usable=True, answers_file="/x/answers.json"))
+def test_a_usable_python_installs_nothing_early(tmp_path: Path) -> None:
+    proc = _run(_python_first_script(tmp_path, usable=True))
     assert proc.returncode == 0, proc.stderr
     assert not any(c.startswith(("resolve", "info: Installing")) for c in _calls(tmp_path))
 
 
-def test_file_origin_with_no_python_at_all_installs_one(tmp_path: Path) -> None:
-    script = _python_first_script(
-        tmp_path, usable=False, answers_file="/x/answers.json", py="no-such-python-xyz"
-    )
+def test_no_python_at_all_installs_one(tmp_path: Path) -> None:
+    script = _python_first_script(tmp_path, usable=False, py="no-such-python-xyz")
     proc = _run(script)
     assert proc.returncode == 0, proc.stderr
     calls = _calls(tmp_path)
@@ -301,10 +292,10 @@ def test_file_origin_with_no_python_at_all_installs_one(tmp_path: Path) -> None:
     assert not any(c.startswith("die") for c in calls)
 
 
-def test_file_origin_dies_when_python_still_missing_after_install_try(tmp_path: Path) -> None:
-    script = _python_first_script(
-        tmp_path, usable=False, answers_file="/x/answers.json", py="no-such-python-xyz"
-    ).replace("echo python3.12; }", "return 1; }")
+def test_it_dies_when_python_is_still_missing_after_the_install_try(tmp_path: Path) -> None:
+    script = _python_first_script(tmp_path, usable=False, py="no-such-python-xyz").replace(
+        "echo python3.12; }", "return 1; }"
+    )
     proc = _run(script)
     assert proc.returncode == 1
     calls = _calls(tmp_path)
@@ -444,33 +435,25 @@ def test_models_dir_block_sits_right_after_the_seam() -> None:
     assert "MODELS_DIR_FLAG_GIVEN=1" in TEXT[: TEXT.index(_SEAM)]
 
 
-# ── a document is checked before Python is installed, when it can be ────────
+# ── the one line before the install, and when it is left out ───────────────
 
 
-def _file_branch_run(tmp_path, *, py: str, python3_version: str | None, answers_file: bool = True):
-    """Run the file-origin branch with stubs; return (stdout, install-attempted)."""
+def _file_branch_run(tmp_path: Path, *, usable: int = 0, have: tuple[str, ...] = ()):
+    """Run the file-origin block with stubs; return (stdout, install-attempted)."""
     first = _first_half()
     branch = first[first.index(_FILE_BEGIN) : first.index(_FILE_END)]
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
-    if python3_version:
-        major, minor = python3_version.split(".")
-        stub = bin_dir / "python3"
-        stub.write_text(
-            f"#!/bin/bash\nexit $(( {major} > 3 || ({major} == 3 && {minor} >= 10) ? 0 : 1 ))\n",
-            encoding="utf-8",
-        )
+    for name in have:
+        stub = bin_dir / name
+        stub.write_text("#!/bin/bash\nexit 0\n", encoding="utf-8")
         stub.chmod(0o755)
-    answers = "HAL0_ANSWERS_FILE=/x/answers.json" if answers_file else ""
     script = f"""
 set -u
 PATH="{bin_dir}"
-PY="{py}"
-{answers}
-source "{Path(__file__).resolve().parents[2] / "installer" / "lib" / "answers.sh"}"
 info() {{ echo "INFO: $*"; }}
 _hal0_resolve_main_python_or_die() {{ echo "INSTALL_ATTEMPTED $*"; }}
-_main_python_usable=0
+_main_python_usable={usable}
 {branch}
 echo "usable=${{_main_python_usable}}"
 """
@@ -478,24 +461,19 @@ echo "usable=${{_main_python_usable}}"
     return proc.stdout, "INSTALL_ATTEMPTED" in proc.stdout
 
 
-def test_no_install_when_an_old_enough_python3_exists(tmp_path) -> None:
-    out, attempted = _file_branch_run(tmp_path, py="/nonexistent/python", python3_version="3.11")
-    assert not attempted, out
-    assert "Installing Python" not in out and "usable=0" in out
-
-
-def test_install_is_attempted_when_no_python_of_3_10_exists(tmp_path) -> None:
-    out, attempted = _file_branch_run(tmp_path, py="/nonexistent/python", python3_version="3.9")
+def test_the_one_line_is_said_when_the_box_has_no_python_of_3_12_or_newer(tmp_path) -> None:
+    out, attempted = _file_branch_run(tmp_path, have=("python3.11",))
     assert attempted and "INSTALL_ATTEMPTED install-first" in out and "usable=1" in out
+    assert "INFO: Installing Python, which hal0 needs before it can ask anything." in out
 
 
-def test_install_is_attempted_when_there_is_no_python_at_all(tmp_path) -> None:
-    out, attempted = _file_branch_run(tmp_path, py="/nonexistent/python", python3_version=None)
-    assert attempted and "usable=1" in out, out
+@pytest.mark.parametrize("name", ["python3.12", "python3.13", "python3.14"])
+def test_no_line_is_said_when_a_python_of_3_12_or_newer_exists(tmp_path, name: str) -> None:
+    out, attempted = _file_branch_run(tmp_path, have=(name,))
+    assert attempted and "usable=1" in out
+    assert "Installing Python" not in out
 
 
-def test_no_install_without_an_answers_file(tmp_path) -> None:
-    out, attempted = _file_branch_run(
-        tmp_path, py="/nonexistent/python", python3_version=None, answers_file=False
-    )
-    assert not attempted, out
+def test_nothing_is_installed_when_the_default_python_is_usable(tmp_path) -> None:
+    out, attempted = _file_branch_run(tmp_path, usable=1)
+    assert not attempted and "usable=1" in out, out
