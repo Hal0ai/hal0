@@ -641,32 +641,43 @@ ui_component_picker() {
 # never fail an install running under `set -e` and an ERR trap.
 ui_closing_screen() {
     local _tty="${UI_TTY_OUT:-/dev/tty}"
+    local LC_ALL=C  # character ranges below mean ASCII, whatever the locale
 
-    if [[ "${DEV_MODE:-0}" == "0" && "${NO_START:-0}" == "0" \
-        && "${IS_UPGRADE:-0}" == "0" && "${COMPONENT_STATES[openwebui]:-}" == "on" ]]; then
+    if [[ "${_HAL0_OPENWEBUI_SIGNIN:-}" == "1" && "${DEV_MODE:-0}" == "0" && "${NO_START:-0}" == "0" \
+        && "${IS_UPGRADE:-0}" == "0" && "${COMPONENT_STATES[openwebui]:-}" == "selected" ]]; then
         info "Create the first chat account now: http://${HOST:-localhost}:3001"
         printf '   The first account to sign up becomes the chat page'"'"'s administrator.\n'
     fi
 
     [[ "${_HAL0_ADMIN_KEY_MINTED:-0}" == "1" ]] || return 0
 
-    local _line="" _key="" _shown=0
-    if { exec 5>>"${_tty}"; } 2>/dev/null; then
-        { while IFS= read -r _line; do
-            if [[ "${_line}" == HAL0_ADMIN_KEY=* ]]; then _key="${_line#HAL0_ADMIN_KEY=}"; fi
-        done < "${API_ENV:-/nonexistent}"; } 2>/dev/null || true
-        _line=""
-        if [[ -n "${_key}" ]]; then
-            {
-                printf '\n%sAdmin key (shown once): %s%s\n' "${BOLD}" "${_key}" "${RST}" >&5
-                printf 'It is needed to change settings from another machine. Chat stays open without it.\n' >&5
-            } 2>/dev/null || true
-            _shown=1
-        fi
-        _key=""
-        { exec 5>&-; } 2>/dev/null || true
+    # The whole secret section runs with stderr silenced so that `bash -x` can
+    # never trace the value (an assignment, a test or a read) into the log.
+    # Descriptor numbers are chosen by bash so a caller's own fds stay intact.
+    local _fd="" _line="" _key="" _shown=0
+    if { exec {_fd}>>"${_tty}"; } 2>/dev/null; then
+        {
+            # First matching line wins, as the existing reader does; a last
+            # line without a final newline still counts.
+            while IFS= read -r _line || [[ -n "${_line}" ]]; do
+                if [[ "${_line}" == HAL0_ADMIN_KEY=* ]]; then
+                    _key="${_line#HAL0_ADMIN_KEY=}"
+                    break
+                fi
+            done < "${API_ENV:-/nonexistent}"
+            _line=""
+            _key="${_key%$'\r'}"
+            # Show only a value shaped like a key the installer creates; any
+            # other value behaves as if the key line were missing.
+            if [[ "${_key}" =~ ^[A-Za-z0-9_-]+$ ]]; then
+                printf '\n%sAdmin key (shown once): %s%s\n' "${BOLD}" "${_key}" "${RST}" >&"${_fd}"
+                printf 'It is needed to change settings from another machine. Chat stays open without it.\n' >&"${_fd}"
+                _shown=1
+            fi
+            _key=""
+        } 2>/dev/null || true
+        { exec {_fd}>&-; } 2>/dev/null || true
     fi
-    unset _key _line
 
     if [[ "${_shown}" == "1" ]]; then
         info "An admin key was created and shown on the terminal."
