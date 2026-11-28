@@ -366,9 +366,11 @@ _hal0_root_uid() {
 # component, is owned by root and has no group-write and no other-write bit
 # (so neither the hal0 group nor another user can rename or replace anything
 # under it, and a directory made there cannot hand them somebody else's place).
+_HAL0_PARENT_WHY=""
 hal0_doc_dir_parent_ok() {
     local path="${1:-}" walk="" part deepest="/" info owner mode
     local -a parts=()
+    _HAL0_PARENT_WHY="it is not an absolute path"
     [[ "${path}" == /* ]] || return 1
     if [[ -n "${VAR_DIR:-}" ]] \
         && [[ "${path}" == "${VAR_DIR}/models" || "${path}" == "${VAR_DIR}/models/"* ]]; then
@@ -377,44 +379,59 @@ hal0_doc_dir_parent_ok() {
     IFS=/ read -r -a parts <<<"${path}"
     for part in "${parts[@]+"${parts[@]}"}"; do
         [[ -n "${part}" ]] || continue
-        [[ "${part}" != "." && "${part}" != ".." ]] || return 1
-        walk="${walk}/${part}"
-        [[ ! -L "${walk}" ]] || return 1
-        [[ -e "${walk}" ]] || break
-        [[ -d "${walk}" ]] || return 1
-        deepest="${walk}"
-    done
-    info="$(stat -c '%u %a' -- "${deepest}" 2>/dev/null)" || return 1
-    owner="${info%% *}"
-    mode="${info##* }"
-    [[ "${owner}" == "$(_hal0_root_uid)" ]] || return 1
-    (( (8#${mode} & 8#022) == 0 )) || return 1
-}
-# hal0_mkdir_walk_nofollow PATH: make PATH and any missing parents top-down,
-# each root:root 0755, one `nofollow` call per missing component (a descriptor
-# walk: nothing is created through a link swapped in later). Any symlink
-# component is refused with one warning and nothing more is made. Existing
-# components are never re-moded. Warns once and returns non-zero when it
-# refused or failed.
-hal0_mkdir_walk_nofollow() {
-    local path="${1:-}" walk="" part
-    local -a parts=()
-    [[ "${path}" == /* ]] || return 1
-    IFS=/ read -r -a parts <<<"${path}"
-    for part in "${parts[@]+"${parts[@]}"}"; do
-        [[ -n "${part}" ]] || continue
         if [[ "${part}" == "." || "${part}" == ".." ]]; then
-            warn "${path} was not created: it has a '.' or '..' part"
+            _HAL0_PARENT_WHY="it has a '.' or '..' part"
             return 1
         fi
         walk="${walk}/${part}"
         if [[ -L "${walk}" ]]; then
-            warn "${path} was not created: ${walk} is a symbolic link; use the real folder, or create it by hand"
+            _HAL0_PARENT_WHY="a symbolic link is on the way to it"
+            return 1
+        fi
+        [[ -e "${walk}" ]] || break
+        if [[ ! -d "${walk}" ]]; then
+            _HAL0_PARENT_WHY="a parent of it is not a folder"
+            return 1
+        fi
+        deepest="${walk}"
+    done
+    _HAL0_PARENT_WHY="its parent folder cannot be inspected"
+    info="$(stat -c '%u %a' -- "${deepest}" 2>/dev/null)" || return 1
+    owner="${info%% *}"
+    mode="${info##* }"
+    _HAL0_PARENT_WHY="its closest existing parent folder is not owned by root"
+    [[ "${owner}" == "$(_hal0_root_uid)" ]] || return 1
+    _HAL0_PARENT_WHY="its closest existing parent folder is writable by a group or by others"
+    (( (8#${mode} & 8#022) == 0 )) || return 1
+    _HAL0_PARENT_WHY=""
+}
+# hal0_mkdir_walk_nofollow PATH: make PATH and any missing parents top-down,
+# each root:root 0755, one `nofollow` call per missing component (a descriptor
+# walk: nothing is created through a link swapped in later). Any symlink
+# component is refused and nothing more is made. Existing components are never
+# re-moded. Says nothing itself: on a refusal or failure it returns non-zero
+# with the reason in _HAL0_WALK_WHY (the caller decides how loud to be).
+_HAL0_WALK_WHY=""
+hal0_mkdir_walk_nofollow() {
+    local path="${1:-}" walk="" part
+    local -a parts=()
+    _HAL0_WALK_WHY=""
+    [[ "${path}" == /* ]] || { _HAL0_WALK_WHY="it is not an absolute path"; return 1; }
+    IFS=/ read -r -a parts <<<"${path}"
+    for part in "${parts[@]+"${parts[@]}"}"; do
+        [[ -n "${part}" ]] || continue
+        if [[ "${part}" == "." || "${part}" == ".." ]]; then
+            _HAL0_WALK_WHY="it has a '.' or '..' part"
+            return 1
+        fi
+        walk="${walk}/${part}"
+        if [[ -L "${walk}" ]]; then
+            _HAL0_WALK_WHY="${walk} is a symbolic link; use the real folder, or create it by hand"
             return 1
         fi
         if [[ ! -e "${walk}" ]]; then
             if ! nofollow dir --create --owner root:root --mode 0755 --expect root "${walk}"; then
-                warn "${path} was not created: ${walk} could not be made safely; create it by hand"
+                _HAL0_WALK_WHY="${walk} could not be made safely; create it by hand"
                 return 1
             fi
         fi
@@ -1276,12 +1293,18 @@ ui_step "Filesystem layout" "~2-5s"
 # (every component root:root 0755, any symlink refused with one warning): the
 # hal0 account may control part of that path and could swap a component for a
 # link after the reader checked it, which `mkdir -p` would follow. Any other
-# store (default, flag, environment) is made as before. A refusal is not fatal
-# here: the store-usable checks later in the install fail on a missing folder.
+# store (default, flag, environment) is made as before. A refusal for a
+# document's store is FATAL: later root code (model pulls, `hal0 setup
+# --storage-dir`) would otherwise create the store by name and follow the link.
+# Nothing is written before the check, one line says which path and why.
 _models_mkdir=("${MODELS_DIR}")
 if [[ "${MODELS_DIR_FROM_DOC}" -eq 1 ]]; then
     _models_mkdir=()
-    hal0_mkdir_walk_nofollow "${MODELS_DIR}" || true  # it has already said why
+    if [[ ! -e "${MODELS_DIR}" && ! -L "${MODELS_DIR}" ]] && ! hal0_doc_dir_parent_ok "${MODELS_DIR}"; then
+        die "model store ${MODELS_DIR} was not created: ${_HAL0_PARENT_WHY}; create the folder first, or choose one on a disk that root owns"
+    fi
+    hal0_mkdir_walk_nofollow "${MODELS_DIR}" \
+        || die "model store ${MODELS_DIR} was not created: ${_HAL0_WALK_WHY}"
 fi
 
 mkdir -p \
@@ -3851,7 +3874,11 @@ else
                 [[ "${_answered}" == "HAL0_FLM_MODELS_DIR" ]] && _flm_from_doc=1
             done
             if [[ -e "${HAL0_FLM_MODELS_DIR}" || -L "${HAL0_FLM_MODELS_DIR}" ]]; then
-                if [[ "${_flm_from_doc}" -eq 1 ]]; then
+                if [[ "${_flm_from_doc}" -eq 1 && -L "${HAL0_FLM_MODELS_DIR}" ]]; then
+                    # The reader emits a path with no link in its existing part,
+                    # so a link here appeared after its check: use nothing.
+                    warn "FLM model directory ${HAL0_FLM_MODELS_DIR} is a symbolic link (it was not one when the answers were checked); it was left alone. Use the real folder, or set it up by hand"
+                elif [[ "${_flm_from_doc}" -eq 1 ]]; then
                     info "FLM model directory ${HAL0_FLM_MODELS_DIR} already exists; leaving its owner and mode as they are"
                 else
                     # `adopt`: only a directory hal0 already owns (or an empty

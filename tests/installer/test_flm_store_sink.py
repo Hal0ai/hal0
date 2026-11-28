@@ -138,11 +138,12 @@ def test_existing_directory_from_the_environment_falls_back_to_hal0_hal0(tmp_pat
     assert calls[-1] == f"nofollow dir --owner hal0:hal0 --mode 2775 --expect adopt {store}"
 
 
-def test_a_symlink_at_the_path_counts_as_existing_and_is_left_to_nofollow(tmp_path: Path) -> None:
+def test_a_symlink_at_the_path_is_skipped_for_a_document_and_left_to_nofollow_otherwise(tmp_path: Path) -> None:
     link = tmp_path / "flm"
     link.symlink_to("/etc")
-    calls, _ = _run(tmp_path, str(link), exported="HAL0_FLM_MODELS_DIR")
-    assert calls == []  # from a document and "exists": untouched, and nothing followed it
+    calls, out = _run(tmp_path, str(link), exported="HAL0_FLM_MODELS_DIR")
+    assert calls == []  # from a document: untouched, nothing followed it, one warning
+    assert out.count("WARN:") == 1 and "is a symbolic link" in out and "DONE" in out
     calls, _ = _run(tmp_path, str(link))
     assert calls == [f"nofollow dir --owner 1000:hal0 --mode 2775 --expect adopt {link}"]
 
@@ -284,3 +285,14 @@ def test_no_sink_here_re_owns_whatever_it_finds_at_the_name(tmp_path: Path) -> N
     # `--expect any` re-owns a root-owned directory the hal0 account renamed into
     # the operator's path; `adopt` takes only what hal0 owns or an empty new one.
     assert "--expect any" not in _block()
+
+
+def test_a_refused_folder_from_a_document_never_stops_the_install(tmp_path: Path) -> None:
+    # the NPU is optional: unlike the model store, no `die` here (the harness has
+    # no die(); calling one would end the run with status 127)
+    store = str(tmp_path / "shared" / "flm")
+    (tmp_path / "shared").mkdir()
+    (tmp_path / "shared").chmod(0o775)
+    _, out = _run(tmp_path, store, exported="HAL0_FLM_MODELS_DIR")
+    assert out.count("WARN:") == 1 and "DONE" in out
+    assert "die" not in _block()
