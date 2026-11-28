@@ -823,9 +823,25 @@ _hal0_wizard_call() {
     fi
     # Only origin `wizard` can have shown screens (a given document is headless).
     [[ "${origin}" == "wizard" ]] || screens=""
+    # What the environment said about the terminal tool before the document is
+    # applied, so a document's answer that replaces it is said out loud.
+    local inherited_terminal="${HAL0_HERMES_TERMINAL:-}"
+    inherited_terminal="${inherited_terminal//[^A-Za-z0-9]/?}"
     if ! hal0_apply_answers "${out}" "${origin}" "${screens}"; then
         unset _HAL0_WIZARD_HF_TOKEN
         return 1
+    fi
+    if [[ -n "${inherited_terminal}" && "${inherited_terminal}" != "${HAL0_HERMES_TERMINAL:-}" ]]; then
+        local replaced
+        for replaced in "${HAL0_ANSWERS_EXPORTED[@]+"${HAL0_ANSWERS_EXPORTED[@]}"}"; do
+            if [[ "${replaced}" == "HAL0_HERMES_TERMINAL" ]]; then
+                if declare -F info >/dev/null 2>&1; then
+                    info "The setup screens' answer for the Hermes terminal tool (${HAL0_HERMES_TERMINAL}) replaces the HAL0_HERMES_TERMINAL=${inherited_terminal} from the environment."
+                else
+                    echo "The setup screens' answer for the Hermes terminal tool (${HAL0_HERMES_TERMINAL}) replaces the HAL0_HERMES_TERMINAL=${inherited_terminal} from the environment." >&2
+                fi
+            fi
+        done
     fi
     # The chosen-folder signal counts only for the very text the reader
     # exported as the document's model store.

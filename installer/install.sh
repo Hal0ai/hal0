@@ -5043,6 +5043,12 @@ else
     _hermes_install_args=()
     unit_state_off "${_gateway_state}" && _hermes_install_args+=(--no-gateway)
 
+    # Taken before the provisioning block below: a box that already has Hermes
+    # never runs `agent install hermes`, so the terminal-tool answer needs its own
+    # way in (the apply block after it).
+    _hermes_was_provisioned=0
+    [[ -x "/var/lib/hal0/venvs/hermes/bin/hermes" ]] && _hermes_was_provisioned=1
+
     if [[ -f "${AGENT_UNIT_DST}" && ! -x "/var/lib/hal0/venvs/hermes/bin/hermes" ]]; then
         if [[ "${HAL0_SKIP_HERMES:-0}" -eq 1 ]]; then
             info "skipping hermes provisioning (HAL0_SKIP_HERMES=1) — run '${HAL0_BIN} agent install hermes' later"
@@ -5077,6 +5083,32 @@ else
                 warn "  diagnose with '${HAL0_BIN} agent log hermes' / '${HAL0_BIN} agent status hermes'"
             fi
         fi
+    fi
+
+    # A box that already has Hermes keeps its recorded terminal-tool decision
+    # unless this run was given an explicit answer (HAL0_HERMES_TERMINAL: the
+    # prompt, the setup screens or the environment). The provisioning above only
+    # runs on a box without Hermes, so here the answer is applied by
+    # `hal0 agent reprovision hermes`: its root prelude records the answer, it
+    # re-renders config.yaml from it, and it restarts the agent and gateway.
+    # Without an answer nothing runs and the recorded decision stays.
+    if [[ "${_hermes_was_provisioned}" -eq 1 && -f "${AGENT_UNIT_DST}" ]] \
+       && [[ "${HAL0_SKIP_HERMES:-0}" -ne 1 ]]; then
+        _ht_value="${HAL0_HERMES_TERMINAL:-}"
+        _ht_value="${_ht_value,,}"
+        _ht_value="${_ht_value//[[:space:]]/}"
+        case "${_ht_value}" in
+            1|true|yes|on|y|0|false|no|off|n)
+                info "applying the Hermes terminal-tool answer to the installed agent (hal0 agent reprovision hermes)…"
+                if "${HAL0_BIN}" agent reprovision hermes; then
+                    info "Hermes terminal tool: applied (HAL0_HERMES_TERMINAL=${_ht_value})"
+                else
+                    warn "applying the Hermes terminal-tool answer failed — the terminal tool's state on this box may not match what was chosen"
+                    warn "  turn it off with 'hal0 agent install hermes --no-terminal-tool'; diagnose with '${HAL0_BIN} agent log hermes'"
+                fi
+                ;;
+        esac
+        unset _ht_value
     fi
 
     # Enable the unit + gateway for both fresh (just-provisioned) and upgrade

@@ -771,9 +771,10 @@ def test_the_marker_is_ignored_without_screens(tmp_path: Path, stub: dict[str, s
 def test_the_marker_on_a_run_that_skips_hermes_still_says_off(
     tmp_path: Path, stub: dict[str, str]
 ) -> None:
-    # Nothing reads HAL0_HERMES_TERMINAL on a run that does not provision Hermes
-    # (see test_hermes_terminal_is_read_only_where_hermes_is_provisioned), so
-    # the reader's rule holds there too.
+    # The reader's rule holds on a run that does not provision Hermes. That the
+    # installer then does nothing with the answer is pinned on the consumer side
+    # (tests/installer/test_hermes_terminal_apply.py: HAL0_SKIP_HERMES=1 runs
+    # nothing), not only here on the export.
     doc = json.dumps({"version": 1, "apps": {"hermes": {"enabled": False}}})
     proc = _collect(tmp_path, {**stub, "STUB_DOC": doc, "STUB_SHOWN": "shown\n"})
     state = _state(proc)
@@ -781,10 +782,33 @@ def test_the_marker_on_a_run_that_skips_hermes_still_says_off(
     assert "HAL0_SKIP_HERMES" in _exported(proc)
 
 
-def test_hermes_terminal_is_read_only_where_hermes_is_provisioned() -> None:
-    # The only reader of the variable on an install is `hal0 agent install
-    # hermes`, reached only past the HAL0_SKIP_HERMES check and only when the
-    # Hermes venv is absent.
+def test_the_documents_off_says_so_when_it_replaces_an_inherited_answer(
+    tmp_path: Path, stub: dict[str, str]
+) -> None:
+    proc = _collect(
+        tmp_path,
+        {**stub, "STUB_DOC": _TERMINAL_OFF, "STUB_SHOWN": "shown\n", "HAL0_HERMES_TERMINAL": "1"},
+    )
+    state = _state(proc)
+    assert state["RC"] == "0" and state["TERMINAL"] == "0", proc.stdout + proc.stderr
+    lines = [ln for ln in proc.stdout.splitlines() if "replaces the HAL0_HERMES_TERMINAL" in ln]
+    assert len(lines) == 1, proc.stdout
+    assert (
+        lines[0].startswith("INFO:") and "HAL0_HERMES_TERMINAL=1 from the environment" in lines[0]
+    )
+
+
+def test_no_replacement_line_without_an_inherited_answer(
+    tmp_path: Path, stub: dict[str, str]
+) -> None:
+    proc = _collect(tmp_path, {**stub, "STUB_DOC": _TERMINAL_OFF, "STUB_SHOWN": "shown\n"})
+    assert "replaces the HAL0_HERMES_TERMINAL" not in proc.stdout, proc.stdout
+
+
+def test_hermes_terminal_has_two_readers_on_an_install() -> None:
+    # `hal0 agent install hermes` (box without Hermes) and, on a box that
+    # already has it, `hal0 agent reprovision hermes` after the apply block.
+    # Both stay behind the HAL0_SKIP_HERMES check.
     call = '"${HAL0_BIN}" agent install hermes "${_hermes_install_args'
     assert TEXT.count(call) == 1
     head = TEXT.rindex(
@@ -795,6 +819,11 @@ def test_hermes_terminal_is_read_only_where_hermes_is_provisioned() -> None:
     skip = TEXT.index('if [[ "${HAL0_SKIP_HERMES:-0}" -eq 1 ]]; then', head)
     assert head < skip < TEXT.index(call)
     assert TEXT.index(call) - skip < 6000
+    apply_call = '"${HAL0_BIN}" agent reprovision hermes'
+    assert TEXT.count(apply_call) == 1
+    apply_head = TEXT.rindex('"${_hermes_was_provisioned}" -eq 1', 0, TEXT.index(apply_call))
+    assert TEXT.index(call) < apply_head
+    assert '"${HAL0_SKIP_HERMES:-0}" -ne 1' in TEXT[apply_head : TEXT.index(apply_call)]
 
 
 def test_usage_text_does_not_say_an_unattended_run_never_enables_the_terminal_tool() -> None:
