@@ -189,7 +189,10 @@ without the large chat model; to download it on an unattended run, set
 `HAL0_PULL_AGENT_MODEL=1` or name it in an answers file (`models.starter`). An
 upgrade reuses the answers saved by
 the last install; a box installed before this change has none saved, so it is
-asked once. Add `--reconfigure` to be asked again. A component flag such as
+asked once. Add `--reconfigure` to be asked again; confirming the screens with
+the assistant off on a box that already has it stops and disables it (it stays
+installed and stopped until turned on again; a run without screens changes
+nothing). A component flag such as
 `--no-hermes` shows its row as fixed on the Customize screens (on the other
 paths it simply applies), and an unknown flag stops the run with one line.
 

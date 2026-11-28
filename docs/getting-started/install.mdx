@@ -62,7 +62,8 @@ unattended run, set `HAL0_PULL_AGENT_MODEL=1` or name it in an answers file
 
 An upgrade reuses the answers saved by the last install and asks nothing. A box
 installed before this change has none saved, so it is asked once; add
-`--reconfigure` to be asked again.
+`--reconfigure` to be asked again. Confirming the screens with the assistant off
+on a box that already has it [stops it](#turning-the-assistant-off).
 
 A component flag such as `--no-hermes` settles that choice for you. On the
 Customize screens the row shows as fixed, set by the flag; on the Recommended
@@ -70,6 +71,43 @@ and Minimal path there is no component row, so the flag simply applies.
 `--bare` fixes the setup type to Minimal, and Customize cannot then be picked. A flag the installer does not
 know stops the run with one line, so a typo never turns into a different
 install.
+
+### Turning the assistant off
+
+If you run the screens again (`--reconfigure`, Customize) on a box that already
+has the Hermes assistant and confirm the review with the assistant off, the
+installer stops and disables it: the agent service (`hal0-agent@hermes`) and its
+messaging gateway. It stays installed, and its data and settings are kept. The
+review says so before you confirm: `Assistant: will be stopped (it stays
+installed)`. Its terminal tool is turned off as well.
+
+It then stays stopped. Later upgrades and unattended installs do not start it
+again and do not reinstall it; if you confirm the screens with it still off,
+the review says `stays stopped`. To start it again, turn the assistant on in the
+screens (`--reconfigure`, Customize), where the review says `will be started
+again`, or start it by hand:
+
+```sh
+sudo systemctl enable --now hal0-agent@hermes
+sudo systemctl enable --now hermes-gateway   # only if you use the messaging bridge
+```
+
+The next installer run notices the assistant is on again. If you did not
+enable `hermes-gateway`, that run enables it again, but only if the setup
+screens were what disabled it. Until then the gateway stays off.
+
+Only confirmed screens stop it. A run that shows no screens (unattended,
+`HAL0_NONINTERACTIVE=1`, `--answers=FILE`, or an upgrade reusing saved answers)
+never stops an installed assistant, even with `--no-hermes`, `--no-agents`,
+`--bare` or `HAL0_SKIP_HERMES=1`: on such a run those mean "do not install it
+now". With the screens shown and confirmed, the assistant is stopped whatever
+turned its row off, including those flags. With `--dev` or `--no-start`
+nothing is stopped or started.
+
+If the stop does not fully work, the installer warns `the assistant (Hermes) may
+still be running` and records the state `stop-failed`. The warning names the
+command to run by hand: `systemctl disable --now hal0-agent@hermes.service`
+followed by the units still on.
 
 ## Channels
 
