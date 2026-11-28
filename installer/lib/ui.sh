@@ -391,19 +391,29 @@ ui_box() {
 
 # ── ui_closing_screen ───────────────────────────────────────────────────────
 # The last thing a person sees: where to create the first chat account and,
-# when THIS run created an admin key (_HAL0_ADMIN_KEY_MINTED=1, set by the
-# answers engine), the key itself, shown once.
+# when THIS run created an admin key (_HAL0_ADMIN_KEY_MINTED=1), the key
+# itself, shown once. Nothing sets _HAL0_ADMIN_KEY_MINTED yet: the admin-key
+# work (issue #4048) will. Likewise _HAL0_OPENWEBUI_SIGNIN is not set by
+# anything yet; the first-chat-account work (issue #4056) will set it.
 #
 # The key is a secret and stdout/stderr are copied into a log that other users
-# can read. So its value goes to the terminal device only (UI_TTY_OUT, default
-# /dev/tty), through a shell builtin redirected to a spare descriptor: never to
-# stdout/stderr, never as a program argument (it would show in the process
-# list). With no terminal, or no key line in the file, nothing about the value
+# can read. So its value goes to the terminal device only, through a shell
+# builtin redirected to a spare descriptor: never to stdout/stderr, never as a
+# program argument (it would show in the process list). The device is always
+# /dev/tty when running as root; the UI_TTY_OUT override (tests) is honoured
+# only for other users, because root would otherwise open, create or follow a
+# link at a path the caller's environment chose and write the key there.
+# While the key is read and written, xtrace is switched off (and restored
+# after), so `bash -x` or BASH_XTRACEFD never records the value. With no
+# terminal, or no key line in the file, nothing about the value
 # is printed anywhere and the log points at the root-only env file instead.
 # Every terminal write is guarded and the function always returns 0, so it can
 # never fail an install running under `set -e` and an ERR trap.
 ui_closing_screen() {
-    local _tty="${UI_TTY_OUT:-/dev/tty}"
+    local _tty="/dev/tty"
+    if [[ "${EUID}" -ne 0 ]]; then
+        _tty="${UI_TTY_OUT:-/dev/tty}"
+    fi
     local LC_ALL=C  # character ranges below mean ASCII, whatever the locale
 
     if [[ "${_HAL0_OPENWEBUI_SIGNIN:-}" == "1" && "${DEV_MODE:-0}" == "0" && "${NO_START:-0}" == "0" \
@@ -417,7 +427,9 @@ ui_closing_screen() {
     # The whole secret section runs with stderr silenced so that `bash -x` can
     # never trace the value (an assignment, a test or a read) into the log.
     # Descriptor numbers are chosen by bash so a caller's own fds stay intact.
-    local _fd="" _line="" _key="" _shown=0
+    local _fd="" _line="" _key="" _shown=0 _xtrace=0
+    case $- in *x*) _xtrace=1 ;; esac
+    { set +x; } 2>/dev/null
     if { exec {_fd}>>"${_tty}"; } 2>/dev/null; then
         {
             # First matching line wins, as the existing reader does; a last
@@ -433,13 +445,18 @@ ui_closing_screen() {
             # Show only a value shaped like a key the installer creates; any
             # other value behaves as if the key line were missing.
             if [[ "${_key}" =~ ^[A-Za-z0-9_-]+$ ]]; then
-                printf '\n%sAdmin key (shown once): %s%s\n' "${BOLD}" "${_key}" "${RST}" >&"${_fd}"
-                printf 'It is needed to change settings from another machine. Chat stays open without it.\n' >&"${_fd}"
-                _shown=1
+                # Shown only when both writes worked (a full or closed terminal
+                # fails the first or second printf and leaves _shown at 0).
+                printf '\n%sAdmin key (shown once): %s%s\n' "${BOLD}" "${_key}" "${RST}" >&"${_fd}" \
+                    && printf 'It is needed to change settings from another machine. Chat stays open without it.\n' >&"${_fd}" \
+                    && _shown=1
             fi
             _key=""
         } 2>/dev/null || true
         { exec {_fd}>&-; } 2>/dev/null || true
+    fi
+    if [[ "${_xtrace}" == "1" ]]; then
+        set -x
     fi
 
     if [[ "${_shown}" == "1" ]]; then

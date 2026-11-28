@@ -9,6 +9,7 @@ terminal is a path whose directory does not exist.
 from __future__ import annotations
 
 import re
+import shlex
 import subprocess
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -250,3 +251,67 @@ def test_a_43_character_key_from_the_allowed_set_is_shown(
     r = run_closing(minted=1, api_env_lines=[f"HAL0_ADMIN_KEY={key}"], xtrace=xtrace)
     assert f"Admin key (shown once): {key}" in r.tty
     assert key not in r.stdout + r.stderr
+
+
+def _run_script(tmp_path: Path, lines: list[str]) -> subprocess.CompletedProcess[str]:
+    script = tmp_path / "xt.sh"
+    script.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return subprocess.run(
+        ["bash", "-x", str(script)],
+        capture_output=True,
+        text=True,
+        env={"PATH": "/usr/bin:/bin", "HAL0_PLAIN": "1"},
+        check=False,
+    )
+
+
+def test_key_is_not_traced_into_a_trace_file_and_xtrace_comes_back(tmp_path: Path) -> None:
+    api_env = tmp_path / "api.env"
+    api_env.write_text(f"HAL0_ADMIN_KEY={KEY}\n", encoding="utf-8")
+    trace = tmp_path / "trace.log"
+    tty = tmp_path / "tty"
+    proc = _run_script(
+        tmp_path,
+        [
+            "set -euo pipefail",
+            f"source {shlex.quote(str(UI_SH))}",
+            "DEV_MODE=0; NO_START=0; IS_UPGRADE=0; HOST=192.0.2.7",
+            "declare -A COMPONENT_STATES=()",
+            f"API_ENV={shlex.quote(str(api_env))}",
+            "_HAL0_ADMIN_KEY_MINTED=1",
+            f"UI_TTY_OUT={shlex.quote(str(tty))}",
+            f"exec 7>{shlex.quote(str(trace))}",
+            "BASH_XTRACEFD=7",
+            "ui_closing_screen",
+            "echo LATER_COMMAND_IS_TRACED",
+        ],
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert f"Admin key (shown once): {KEY}" in tty.read_text(encoding="utf-8")
+    trace_text = trace.read_text(encoding="utf-8")
+    assert KEY not in proc.stdout + proc.stderr + trace_text
+    # xtrace is on again once the function returns.
+    assert "echo LATER_COMMAND_IS_TRACED" in trace_text
+
+
+@pytest.mark.parametrize("target", ["/dev/full", "nodir/tty"])
+def test_shown_is_said_only_when_the_write_worked(
+    run_closing: Callable[..., Run], tmp_path: Path, target: str
+) -> None:
+    tty = target if target.startswith("/") else str(tmp_path / target)
+    r = run_closing(minted=1, api_env_lines=[f"HAL0_ADMIN_KEY={KEY}"], tty=tty)
+    assert r.returncode == 0
+    assert "ERR-TRAP" not in r.stderr
+    assert "and shown on the terminal" not in r.stdout
+    assert "It is stored in" in r.stdout and "(root only)" in r.stdout
+    assert KEY not in r.stdout + r.stderr
+
+
+def test_root_never_takes_the_terminal_path_from_the_environment() -> None:
+    # Root cannot be exercised from a test run as a normal user, so pin the text:
+    # an EUID guard must come before the path is used for the first time.
+    body = function_body("ui_closing_screen")
+    guard = body.index("EUID")
+    assert guard < body.index('exec {_fd}>>"${_tty}"')
+    assert guard < body.index("UI_TTY_OUT:-", guard) < body.index('exec {_fd}>>"${_tty}"')
+    assert '_tty="/dev/tty"' in body[:guard]
