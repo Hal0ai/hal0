@@ -2,7 +2,7 @@
 artifact — ``scripts/export_addons.py`` is its only author.
 
 These tests are the staleness alarm: they re-derive every envelope from
-:data:`scripts/export_addons.ADDON_PROFILES` and compare it against what is
+:data:`hal0.profiles.addons.ADDON_PROFILES` and compare it against what is
 on disk, so a change to a legacy definition that nobody regenerated fails here
 instead of shipping a catalog that disagrees with the code.
 """
@@ -184,5 +184,6 @@ def test_check_is_blind_to_the_hal0_version_stamp(monkeypatch: pytest.MonkeyPatc
 def test_check_still_catches_real_drift(monkeypatch: pytest.MonkeyPatch) -> None:
     """The blindness is scoped to ``hal0_version`` — nothing else."""
     module = _generator()
-    monkeypatch.setattr(module, "EXPORTED_AT", "1999-01-01T00:00:00Z")
+    # The definitions live in the package; the script only writes them out.
+    monkeypatch.setattr("hal0.profiles.addons.EXPORTED_AT", "1999-01-01T00:00:00Z")
     assert module.main(["--check"]) == 1

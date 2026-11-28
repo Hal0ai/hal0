@@ -1,6 +1,6 @@
 ---
 title: Profile addons — envelope & index contract
-description: "The .hal0profile.json envelope and addons index.json a site serves so an operator can install a profile that does not ship in the seed core — verified against src/hal0/profiles/portable.py, src/hal0/api/routes/profiles.py and scripts/export_addons.py."
+description: "The .hal0profile.json envelope and addons index.json a site serves so an operator can install a profile that does not ship in the seed core — verified against src/hal0/profiles/portable.py, src/hal0/profiles/addons.py, src/hal0/profiles/addon_catalog.py, src/hal0/api/routes/profiles.py and scripts/export_addons.py."
 sidebar:
   order: 75
 ---
@@ -118,7 +118,7 @@ downloading** whether it can install a row.
 | `addons[].min_hal0_version` | Oldest hal0 release that can install this row. |
 
 `min_hal0_version` is **1.5.0** for every row hal0 publishes
-(`MIN_HAL0_VERSION` in `scripts/export_addons.py`). The envelopes are schema 2,
+(`MIN_HAL0_VERSION` in `src/hal0/profiles/addons.py`). The envelopes are schema 2,
 which an older release does not read.
 
 ## Serving a catalog
@@ -144,16 +144,57 @@ Two rules make that safe to cache:
 
 For the catalog hal0 publishes, both rules are mechanical:
 `scripts/export_addons.py` is the only author of `community/addons/`. It
-derives every envelope from its `ADDON_PROFILES` table with a frozen `exported_at`
+derives every envelope from the `ADDON_PROFILES` table in
+`src/hal0/profiles/addons.py` with a frozen `exported_at`
 constant (so output is reproducible byte-for-byte), writes the index, and
 deletes orphans. `scripts/export_addons.py --check` exits non-zero when the
 committed catalog is stale, and `tests/community/test_addon_envelopes.py`
 fails the build if the two ever disagree.
 
+A publisher may add these optional keys to a row. The dashboard shows them and
+drops any other key, and any of these whose value has the wrong type:
+`category` (string), `summary` (string), `author` (string), `first_party`
+(boolean), `version` (integer), `url` (string).
+
+## The dashboard's import catalog
+
+The Profiles page lists the addons a box can import beside the profiles it
+already has. The rows come from `GET /api/profile-addons`
+(`src/hal0/api/routes/profile_addons.py`), which reads an index of the shape
+above.
+
+- **Where it reads from.** `https://hal0.dev/profiles/index.json`, or the URL
+  in `HAL0_PROFILE_ADDONS_URL`. The URL must be `https`. Set the variable to
+  `off` and the box makes no request at all.
+- **What the box sends.** A plain `GET` for the index and one for each
+  envelope it lists. No query string, no cookie, no identifier of the box, its
+  hardware or its profiles.
+- **How often.** The API fetches the index at most once an hour and serves
+  every viewer from that copy. "Check again" on the page
+  (`GET /api/profile-addons?refresh=true`) fetches it now. Each request has a
+  five-second timeout and redirects are not followed.
+- **With no network.** The rows are the addons the running release was built
+  with, the same four `community/addons/` holds, and the response says so
+  (`source: "bundled"`, with the reason in `error`). That set changes only
+  with a hal0 release. A failed fetch is retried after a minute.
+- **What is checked before a row is offered.** The index must be a
+  `hal0.addon-index` of a schema this release reads, under 512 KB and 200
+  rows. A row's `file` must be a bare `*.hal0profile.json` name beside the
+  index, so an index cannot send the box to another path or host. Each
+  envelope must be under 64 KB, parse as a `hal0.profile` envelope, carry the
+  row's name, match its own checksum and the checksum the index lists, pass
+  the same flag screen the profile editor applies, and not need a newer hal0
+  than the box runs. A row that fails any of these is still listed, with the
+  reason, and has no Import button.
+
+Importing a row is the call below with the row's envelope, so every check runs
+again on the write path. Nothing from the catalog is written to the box until
+the operator presses Import.
+
 ## Installing one
 
-In the dashboard: **Profiles → Import**, then paste the envelope JSON or upload
-the `.hal0profile.json` file. The underlying call is
+In the dashboard: **Profiles → Import**, then upload the `.hal0profile.json`
+file, or press **Import** on a catalog card. The underlying call is
 `POST /api/profiles/import` (`src/hal0/api/routes/profiles.py`):
 
 ```json

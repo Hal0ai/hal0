@@ -154,6 +154,7 @@ See [Config schema](/docs/reference/config-schema/) for the `[metrics]` TOML tab
 | `HAL0_HOST_RAM_GB` | unset (auto-probed from `/proc/meminfo`) | Forces the detected unified-RAM figure used for bundle-tier eligibility, so an operator on a too-small box can pick a larger bundle anyway. Documented escape hatch for the (deferred, see note below) bundle-tier picker — no separate "force install" flag exists. |
 | `HAL0_BUNDLES_DIR` | unset (production manifest dir, else in-tree fallback) | Overrides the bundle-manifest root the (deferred) bundle-tier picker reads. A test hook per its own docstring, not a normal operator knob. |
 | `HAL0_ALLOW_VULKAN_FALLBACK` | unset | `1`/`true`/`yes` is an escape hatch for the ROCm device-node requirement on AMD GPU lanes (#1888). Set it only when you knowingly want a lane whose output may be invalid — there is no supported configuration where this is the right answer; it exists so a box can be inspected, not run. It cannot conjure a missing device node: it applies only to the correctness gates (missing `/dev/kfd`, a runner image whose digest has not passed the Vulkan gate (`lanes_gated` in `manifest.json`)), never to a missing render node. |
+| `HAL0_PROFILE_ADDONS_URL` | unset → `https://hal0.dev/profiles/index.json` | The profile addon index the dashboard's import catalog reads (`src/hal0/profiles/addon_catalog.py`). Must be `https`. `off` stops the outbound request; the catalog is then the addons this release ships. |
 
 ## Activity / metrics / bench
 
