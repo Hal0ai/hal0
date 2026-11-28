@@ -36,7 +36,7 @@ curl -fsSL https://hal0.dev/install.sh | sudo bash
 > plain-language walkthrough from install to your first model, slots,
 > profiles, agents and memory.
 
-> **v1.8.1 is the current stable release** (2026-11-22), a fix release on
+> **v1.8.2 is the current stable release** (2026-11-28), a fix release on
 > 1.8.0. The 1.8 line adds the agent
 > bridge, Open WebUI's tools and shared memory, an installer component
 > checklist, an opt-in rootless podman box, slot tune overrides, the
@@ -53,6 +53,10 @@ curl -fsSL https://hal0.dev/install.sh | sudo bash
 > the memory embedder changes only through `hal0 memory embedder switch`, and
 > an existing memory store stays on its banks until `hal0 memory migrate
 > fold-in` moves it.
+> Coming from 1.8.1 or earlier, read
+> [Upgrading to 1.8.2](docs/guides/update-and-rollback-release-notes.mdx#upgrading-to-182)
+> as well: a box whose Open WebUI has been used needs a backup of
+> `/var/lib/hal0/openwebui` before the update.
 > The project has followed semver since v1.0.0; a minor release's
 > **Breaking** notes flag behaviour changes an operator or a script may
 > notice. Upgrades start at 1.5.0; on anything older, read
