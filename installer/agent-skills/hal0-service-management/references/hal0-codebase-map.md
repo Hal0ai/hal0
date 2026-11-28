@@ -79,7 +79,7 @@ There is **no** `api/routes/lemonade_proxy.py`.
 
 ## Agents (`agents/`)
 
-- `agents/hermes_provision.py` — Hermes bootstrap state machine (the deterministic phases in `_INSTALL_STEPS`, checkpointed to `/var/lib/hal0/state/agents/hermes/provision.json`). This is the provisioner.
+- `agents/hermes_provision.py` — Hermes bootstrap state machine (the deterministic phases in `_INSTALL_STEPS`, last-run snapshot written to `/var/lib/hal0/state/agents/hermes/provision.json`). This is the provisioner.
 - `agents/hermes_refresh.py` — re-render/refresh of an already-provisioned Hermes.
 - `agents/hermes_templates/` — Jinja2 templates rendered into the Hermes home: `HERMES.md.j2`, `AGENTS.md.j2`, `SOUL.md.j2`, `STATE.md.j2`, `MCP-CLIENTS.md.j2`. (There is **no** `config.yaml.j2`: Hermes owns its own `config.yaml`. Reprovision sets hal0's keys with `hermes config set` and a targeted deep-merge, then overlays the person's `/etc/hal0/agents/hermes/overrides.yaml`; it never rewrites the file wholesale.)
 - `agents/hermes/` — the bundled Hermes driver. The hal0-memory `MemoryProvider` plugin itself lives at `installer/agents/hermes/plugins/hal0-memory/` (canonical, shipped source — copied verbatim into `$HERMES_HOME/plugins/hal0-memory/` at provision time).
@@ -107,7 +107,7 @@ There is **no** `api/routes/lemonade_proxy.py`.
 | `/var/lib/hal0/` | Mutable runtime state (preserved on update). |
 | `/var/lib/hal0/slots/<name>/state.json` | Persisted slot state. |
 | `/var/lib/hal0/registry/` | Atomic TOML model catalog. |
-| `/var/lib/hal0/state/agents/hermes/provision.json` | Hermes provisioning checkpoints. |
+| `/var/lib/hal0/state/agents/hermes/provision.json` | Hermes provisioning last-run snapshot. |
 | `/var/log/hal0/` | Optional file logs (journald is primary). |
 | the model store | GGUF model store (`[models].store`; the `model_store` admin tool prints it), mounted read-only into every slot container at the identical path. |
 

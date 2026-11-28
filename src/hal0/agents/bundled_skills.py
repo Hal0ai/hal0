@@ -97,6 +97,8 @@ def prune_retired_skills(
         resolved_root = ship_root.resolve()
         for rel in sorted(RETIRED_BUNDLED_FILES):
             stale = ship_root / rel
+            # Cannot tell an operator-edited copy from the shipped one; that only
+            # matters to someone editing the read-only ship root.
             if stale.is_file() and not stale.is_symlink():
                 if not stale.parent.resolve().is_relative_to(resolved_root):
                     log.warning(

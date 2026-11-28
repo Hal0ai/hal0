@@ -13,7 +13,8 @@ not have. Every file under that tree is checked for these things:
   such as ``v1.8.2.1`` is not an address);
 * no ``mcp__local_mcp`` namespace, which only one box ever had;
 * every ``mcp__<server>__<tool>`` name exists in the tools the matching hal0 MCP
-  server registers, read in-process through its public listing;
+  server registers, read in-process through its public listing (only fully prefixed
+  names are checked, so a bare tool name in skill text is not);
 * no ``--user`` on a ``systemctl`` or ``journalctl`` line: hal0's units are system units.
 """
 
@@ -218,8 +219,8 @@ def test_systemctl_user_check() -> None:
 
 def test_address_check_allows_loopback_and_documentation_ranges_only() -> None:
     assert foreign_addresses("curl http://127.0.0.1:8080 and 192.0.2.10 and 203.0.113.7") == []
-    assert foreign_addresses("ssh 10.0.1.142, gateway 149.154.166.110") == [
-        "10.0.1.142",
+    assert foreign_addresses("ssh 10.99.88.77, gateway 149.154.166.110") == [
+        "10.99.88.77",
         "149.154.166.110",
     ]
 
@@ -227,7 +228,7 @@ def test_address_check_allows_loopback_and_documentation_ranges_only() -> None:
 def test_address_check_does_not_fire_on_version_strings() -> None:
     assert foreign_addresses("hal0 v1.8.2.1 and build1.2.3.4 and x1.2.3.4") == []
     assert foreign_addresses("the five-part 1.2.3.4.5 is not an address") == []
-    assert foreign_addresses("a bare 10.0.1.142. at a sentence end") == ["10.0.1.142"]
+    assert foreign_addresses("a bare 10.99.88.77. at a sentence end") == ["10.99.88.77"]
 
 
 def test_tool_check_catches_a_name_the_server_does_not_register() -> None:

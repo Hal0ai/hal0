@@ -33,7 +33,8 @@ that your session will drop and when; never run one yourself.
 The gateway's platform tokens come from two files. The first is the secrets vault
 `/var/lib/hal0/secrets/agents/hermes.env` (`root:root`, mode 0600). hal0 wires it into the unit
 through a drop-in, `/etc/systemd/system/hermes-gateway.service.d/10-hal0-secrets.conf`, which holds
-one line, `EnvironmentFile=-/var/lib/hal0/secrets/agents/hermes.env`. The leading `-` makes the
+a comment header, a `[Service]` line and the setting
+`EnvironmentFile=-/var/lib/hal0/secrets/agents/hermes.env`. The leading `-` makes the
 vault optional, so a box with no tokens yet starts an idle gateway. The second is
 `$HERMES_HOME/.env` (`/var/lib/hal0/.hermes/.env`): Hermes loads it when the gateway starts and it
 **overrides** the vault. A stale token in `.env` therefore beats a rotated token in the vault.

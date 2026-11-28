@@ -79,6 +79,17 @@ def test_a_symlink_at_the_retired_file_is_kept(tmp_path: Path) -> None:
     assert target.is_file()
 
 
+def test_a_directory_at_the_retired_file_is_left_alone(tmp_path: Path) -> None:
+    ship = tmp_path / "ship"
+    stale = ship / "hal0-service-management" / "scripts" / "check-service-env.sh"
+    stale.mkdir(parents=True)
+    inner = stale / "keep.txt"
+    inner.write_text("x", encoding="utf-8")
+    assert prune_retired_skills(ship_root=ship, mirror=tmp_path / "mirror") == []
+    assert stale.is_dir()
+    assert inner.read_text(encoding="utf-8") == "x"
+
+
 def test_a_parent_symlink_out_of_the_ship_root_is_not_followed(tmp_path: Path) -> None:
     ship = tmp_path / "ship"
     outside = tmp_path / "outside"
