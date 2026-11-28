@@ -15,10 +15,11 @@ from __future__ import annotations
 import copy
 import json
 import os
+import posixpath
 import secrets
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from .catalog import Catalog
 
@@ -26,6 +27,9 @@ DOCUMENT_VERSION = 1
 TERMINAL_KEY = "apps.hermes.terminal_tool"
 ADMIN_KEY = "access.admin_key"
 TYPE_KEY = "install.type"
+STORE_KEY = "model_store.path"
+FLM_KEY = "model_store.flm_path"
+FLM_VARIABLE = "HAL0_FLM_MODELS_DIR"
 
 Document = dict[str, object]
 
@@ -294,9 +298,38 @@ def effective(
     # Choices and overrides always replace what a document holds at a key.
     for layer in (chosen_layer, over_layer):
         _merge_replacing(doc, layer)
+    _drop_outside_flm_path(doc, over)
     doc["version"] = DOCUMENT_VERSION
     doc["meta"] = {"saved_at": now, "saved_by": hal0_version}
     return doc
+
+
+def _strictly_inside(path: object, store: object) -> bool:
+    """Whether path is a proper sub-path of store, compared on normalised paths by component."""
+    if not isinstance(path, str) or not isinstance(store, str):
+        return False
+    if not (path.startswith("/") and store.startswith("/")):
+        return False
+    return (
+        PurePosixPath(posixpath.normpath(store)) in PurePosixPath(posixpath.normpath(path)).parents
+    )
+
+
+def _drop_outside_flm_path(doc: Document, over: Sequence[Override]) -> None:
+    """Keep an NPU folder from the variable out of the document unless it is inside the store.
+
+    The installer rejects a whole document whose flm_path is not strictly inside
+    the model store. The variable is what the installer will use, so when it is
+    refused here whatever a lower layer holds for the key goes too.
+    """
+    named = [o for o in over if o.key == FLM_KEY]
+    if not named or named[-1].source != FLM_VARIABLE:
+        return
+    if _strictly_inside(named[-1].value, get(doc, STORE_KEY)):
+        return
+    store = doc.get("model_store")
+    if isinstance(store, dict):
+        store.pop(FLM_KEY.rpartition(".")[2], None)
 
 
 def _merge_layer(doc: Document, layer: Mapping[str, object]) -> None:

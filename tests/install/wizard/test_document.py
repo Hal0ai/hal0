@@ -705,3 +705,53 @@ def test_an_overridden_model_that_is_not_offered_passes_through(catalog: Catalog
     saved = {"models": {"starter": "old-1"}}
     over = [Override("models.starter", "mine-1", "HAL0_AGENT_MODEL")]
     assert _starter(ladder, saved=saved, over=over) == "mine-1"
+
+
+# ------------------------------------------- the NPU folder must sit inside the store
+
+
+def _with_flm(
+    catalog: Catalog, store: str, flm: str, *, saved: dict[str, object] | None = None
+) -> dict[str, object]:
+    env = {"HAL0_MODELS_DIR": store, "HAL0_FLM_MODELS_DIR": flm}
+    return effective(
+        catalog,
+        chosen={},
+        saved=saved,
+        given=None,
+        over=overrides([], env),
+        hal0_version="v",
+        now=NOW,
+    )
+
+
+def test_an_npu_folder_inside_the_store_is_written(catalog: Catalog) -> None:
+    doc = _with_flm(catalog, "/a/models", "/a/models/flm")
+    assert get(doc, "model_store.flm_path") == "/a/models/flm"
+
+
+@pytest.mark.parametrize(
+    "flm",
+    ["/elsewhere/flm", "/a/models", "/a/models/", "/a/models-x", "/a/models/../x", "flm", "/"],
+)
+def test_an_npu_folder_not_strictly_inside_the_store_is_left_out(
+    catalog: Catalog, flm: str
+) -> None:
+    doc = _with_flm(catalog, "/a/models", flm)
+    assert get(doc, "model_store.flm_path") is None
+    assert get(doc, "model_store.path") == "/a/models"
+
+
+def test_a_lower_layer_npu_folder_does_not_come_back(catalog: Catalog) -> None:
+    saved: dict[str, object] = {"model_store": {"flm_path": "/a/models/old"}}
+    doc = _with_flm(catalog, "/a/models", "/elsewhere/flm", saved=saved)
+    assert get(doc, "model_store.flm_path") is None
+
+
+def test_an_outside_npu_folder_is_still_an_override() -> None:
+    (found,) = [
+        o
+        for o in overrides([], {"HAL0_FLM_MODELS_DIR": "/elsewhere/flm"})
+        if o.key == "model_store.flm_path"
+    ]
+    assert (found.value, found.source) == ("/elsewhere/flm", "HAL0_FLM_MODELS_DIR")

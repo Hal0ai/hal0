@@ -810,3 +810,16 @@ def test_a_choice_screen_with_nothing_to_choose_changes_nothing(
     assert view(s).screen is Screen.TYPE and view(s).rows == ()
     for key in ("UP", "DOWN", "SPACE", "ENTER"):
         assert press(s, key) == s
+
+
+def test_an_npu_folder_outside_the_store_still_shows_as_fixed(
+    catalog: Catalog, npu_facts: Facts
+) -> None:
+    over = [Override("model_store.flm_path", "/elsewhere/flm", "HAL0_FLM_MODELS_DIR")]
+    row = next(
+        r for r in view(run(custom(catalog, npu_facts, over=over), "ENTER", "ENTER")).rows
+        if r.id == "flm_store"
+    )  # fmt: skip
+    assert row.state == "fixed"
+    assert row.note == "set by HAL0_FLM_MODELS_DIR"
+    assert "/elsewhere/flm" in row.detail

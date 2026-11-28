@@ -260,7 +260,8 @@ def _row(s: State, doc: Document, qid: str, detail: str | None = None) -> Row | 
     if q is None:
         return None
     fixed = fixed_override(s, q.answer_key)
-    value = get(doc, q.answer_key)
+    # A fixed row shows what the flag or variable says, even when the document leaves it out.
+    value = get(doc, q.answer_key) if fixed is None else fixed.value
     if detail is None:
         detail = _option_label(q, value) if q.options else "" if value is None else str(value)
     note = "" if fixed is None else set_by(fixed)
