@@ -103,8 +103,14 @@ config schema version is unchanged.
   server's venv could not start. The update rebuilds it (one to two minutes)
   and restarts the memory engine once.
 - **A rollback between a nightly and the stable release of the same number
-  now restarts `hal0-api`.** Nothing to do; `hal0 update rollback` says so.
-  `/api/health` and `/api/status` carry a new `release` field.
+  now says that `hal0-api` needs a restart.** `hal0 update --rollback`
+  prints "restart required" with the command, `systemctl restart hal0-api`;
+  it used to print "no restart needed" and leave the old build serving.
+  This holds when the daemon answering the rollback is 1.8.3 or later; a
+  rollback answered by an older daemon still prints the old message, so
+  after one, compare `/api/health` with the installed release and restart
+  `hal0-api` if they differ. `/api/health` and `/api/status` carry a new
+  `release` field for that.
 
 ## Upgrading to 1.8.2
 
