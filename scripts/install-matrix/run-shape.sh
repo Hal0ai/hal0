@@ -371,7 +371,19 @@ record_version() {
   fi
 }
 
+# The collector is copied into the guest only at step 7. A run that ended before
+# that has nothing to run there and nothing to pull: cleanup says so in one line
+# and moves on, and does not count it as a failed collection.
+COLLECTOR_PUSHED=0
+collection_skipped() {
+  [[ "$COLLECTOR_PUSHED" == "0" ]] || return 1
+  POST_DONE=1
+  PULL_DONE=1
+  log "collection skipped: collect.sh was never copied into the guest"
+}
+
 collect_post() {
+  collection_skipped && return 0
   POST_DONE=1
   _PVE_STREAM=post ct_exec "$VMID" "bash /root/collect.sh post" >"${ART}/post.txt" 2>>"${ART}/collect.err" \
     || log "collect post failed"
@@ -380,6 +392,7 @@ collect_post() {
 
 pull_artifacts() {
   local path
+  [[ "$COLLECTOR_PUSHED" == "1" ]] || { PULL_DONE=1; return 0; }
   PULL_DONE=1
   ct_pull "$VMID" "$SUMMARY_PATH" "${ART}/summary.json" 2>/dev/null || true
   path="$(kv_get "${ART}/post.txt" install_log)"
@@ -890,6 +903,7 @@ PREREQS="$(printf '%s\n' "$prereq_out" | sed -n 's/^prereqs=//p' | head -n 1)"
 # ── step 7: baseline measurements ────────────────────────────────────────────
 ct_push "$VMID" "${HERE}/collect.sh" /root/collect.sh \
   || end_run push_failed "collect.sh could not be copied into the guest" "could not copy collect.sh"
+COLLECTOR_PUSHED=1
 _PVE_STREAM=pre ct_exec "$VMID" "bash /root/collect.sh pre" >"${ART}/pre.txt" 2>>"${ART}/collect.err" || log "collect pre failed"
 
 # ── step 8: the install ──────────────────────────────────────────────────────

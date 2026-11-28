@@ -465,6 +465,36 @@ def test_every_early_end_records_its_reason_in_run_txt_and_result_json(host, rea
     assert not any("summary-json" in c for c in host.calls()), "the install never started"
 
 
+@pytest.mark.parametrize(
+    "env",
+    [
+        pytest.param({"FAKE_NO_RESOLVER": "1", **NO_NET}, id="no-network"),
+        pytest.param({"FAKE_PUSH_FAILS": "collect.sh"}, id="push-failed"),
+        pytest.param({"FAKE_PREREQ_FAILS": "1"}, id="prereqs"),
+    ],
+)
+def test_the_collector_is_not_run_when_it_was_never_copied_in(host, env):
+    r = host.run("u2604-cpu-unattended", "--vmid", "172", "--out", str(host.out), **env)
+    assert r.returncode == 1
+    assert "collect post failed" not in r.stderr and "collect pre failed" not in r.stderr
+    assert r.stderr.count("collection skipped: collect.sh was never copied into the guest") == 1
+    assert not any(
+        f"collect.sh\\ {step}" in c for step in ("pre", "post", "probe") for c in host.calls()
+    )
+    assert not any("hal0-summary.json" in c for c in host.calls()), "nothing to pull either"
+    err = host.out / "collect.err"
+    assert not err.exists() or err.read_text() == ""
+    assert not (host.state / "present").exists(), "the container is still destroyed"
+
+
+def test_a_run_that_copied_the_collector_in_still_collects_after_a_failed_install(host):
+    r = host.run(
+        "u2604-cpu-unattended", "--vmid", "172", "--out", str(host.out), FAKE_INSTALL_RC="1"
+    )
+    assert "collection skipped" not in r.stderr
+    assert any("collect.sh\\ post" in c for c in host.calls())
+
+
 def test_the_tree_push_and_unpack_failures_record_their_reasons(host, tmp_path):
     tree = _git_tree(tmp_path)
     r = host.run(
