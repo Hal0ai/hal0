@@ -2,8 +2,8 @@
 name: hal0-agents
 description: >
   Teach agents how to use the hal0-Agents MCP for agent orchestration — listing,
-  launching, monitoring, stopping agents; managing agent skills; and agent-scoped
-  memory. Trigger: "list agents", "run an agent", "start a worker", "spawn agent",
+  launching, monitoring, stopping agents; managing agent skills; and agent notes in
+  shared memory. Trigger: "list agents", "run an agent", "start a worker", "spawn agent",
   "check agent status", "stop agent", "agent skills", "what agents are running",
   "agents mcp", "hal0 agents".
 
@@ -17,7 +17,8 @@ Remote (auth required): `https://<hal0-host>/mcp/agents/mcp`
 Auth: Bearer token (set `HAL0_MCP_TOKEN` env var)
 
 Only Hermes can be run: `agent` is `hermes` (its default profile) or `hermes/<profile>`;
-any other id, Pi included, is refused with `bridge.unknown_agent`.
+any other id, Pi included, and a `hermes/<profile>` the box does not have, is refused with
+`bridge.unknown_agent`.
 
 ## Available Tools
 
@@ -89,6 +90,9 @@ If the view says `timed_out`, the run is still going: call `agent_run_wait` agai
 ```
 Long output comes in 16 KiB windows: read the next one with `agent_run_status`
 and `offset` set to the view's `next_offset`.
+```
+→ agent_run_status run_id: "run-abc123" offset: 16384
+```
 
 ### Answer a run's question
 A run waiting on a clarification has `status: "waiting_for_clarification"`, and its
@@ -106,6 +110,16 @@ A run waiting on an approval is the operator's to approve in the hal0 inbox.
 → agents_list → each profile's health
 → agent_runs_list status: "running" → your runs that are running
 → agent_run_events run_id: "run-abc123" since_seq: 0 → the run's events
+```
+
+### Steer a running agent
+```
+→ agent_run_steer run_id: "run-abc123" input: "Leave the tests alone"
+```
+
+### See what an agent can do
+```
+→ agent_capabilities agent: "hermes"
 ```
 
 ### Stop a runaway agent
@@ -141,7 +155,7 @@ and change nothing until the operator approves the row in the hal0 inbox.
 
 ## Rules
 
-1. **Check `agent_runs_list` with `status: "running"` first** before starting a run — avoid duplicates
+1. **Check `agent_runs_list` first** (it lists your own runs only) before starting a run — avoid duplicates
 2. **Use `agent_run` with `wait_s` for quick queries**, `agent_run` then `agent_run_wait` or `agent_run_status` for long-running tasks
 3. **Stop agents** that appear stuck or idle for too long
 4. **Use `agent_memory_add` and `agent_memory_search`** for notes about agents; they use the box's shared memory, not a Hermes agent's private memory

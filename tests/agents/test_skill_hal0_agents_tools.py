@@ -28,10 +28,10 @@ _INLINE_ARG = re.compile(r"\b([a-z_]+):\s")
 _QUOTED = re.compile(r'"(?:[^"\\]|\\.)*"')
 
 
-def _tools() -> dict[str, dict[str, Any]]:
-    """Tool name -> its input schema, from the definitions the server registers."""
+async def _tools() -> dict[str, dict[str, Any]]:
+    """Tool name -> its input schema, from the server's public tool listing."""
     server = build_server(state=SimpleNamespace())
-    return {tool.name: tool.parameters for tool in server._tool_manager.list_tools()}
+    return {tool.name: tool.inputSchema for tool in await server.list_tools()}
 
 
 def _body() -> str:
@@ -73,38 +73,43 @@ def _examples(body: str) -> list[tuple[str, set[str]]]:
     return calls
 
 
-def test_the_skill_shows_example_calls() -> None:
-    assert _examples(_body()), "the parser found no example call; the test would pass vacuously"
-
-
-def test_every_tool_the_skill_names_exists() -> None:
-    tools = _tools()
+async def test_every_tool_the_skill_names_exists() -> None:
+    tools = await _tools()
     named = set(_TOOL_NAME.findall(_code_text(_body())))
     assert named, "no tool name found in the skill"
     assert not (named - set(tools)), f"tools that do not exist: {sorted(named - set(tools))}"
 
 
-def test_every_registered_tool_is_listed() -> None:
+async def test_every_registered_tool_is_listed() -> None:
     listed = set(re.findall(r"^\| `(agents?_[a-z_]+)` \|", _body(), re.MULTILINE))
-    assert listed == set(_tools())
+    registered = set(await _tools())
+    assert not registered - listed, f"tools missing from the skill: {sorted(registered - listed)}"
+    assert not listed - registered, (
+        f"tools listed but not registered: {sorted(listed - registered)}"
+    )
 
 
-def test_every_argument_shown_is_a_parameter_of_its_tool() -> None:
-    tools = _tools()
+async def test_every_argument_shown_is_a_parameter_of_its_tool() -> None:
+    tools = await _tools()
     for tool, args in _examples(_body()):
         unknown = args - set(tools[tool]["properties"])
         assert not unknown, f"{tool} does not take {sorted(unknown)}"
 
 
-def test_every_required_parameter_appears_in_an_example() -> None:
-    tools = _tools()
+async def test_every_tool_with_required_parameters_has_a_complete_example() -> None:
+    tools = await _tools()
     shown: dict[str, list[set[str]]] = {}
     for tool, args in _examples(_body()):
         shown.setdefault(tool, []).append(args)
-    for tool, examples in shown.items():
-        required = set(tools[tool].get("required", []))
-        covered = set().union(*examples)
-        assert required <= covered, f"no example of {tool} passes {sorted(required - covered)}"
+    assert shown, "the parser found no example call; the test would pass vacuously"
+    for tool, schema in tools.items():
+        required = set(schema.get("required", []))
+        if not required:
+            continue
+        assert tool in shown, f"the skill has no example call of {tool}"
+        assert any(required <= args for args in shown[tool]), (
+            f"no single example of {tool} passes all of {sorted(required)}"
+        )
 
 
 @pytest.mark.parametrize("stale", ["pi-agent", "agent_id"])
