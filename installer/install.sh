@@ -196,12 +196,12 @@ gateway_install_note() {
     esac
 }
 
+DEV_MODE=0
+NO_START=0
 # The release tree this script runs from (set before the flag loop: whether the
 # setup screens are part of it decides how an unknown flag is treated).
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-DEV_MODE=0
-NO_START=0
 # ROCmFP4 + MTP note: the old `--rocmfp4` power pack (a host-side fork
 # binary wired into the retired daemon runtime) is gone. FP4/MTP now
 # ships as container profiles (`rocm` / `rocm-mtp` in
