@@ -103,6 +103,25 @@ def test_pid1_lxc_libvirt_without_a_marker_is_a_plain_container(tmp_path: Path) 
     assert _classify(tmp_path, None, "PATH=/bin\0container=lxc-libvirt\0") == "container"
 
 
+@pytest.mark.parametrize("value", ["podman", "docker", "systemd-nspawn"])
+def test_pid1_other_container_without_a_marker_is_none_as_before(
+    tmp_path: Path, value: str
+) -> None:
+    assert _classify(tmp_path, None, f"PATH=/bin\0container={value}\0") == "none"
+
+
+def test_no_marker_and_no_container_entry_is_none(tmp_path: Path) -> None:
+    assert _classify(tmp_path, None, "PATH=/bin\0") == "none"
+
+
+def test_pid1_lxc_entry_in_the_middle_is_matched_whole(tmp_path: Path) -> None:
+    assert _classify(tmp_path, None, "A=1\0container=lxc\0B=2\0") == "lxc-unprivileged"
+
+
+def test_marker_lxc_is_lxc(tmp_path: Path) -> None:
+    assert _classify(tmp_path, "lxc\n", "") == "lxc-unprivileged"
+
+
 def test_marker_lxc_libvirt_is_a_plain_container(tmp_path: Path) -> None:
     assert _classify(tmp_path, "lxc-libvirt\n", "") == "container"
 
@@ -112,10 +131,12 @@ def test_classifier_is_used_not_reimplemented() -> None:
     thing this function replaces — a stray copy would drift from the
     privileged/unprivileged split and resurrect the wrong-remedy bug."""
     preflight = _PREFLIGHT.read_text(encoding="utf-8")
-    # One occurrence remains by design: the exact-match probe inside
-    # hal0_lxc_kind itself.
-    assert preflight.count("container=lxc") == 1
-    assert "grep -qx 'container=lxc'" in preflight
+    # Two occurrences remain by design, both inside hal0_lxc_kind: the
+    # substring probe that decides `none`, and the exact-record probe that
+    # decides LXC versus container. A third would be a stray copy.
+    assert preflight.count("container=lxc") == 2
+    assert "grep -qa 'container=lxc'" in preflight
+    assert "grep -qxz 'container=lxc'" in preflight
 
     install_sh = (_REPO_ROOT / "installer" / "install.sh").read_text(encoding="utf-8")
     assert "hal0_lxc_kind" in install_sh
