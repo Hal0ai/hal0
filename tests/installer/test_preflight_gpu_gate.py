@@ -653,12 +653,10 @@ def test_every_cpu_only_optin_in_install_sh_runs_the_gate_first() -> None:
     optins = [i for i, line in enumerate(lines) if 'HAL0_ALLOW_CPU_ONLY:-0}" == "1"' in line]
     assert len(optins) == 2, "the CPU-only env opt-in branch count changed"
 
-    proceeds = [
-        i
-        for i, line in enumerate(lines)
-        if "proceeding CPU-only" in line or "confirmed at the prompt" in line
-    ]
-    assert len(proceeds) == 4, "the CPU-only proceed messages changed shape"
+    proceeds = [i for i, line in enumerate(lines) if "proceeding CPU-only" in line]
+    assert len(proceeds) == 2, "the CPU-only proceed messages changed shape"
+    # The terminal confirm is gone: HAL0_ALLOW_CPU_ONLY=1 is the only consent.
+    assert "confirmed at the prompt" not in text
     for i in proceeds:
         assert "_cpu_only_image_gate || exit 1" in lines[i - 1], (
             f"install.sh:{i + 1} announces a CPU-only install without gating on "

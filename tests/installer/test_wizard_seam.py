@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -854,7 +855,7 @@ def test_secret_never_printed(tmp_path: Path, stub: dict[str, str]) -> None:
 
 def test_the_token_reaches_the_installers_token_variable() -> None:
     head = TEXT.index("# ── Operator input: model store + HuggingFace token")
-    block = TEXT[head : TEXT.index("_md_answer=", head)]
+    block = TEXT[head : TEXT.index('info "Pull destination', head)]
     assert 'HF_TOKEN_VAL="${_HAL0_WIZARD_HF_TOKEN}"' in block
     assert "unset _HAL0_WIZARD_HF_TOKEN" in block
 
@@ -1297,12 +1298,17 @@ rc=0; hal0_run_wizard || rc=$?; echo "RC=$rc"
 # ── the CPU-only prompt ─────────────────────────────────────────────────────
 
 
-def test_cpu_only_prompt_skipped_after_the_wizard() -> None:
+def test_cpu_only_prompt_is_gone_and_consent_is_the_variable() -> None:
+    assert "_confirm_cpu_only" not in TEXT
     head = TEXT.index('if [[ "${DEV_MODE}" -eq 0 ]]; then\n    # gpu_rc was captured')
     block = TEXT[head : TEXT.index("# ── Operator input", head)]
-    prompts = [ln for ln in block.splitlines() if "_confirm_cpu_only" in ln]
-    assert len(prompts) == 2
-    assert all('"${HAL0_WIZARD_RAN:-0}" != "1"' in ln for ln in prompts), prompts
+    for code in ("NO_KFD", "NO_DEVICE"):
+        branch = block[block.index(f"gpu_rc == HAL0_GPU_RC_{code}") :]
+        branch = re.split(r"\n    (?:elif|fi)\b", branch, maxsplit=1)[0]
+        assert '"${HAL0_ALLOW_CPU_ONLY:-0}" == "1"' in branch, code
+        assert "elif" not in branch, code
+        assert "/dev/tty" not in branch and "read " not in branch, code
+        assert "exit 1" in branch.split("else", 1)[1], code
 
 
 # ── a folder the flag or the environment chose stays theirs ─────────────────

@@ -91,20 +91,22 @@ class TestGather:
         # (#1094): HF_TOKEN first, HUGGING_FACE_HUB_TOKEN second.
         assert "HUGGING_FACE_HUB_TOKEN" in gather_block
 
-    def test_the_prompt_is_tty_only(self, gather_block: str) -> None:
-        """A headless install must take the env value without ever asking."""
-        assert "&& _interactive; then" in gather_block
+    def test_nothing_is_asked_here(self, gather_block: str) -> None:
+        """The setup screens ask for the token; this block only carries it, so
+        a headless install takes the env value without ever asking."""
+        assert "_interactive" not in gather_block
+        assert "_tty_read" not in gather_block
+        assert "/dev/tty" not in gather_block
 
-    def test_the_prompt_is_silent(self, gather_block: str) -> None:
-        """A secret typed at a prompt must never be echoed into the transcript
-        — ``_tty_read``'s fourth argument is the silent flag."""
-        assert re.search(r'_tty_read _hf_answer .*" 1', gather_block)
+    def test_no_prompt_variable_is_left(self, gather_block: str) -> None:
+        assert "_hf_answer" not in gather_block
 
-    def test_an_env_token_is_not_redisplayed(self, gather_block: str) -> None:
-        """Printing a secret back at the operator is exactly what the 0600
-        secrets file exists to avoid, so an env-supplied token is acknowledged,
-        never re-shown."""
-        assert "taken from the environment" in gather_block
+    def test_the_token_value_is_never_printed(self, gather_block: str) -> None:
+        """Printing a secret is exactly what the 0600 secrets file exists to
+        avoid: no log line in this block names the token variable."""
+        for ln in gather_block.splitlines():
+            if re.match(r"\s*(info|warn|err|die|echo|printf)\b", ln):
+                assert "HF_TOKEN" not in ln and "HAL0_WIZARD_HF_TOKEN" not in ln, ln
 
     def test_missing_token_is_a_clean_skip(self, persist_block: str) -> None:
         # The else branch must not die()/exit — just log and move on.

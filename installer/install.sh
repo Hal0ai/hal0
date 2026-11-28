@@ -1128,8 +1128,8 @@ HAL0_CONTAINER_REQUIRED=1 preflight_container_runtime \
 #     backend, which emits invalid tokens for every model while every health
 #     surface reads green (#1888). Same EXPLICIT CPU-only opt-in as below.
 #   HAL0_GPU_RC_NO_DEVICE  → no GPU devices inside an LXC. Allow an EXPLICIT
-#     CPU-only opt-in: HAL0_ALLOW_CPU_ONLY=1, or a y/N confirm on a real TTY;
-#     otherwise stop with the passthrough remedy.
+#     CPU-only opt-in: HAL0_ALLOW_CPU_ONLY=1 (the setup screens set it when the
+#     person agrees); otherwise stop with the passthrough remedy.
 #   0 → GPU present + wired, or a genuine bare-metal CPU box: proceed silently.
 # Every CPU-only opt-in is itself gated on there BEING a CPU runner image
 # (_cpu_only_image_gate, #2126). The opt-in only picks device=cpu; until the
@@ -1139,24 +1139,13 @@ HAL0_CONTAINER_REQUIRED=1 preflight_container_runtime \
 # serves a token.
 # Skipped in dev mode (no system slots there). This block is self-contained so
 # later install.sh edits merge around it cleanly.
-_confirm_cpu_only() {
-    # y/N confirm read from the controlling terminal, so it works even when
-    # stdin is the piped install script (`curl … | bash`). Default No; any
-    # read failure (no TTY) also means No.
-    local reply=""
-    printf '%s' "Continue with a CPU-only install anyway? [y/N] " >/dev/tty 2>/dev/null || return 1
-    IFS= read -r reply </dev/tty 2>/dev/null || return 1
-    [[ "${reply}" =~ ^[Yy]([Ee][Ss])?$ ]]
-}
-
 # The CPU-only image gate (_cpu_only_image_gate) and the honest CPU-only
 # remedy text (_cpu_only_remedy_lines) both live in lib/preflight.sh next to
 # the runner-image mirror they consult — sourced at the top of this file.
 
 # ── Interactive-input gate (v1.0) ───────────────────────────────────────────
-# The installer is the single user-facing entry point, so the two answers it
-# genuinely needs from a human — where models live, and a HuggingFace read
-# token — are asked HERE rather than in a post-install wizard.
+# The setup screens ask every question; the helpers below stay for the steps
+# that still read a terminal themselves.
 #
 # `_interactive` is the ONE predicate that decides whether anything is asked.
 # It tests **stdin**, not /dev/tty, and that distinction is load-bearing:
@@ -1172,9 +1161,8 @@ _confirm_cpu_only() {
 # requirement: an install that blocks on a prompt in CI is a broken install.
 # HAL0_NONINTERACTIVE=1 forces the headless path even on a terminal.
 #
-# The GPU-gate confirm above deliberately keeps its own /dev/tty behaviour —
-# it is a "your box is misconfigured, are you sure?" safety stop, not an
-# input prompt, and it already defaults to the safe answer.
+# The GPU gate above no longer asks anything: CPU-only is a consent that
+# arrives as HAL0_ALLOW_CPU_ONLY=1, and nothing else lets the install continue.
 _interactive() {
     [[ "${HAL0_NONINTERACTIVE:-0}" != "1" ]] && [[ -t 0 ]] && [[ -r /dev/tty ]]
 }
@@ -1227,9 +1215,6 @@ if [[ "${DEV_MODE}" -eq 0 ]]; then
         if [[ "${HAL0_ALLOW_CPU_ONLY:-0}" == "1" ]]; then
             _cpu_only_image_gate || exit 1
             warn "No usable GPU lane on this box — proceeding CPU-only (HAL0_ALLOW_CPU_ONLY=1); slots will be created with device=cpu."
-        elif [[ "${HAL0_WIZARD_RAN:-0}" != "1" && -r /dev/tty ]] && _confirm_cpu_only; then
-            _cpu_only_image_gate || exit 1
-            warn "Proceeding with a CPU-only install (confirmed at the prompt); slots will be created with device=cpu."
         else
             err "No usable GPU lane inside this container."
             err "  ROCm needs /dev/kfd, which is not present (remedy above)."
@@ -1293,9 +1278,6 @@ if [[ "${DEV_MODE}" -eq 0 ]]; then
         if [[ "${HAL0_ALLOW_CPU_ONLY:-0}" == "1" ]]; then
             _cpu_only_image_gate || exit 1
             warn "No GPU devices inside this container — proceeding CPU-only (HAL0_ALLOW_CPU_ONLY=1)."
-        elif [[ "${HAL0_WIZARD_RAN:-0}" != "1" && -r /dev/tty ]] && _confirm_cpu_only; then
-            _cpu_only_image_gate || exit 1
-            warn "Proceeding with a CPU-only install (confirmed at the prompt)."
         else
             err "No GPU devices inside this container. Forward them from the Proxmox host (remedy above), then re-run install.sh."
             _cpu_only_remedy_lines
@@ -1305,10 +1287,10 @@ if [[ "${DEV_MODE}" -eq 0 ]]; then
 fi
 
 # ── Operator input: model store + HuggingFace token ─────────────────────────
-# Asked once, here — after the sudo re-exec (so the answers survive) and
-# before preflight_disk measures MODELS_DIR (so it measures the REAL choice).
-# Both questions are pre-filled from the flag/env value, so hitting Enter is
-# always the documented default and a headless run behaves exactly as before.
+# Nothing is asked here. The answers come from the setup screens, or from the
+# flags and variables the run was started with; this block only carries them
+# into the variables the later steps read, before preflight_disk measures
+# MODELS_DIR (so it measures the REAL choice).
 #
 # The HF token is only GATHERED here; validation (`hf auth whoami`) and the
 # 0600 persist still happen in the "Configuration" step below, which is the
@@ -1320,37 +1302,6 @@ if [[ -n "${_HAL0_WIZARD_HF_TOKEN:-}" ]]; then
     HF_TOKEN_VAL="${_HAL0_WIZARD_HF_TOKEN}"
 fi
 unset _HAL0_WIZARD_HF_TOKEN
-# Pre-declared because `_tty_read` writes through a nameref, which shellcheck
-# cannot follow (SC2154) — and an unset target would trip `set -u` if the
-# helper ever grew an early return.
-_md_answer=""
-_hf_answer=""
-if [[ "${HAL0_ANSWERS_APPLIED:-0}" != "1" ]] && _interactive; then
-    if [[ "${MODELS_DIR_EXPLICIT}" -eq 1 ]]; then
-        info "model store fixed by --models-dir / HAL0_MODELS_DIR — not asking"
-    else
-        while true; do
-            _tty_read _md_answer "Where should downloaded models live?" "${MODELS_DIR}"
-            if [[ "${_md_answer}" == /* ]]; then
-                MODELS_DIR="${_md_answer}"
-                break
-            fi
-            warn "that must be an absolute path (starts with /) — models are pulled as root, so a relative path would land in an unpredictable directory"
-        done
-    fi
-    # Token prompt: silent (never echoed, never logged). An existing env token
-    # is offered as "keep" rather than redisplayed — printing a secret back at
-    # the operator is exactly what the 0600 secrets file exists to avoid.
-    if [[ -n "${HF_TOKEN_VAL}" ]]; then
-        info "HuggingFace token: taken from the environment (HF_TOKEN / HUGGING_FACE_HUB_TOKEN)"
-    else
-        printf '\n' >/dev/tty 2>/dev/null || true
-        info "A HuggingFace read token lets hal0 pull gated repos. Open models need none — leave it blank to skip."
-        _tty_read _hf_answer "HuggingFace token (input hidden, Enter to skip)" "" 1
-        HF_TOKEN_VAL="${_hf_answer}"
-        unset _hf_answer
-    fi
-fi
 
 if [[ "${MODELS_DIR}" != /* ]]; then
     die "model store must be an absolute path (got: ${MODELS_DIR})"

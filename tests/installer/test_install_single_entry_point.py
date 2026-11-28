@@ -180,19 +180,12 @@ def test_operator_prompts_are_gated_on_an_interactive_stdin(install_sh_text: str
     assert "-t 0" in body, "_interactive() must test stdin (`[[ -t 0 ]]`), not just /dev/tty"
     assert "HAL0_NONINTERACTIVE" in body, "no env kill-switch for the prompts"
 
-    # Every operator prompt must sit behind that gate. _tty_read is the only
-    # prompting helper; its call sites must all be inside `if _interactive`.
-    # The gate also skips itself once an answers document has been applied.
-    gate_line = _line_of(
-        install_sh_text, '"${HAL0_ANSWERS_APPLIED:-0}" != "1" ]] && _interactive; then'
-    )
-    lines = install_sh_text.splitlines()
-    call_sites = [i for i, line in enumerate(lines, start=1) if re.match(r"\s+_tty_read ", line)]
-    assert call_sites, "no _tty_read call sites found — did the prompts move?"
-    assert all(i > gate_line for i in call_sites), (
-        f"_tty_read called outside the _interactive gate (gate at {gate_line}, "
-        f"calls at {call_sites})"
-    )
+    # The pre-flight prompts are gone: the setup screens ask. Nothing between
+    # the operator-input comment and the next step banner may read a terminal.
+    block = install_sh_text[install_sh_text.index("Operator input: model store") :]
+    block = block[: block.index("ui_step")]
+    assert "_tty_read" not in block
+    assert "/dev/tty" not in block
 
 
 def test_bootstrap_pipes_stdin_so_the_gate_can_do_its_job() -> None:
@@ -215,17 +208,13 @@ def test_fresh_test_ct_drives_the_install_without_a_tty() -> None:
     assert "-t -t" not in text and "ssh -t" not in text
 
 
-def test_models_dir_and_hf_token_prompts_prefill_from_env(install_sh_text: str) -> None:
-    """Both prompts must be pre-filled, so Enter reproduces the headless value."""
-    block = install_sh_text[install_sh_text.index("Operator input: model store") :]
-    block = block[: block.index("ui_step")]
-    # Pre-fill sources.
-    assert 'HF_TOKEN_VAL="${HF_TOKEN:-${HUGGING_FACE_HUB_TOKEN:-}}"' in block
-    assert '_tty_read _md_answer "Where should downloaded models live?" "${MODELS_DIR}"' in block
-    # An explicit --models-dir / HAL0_MODELS_DIR is never re-asked.
-    assert "MODELS_DIR_EXPLICIT" in block
-    # The token is read silently (never echoed into the transcript).
-    assert re.search(r'_tty_read _hf_answer .*" 1', block), "HF token prompt is not silent"
+def test_models_dir_and_hf_token_prompts_are_gone(install_sh_text: str) -> None:
+    """The prompt text is gone; the variables later code reads are not."""
+    assert "Where should downloaded models live" not in install_sh_text
+    assert "_md_answer" not in install_sh_text
+    assert "_hf_answer" not in install_sh_text
+    assert 'HF_TOKEN_VAL="${HF_TOKEN:-${HUGGING_FACE_HUB_TOKEN:-}}"' in install_sh_text
+    assert "MODELS_DIR_EXPLICIT" in install_sh_text
 
 
 # ── 4. step counter ─────────────────────────────────────────────────────────

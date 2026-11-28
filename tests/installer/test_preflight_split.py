@@ -11,6 +11,7 @@ the technique ``test_install_component_flags.py`` uses.
 from __future__ import annotations
 
 import re
+import shlex
 import subprocess
 from pathlib import Path
 
@@ -142,7 +143,7 @@ def test_gpu_branches_follow_the_seam_and_use_captured_code() -> None:
         assert f"gpu_rc == HAL0_GPU_RC_{code}" in second
         assert f"gpu_rc == HAL0_GPU_RC_{code}" not in first
     assert "chgrp" in second
-    assert "_confirm_cpu_only" in second
+    assert "_confirm_cpu_only" not in second
 
 
 def test_second_half_order() -> None:
@@ -153,7 +154,7 @@ def test_second_half_order() -> None:
         "preflight_venv",
         "preflight_container_runtime",
         "gpu_rc == HAL0_GPU_RC_BROKEN_GID",
-        'if [[ "${HAL0_ANSWERS_APPLIED:-0}" != "1" ]] && _interactive; then',
+        'HF_TOKEN_VAL="${HF_TOKEN:-${HUGGING_FACE_HUB_TOKEN:-}}"',
         "resolve_hindsight_python",
         "preflight_writable",
         "preflight_ports",
@@ -169,13 +170,13 @@ def test_step_total_unchanged() -> None:
     assert len(re.findall(r"^ui_step ", TEXT, re.M)) == 15
 
 
-# ── the legacy prompts ──────────────────────────────────────────────────────
+# ── the operator-input region asks nothing ──────────────────────────────────
 
 _PROMPTS_START = "# ── Operator input: model store + HuggingFace token"
 _PROMPTS_END = "# The Hindsight memory engine"
 
 
-def _prompts_script(tmp_path: Path, applied: str | None) -> str:
+def _prompts_script(tmp_path: Path, applied: str | None, interactive: bool) -> str:
     head = TEXT.index(_PROMPTS_START)
     block = TEXT[head : TEXT.index(_PROMPTS_END, head)]
     log = tmp_path / "asked.log"
@@ -185,33 +186,40 @@ set -euo pipefail
 info() {{ printf 'INFO: %s\\n' "$*"; }}
 warn() {{ printf 'WARN: %s\\n' "$*"; }}
 die() {{ printf 'DIE: %s\\n' "$*" >&2; exit 1; }}
-_interactive() {{ return 0; }}
+_interactive() {{ return {0 if interactive else 1}; }}
 _tty_read() {{
     local -n _o="$1"
-    printf 'ASKED: %s\\n' "$2" >> "{log}"
+    printf 'ASKED: %s\\n' "$2" >> {shlex.quote(str(log))}
     _o="${{3:-}}"
 }}
 MODELS_DIR=/srv/models
 MODELS_DIR_EXPLICIT=0
 HF_TOKEN=tok
 {preset}{block}
-echo "MODELS_DIR=${{MODELS_DIR}}"
+echo "MODELS_DIR=${{MODELS_DIR}} TOKEN_SET=${{HF_TOKEN_VAL:+yes}}"
 """
 
 
-def test_legacy_prompts_skipped_when_answers_applied(tmp_path: Path) -> None:
-    proc = _run(_prompts_script(tmp_path, "1"))
+@pytest.mark.parametrize("interactive", [True, False])
+@pytest.mark.parametrize("applied", [None, "0", "1"])
+def test_operator_input_region_never_asks(
+    tmp_path: Path, applied: str | None, interactive: bool
+) -> None:
+    proc = _run(_prompts_script(tmp_path, applied, interactive))
     assert proc.returncode == 0, proc.stderr
-    assert not (tmp_path / "asked.log").exists(), "a prompt ran although answers were applied"
-    assert "MODELS_DIR=/srv/models" in proc.stdout
+    assert not (tmp_path / "asked.log").exists(), "a prompt ran in the operator-input region"
+    assert "ASKED:" not in proc.stdout + proc.stderr
+    assert "MODELS_DIR=/srv/models TOKEN_SET=yes" in proc.stdout
+    assert "tok" not in proc.stdout.replace("TOKEN_SET", "")
 
 
-@pytest.mark.parametrize("applied", [None, "0"])
-def test_no_answers_keeps_todays_prompts(tmp_path: Path, applied: str | None) -> None:
-    proc = _run(_prompts_script(tmp_path, applied))
-    assert proc.returncode == 0, proc.stderr
-    asked = (tmp_path / "asked.log").read_text()
-    assert "ASKED: Where should downloaded models live?" in asked
+def test_operator_input_region_rejects_a_relative_models_dir(tmp_path: Path) -> None:
+    script = _prompts_script(tmp_path, "1", False).replace(
+        "MODELS_DIR=/srv/models\n", "MODELS_DIR=rel/models\n"
+    )
+    proc = _run(script)
+    assert proc.returncode == 1
+    assert "DIE: model store must be an absolute path" in proc.stderr
 
 
 # ── file origin without a usable Python ─────────────────────────────────────
