@@ -3,14 +3,18 @@
 An agent reads ``installer/agent-skills/`` and follows it literally, with the
 terminal tool in some setups. A path, address or tool name copied from one box
 sends it to files that do not exist on the user's machine, or to a tool it does
-not have. Every file under that tree is checked for four things:
+not have. Every file under that tree is checked for these things:
 
-* no path under ``/home/``, ``/root/`` or ``/mnt/`` except the few the product
-  itself uses (:data:`ALLOWED_PATHS`);
-* no IPv4 address other than loopback and the documentation ranges;
+* no path under ``/home/``, ``/root/``, ``/mnt/``, ``/Users/``, ``/opt/`` or ``/srv/``,
+  no ``~/`` or ``$HOME`` path and no ``file:///home/`` URL: there is no allow-list, and a
+  skill that needs the model store says "the model store" and points at the tool that
+  reports it;
+* no IPv4 address other than loopback and the documentation ranges (a version string
+  such as ``v1.8.2.1`` is not an address);
 * no ``mcp__local_mcp`` namespace, which only one box ever had;
 * every ``mcp__<server>__<tool>`` name exists in the tools the matching hal0 MCP
-  server registers, read in-process through its public listing.
+  server registers, read in-process through its public listing;
+* no ``systemctl --user``: hal0's units are system units.
 """
 
 from __future__ import annotations
@@ -21,7 +25,6 @@ import re
 from pathlib import Path
 from types import SimpleNamespace
 
-from hal0.config.paths import DEFAULT_MODEL_STORE
 from hal0.mcp import admin, agents, memory
 from hal0.mcp.approval_queue import ApprovalQueue
 
@@ -30,13 +33,7 @@ SKILLS = REPO / "installer" / "agent-skills"
 
 #: Operator-local roots a skill must not name. ``/var/lib/hal0`` and ``/etc/hal0`` are
 #: the product's own state and config directories and are not in this list.
-LOCAL_ROOTS = ("home", "root", "mnt")
-
-#: The only paths under those roots the product itself uses. Keep this short and explicit.
-#: ``/mnt/ai-models`` is hal0's default model store (``DEFAULT_MODEL_STORE``,
-#: ``src/hal0/config/paths.py``); a box can move it with ``[models].store``, so skills
-#: that name it say "default".
-ALLOWED_PATHS = frozenset({DEFAULT_MODEL_STORE})
+LOCAL_ROOTS = ("home", "root", "mnt", "Users", "opt", "srv")
 
 #: Ranges an address in a skill may come from: loopback and RFC 5737 documentation.
 DOC_NETWORKS = tuple(
@@ -44,7 +41,13 @@ DOC_NETWORKS = tuple(
 )
 
 _PATH = re.compile(rf"(?<![\w/.~$-])(/(?:{'|'.join(LOCAL_ROOTS)})(?![\w-])(?:/[^\s`'\")\]>,;|]*)?)")
+_HOME_PATH = re.compile(
+    r"(?<![\w.])(?:~/|\$\{?HOME\}?(?![\w]))|file:///(?:home|root|mnt|Users|opt|srv)\b"
+)
+# Not preceded by a word character or a dot (so ``v1.8.2.1`` is a version) and not
+# followed by a word character or another ``.<digit>`` (so ``1.2.3.4.5`` is not an address).
 _IPV4 = re.compile(r"(?<![\w.])(?:\d{1,3}\.){3}\d{1,3}(?!\w|\.\d)")
+_SYSTEMCTL_USER = re.compile(r"systemctl\s+(?:-\S+\s+)*--user\b")
 _MCP_NAME = re.compile(r"mcp__([a-z0-9]+(?:[_-][a-z0-9]+)*)__([a-z][a-z0-9_]*)")
 
 
@@ -54,13 +57,14 @@ def skill_files(root: Path = SKILLS) -> list[Path]:
 
 def local_paths(text: str) -> list[str]:
     """Paths in ``text`` under an operator-local root that the product does not use."""
-    found = []
-    for match in _PATH.finditer(text):
-        path = match.group(1).rstrip(".:")
-        if any(path == ok or path.startswith(ok + "/") for ok in ALLOWED_PATHS):
-            continue
-        found.append(path)
+    found = [match.group(1).rstrip(".:") for match in _PATH.finditer(text)]
+    found.extend(match.group(0) for match in _HOME_PATH.finditer(text))
     return found
+
+
+def systemctl_user(text: str) -> list[str]:
+    """``systemctl --user`` invocations: hal0 installs system units, never user units."""
+    return [match.group(0) for match in _SYSTEMCTL_USER.finditer(text)]
 
 
 def foreign_addresses(text: str) -> list[str]:
@@ -143,6 +147,11 @@ def test_no_lan_addresses() -> None:
     assert not hits, "non-loopback addresses in bundled skills:\n" + "\n".join(hits)
 
 
+def test_no_systemctl_user() -> None:
+    hits = _scan(_read_all(), systemctl_user)
+    assert not hits, "hal0's units are system units, not user units:\n" + "\n".join(hits)
+
+
 def test_no_local_mcp_namespace() -> None:
     hits = _scan(_read_all(), lambda line: ["mcp__local_mcp"] if "mcp__local_mcp" in line else [])
     assert not hits, "the mcp__local_mcp namespace does not exist:\n" + "\n".join(hits)
@@ -169,9 +178,33 @@ def test_path_check_catches_local_paths_and_spares_product_ones() -> None:
         "/root/.config/x",
     ]
     assert local_paths("mount /mnt/lab/bench") == ["/mnt/lab/bench"]
-    assert local_paths(f"the default store {DEFAULT_MODEL_STORE}/flm/models") == []
+    # No allow-list: even hal0's default model store is named by tool, not by path.
+    assert local_paths("the default store /mnt/ai-models/flm/models") == [
+        "/mnt/ai-models/flm/models"
+    ]
     assert local_paths("see /var/lib/hal0/.hermes and /etc/hal0/agents and https://x/home/y") == []
-    assert local_paths("a /rootless install") == []
+    assert local_paths("a /rootless install and /optional and /srvx") == []
+
+
+def test_path_check_catches_home_relative_and_other_local_roots() -> None:
+    assert local_paths("cd ~/work and $HOME/.config and ${HOME}/x") == ["~/", "$HOME", "${HOME}"]
+    assert local_paths("open file:///home/someone/x") == ["file:///home"]
+    assert local_paths("/Users/someone/x, /opt/tools/bin and /srv/data") == [
+        "/Users/someone/x",
+        "/opt/tools/bin",
+        "/srv/data",
+    ]
+    assert local_paths("$HERMES_HOME/.env and /var/lib/hal0/.hermes") == []
+
+
+def test_systemctl_user_check() -> None:
+    assert systemctl_user("run systemctl --user restart x and systemctl -q --user status y") == [
+        "systemctl --user",
+        "systemctl -q --user",
+    ]
+    assert (
+        systemctl_user("units are system units, so there is no `--user`; systemctl status x") == []
+    )
 
 
 def test_address_check_allows_loopback_and_documentation_ranges_only() -> None:
@@ -180,6 +213,12 @@ def test_address_check_allows_loopback_and_documentation_ranges_only() -> None:
         "10.0.1.142",
         "149.154.166.110",
     ]
+
+
+def test_address_check_does_not_fire_on_version_strings() -> None:
+    assert foreign_addresses("hal0 v1.8.2.1 and build1.2.3.4 and x1.2.3.4") == []
+    assert foreign_addresses("the five-part 1.2.3.4.5 is not an address") == []
+    assert foreign_addresses("a bare 10.0.1.142. at a sentence end") == ["10.0.1.142"]
 
 
 def test_tool_check_catches_a_name_the_server_does_not_register() -> None:
