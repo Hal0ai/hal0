@@ -1,0 +1,5 @@
+# Accept the default at every interactive prompt (installer/install.sh, _tty_read callers),
+# plus the CPU-only consent question (_confirm_cpu_only).
+Where should downloaded models live\?	\n
+HuggingFace token \(input hidden, Enter to skip\)	\n
+Continue with a CPU-only install anyway\?	y\n
