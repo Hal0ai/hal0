@@ -128,4 +128,5 @@ if [[ "$(pct status "${CTID}" 2>/dev/null)" == "status: running" ]]; then
     say "restarting container ${CTID} to apply"
     pct reboot "${CTID}" >/dev/null || die "pct reboot failed; restart the container by hand"
 fi
-say "done. Check inside the container with: flm validate && hal0 doctor all"
+say "done. Inside the container, check with 'flm validate', then run the hal0 installer"
+say "again so hal0 records the NPU: curl -fsSL https://hal0.dev/install.sh | HAL0_NONINTERACTIVE=1 bash"

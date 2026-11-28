@@ -21,7 +21,7 @@ fi
 var_hal0_memory="${var_hal0_memory:-yes}"
 var_hal0_openwebui="${var_hal0_openwebui:-yes}"
 var_hal0_agents="${var_hal0_agents:-yes}"
-var_hal0_image_models="${var_hal0_image_models:-yes}"
+var_hal0_image_models="${var_hal0_image_models:-no}"
 
 confirm_external_installer "https://hal0.dev/" "https://hal0.dev/install.sh"
 
@@ -36,8 +36,8 @@ fi
 if [[ "$var_hal0_agents" == "no" ]]; then
   export HAL0_SKIP_HERMES=1 HAL0_SKIP_PI=1
 fi
-if [[ "$var_hal0_image_models" == "no" ]]; then
-  export HAL0_IMAGE_MODELS=none
+if [[ "$var_hal0_image_models" == "yes" ]]; then
+  export HAL0_IMAGE_MODELS=recommended
 fi
 if ! compgen -G "/dev/dri/renderD*" >/dev/null; then
   msg_warn "No GPU render node in this container, installing hal0 for CPU inference"

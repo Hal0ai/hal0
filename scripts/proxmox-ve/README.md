@@ -53,7 +53,7 @@ hal0's own settings:
 | `var_hal0_memory` | `yes` | Install the memory engine (Hindsight) |
 | `var_hal0_openwebui` | `yes` | Install Open WebUI, the chat on port 3001 |
 | `var_hal0_agents` | `yes` | Install the bundled agents |
-| `var_hal0_image_models` | `yes` | Download the starter image models |
+| `var_hal0_image_models` | `no` | Download the image model recommended for the box's memory (several GB) |
 | `var_gpu` | `yes` | Forward the host's GPU. `no` builds a CPU-only container |
 | `var_unprivileged` | `1` | `0` builds a privileged container (see below) |
 | `var_external_installer` | *(ask)* | `yes` skips the confirmation before hal0's installer runs |
@@ -90,8 +90,18 @@ bash hal0-npu-passthrough <CTID>
 
 It adds a `devN` entry for each `/dev/accel/accel*` node, owned by the
 container's `render` group, adds `lxc.prlimit.memlock: unlimited`, and
-restarts the container. Running it again changes nothing. Then check inside
-the container with `flm validate` and `hal0 doctor all`.
+restarts the container. Running it again changes nothing. Then, inside the
+container:
+
+```bash
+flm validate
+curl -fsSL https://hal0.dev/install.sh | HAL0_NONINTERACTIVE=1 bash
+```
+
+The second command runs the hal0 installer again over the existing install.
+It keeps your configuration, and it is what records the NPU check in hal0's
+hardware record: the installer is the only step that writes it, and at first
+install the NPU was not there yet.
 
 ## What the script does not do
 

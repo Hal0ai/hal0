@@ -40,7 +40,7 @@
       "type": "warning"
     },
     {
-      "text": "GPU passthrough needs the amdgpu driver loaded on the Proxmox host. The NPU and a raised memlock limit are not set up by this script: run hal0-npu-passthrough from the hal0 repository on the host afterwards.",
+      "text": "GPU passthrough needs the amdgpu driver loaded on the Proxmox host. The NPU and a raised memlock limit are not set up by this script: run hal0-npu-passthrough from the hal0 repository on the host afterwards, then run the hal0 installer again inside the container.",
       "type": "info"
     },
     {
@@ -76,9 +76,9 @@
     },
     {
       "name": "var_hal0_image_models",
-      "label": "Download Starter Image Models",
+      "label": "Download the Recommended Image Model",
       "type": "boolean",
-      "default": "yes"
+      "default": "no"
     }
   ]
 }

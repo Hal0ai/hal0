@@ -73,6 +73,10 @@ Three things worth knowing before you run it:
   bash hal0-npu-passthrough <CTID>
   ```
 
+  Then run the hal0 installer again inside the container. It keeps your
+  configuration and records the NPU check, which the first install could not
+  do because the NPU was not there yet.
+
 <Aside type="tip">
 Container settings (`var_ctid`, `var_hostname`, `var_ram`, `var_disk`,
 `var_container_storage`, `var_net`, …) and hal0's own (`var_hal0_channel`,
