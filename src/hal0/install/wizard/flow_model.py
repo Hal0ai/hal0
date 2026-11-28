@@ -146,6 +146,20 @@ def no_provision_reason(s: State) -> str:
     return s.catalog.reasons.get(s.mode, f"not set up with {s.mode}") if s.mode else ""
 
 
+def assistant_change(s: State, on: bool) -> str:
+    """What confirming does to an installed assistant: `stop`, `stays`, `start` or nothing.
+
+    Nothing is said with --dev or --no-start (the installer leaves services alone), when
+    the assistant is not known to be installed, or when it is on and not stopped by setup.
+    """
+    if s.facts.hermes_installed is not True or s.mode:
+        return ""
+    stopped = s.facts.hermes_stopped_by_setup is True
+    if on:
+        return "start" if stopped else ""
+    return "stays" if stopped else "stop"
+
+
 def key_of(s: State, question: str) -> str:
     return s.catalog.questions[question].answer_key
 
@@ -273,11 +287,12 @@ def jobs_on(s: State, doc: Document) -> list[Component]:
     return [c for c in jobs_wanted(s, doc) if failing_need(s, c) is None]
 
 
-def download_items(s: State, doc: Document) -> list[tuple[str, float | None]]:
+def download_items(s: State, doc: Document, without: str = "") -> list[tuple[str, float | None]]:
+    """What the setup downloads; `without` names a job to leave out."""
     items: list[tuple[str, float | None]] = [
         (f"{c.label} ({fmt_gb(c.download_gb)} GB)", c.download_gb)
         for c in jobs_on(s, doc)
-        if c.download_gb is not None
+        if c.download_gb is not None and c.id != without
     ]
     pick = pick_model(s, doc)
     if pick is not None and pick.outcome != "too_small":

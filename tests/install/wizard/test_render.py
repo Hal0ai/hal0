@@ -325,3 +325,23 @@ def test_a_text_row_without_detail_has_no_colon(catalog: Catalog, two_disk_facts
     lines = render(folder, width=80, plain=False, color=False)
     last_row = [line for line in lines if "Type another folder" in line]
     assert [line.strip().removeprefix("> ") for line in last_row] == ["Type another folder..."]
+
+
+@pytest.mark.parametrize(
+    "bad", ["\u2028", "\u2029", "\u202e", "\u2066", "\u200b", "\ufeff", "\ue000", "\u061c"]
+)
+def test_reordering_characters_are_drawn_as_question_marks(type_view: View, bad: str) -> None:
+    row = replace(type_view.rows[0], label=f"a{bad}b", detail=f"c{bad}d", note=f"e{bad}f")
+    shown = replace(type_view, title=f"t{bad}t", rows=(row, *type_view.rows[1:]))
+    for plain in (False, True):
+        out = "\n".join(render(shown, width=100, plain=plain, color=False))
+        assert bad not in out
+        assert "a?b" in out and "t?t" in out
+
+
+def test_ordinary_non_ascii_text_is_drawn_unchanged(type_view: View) -> None:
+    text = "caf\u00e9 \u65e5\u672c \U0001f600"
+    row = replace(type_view.rows[0], label=text)
+    shown = replace(type_view, rows=(row, *type_view.rows[1:]))
+    out = "\n".join(render(shown, width=100, plain=True, color=False))
+    assert text in out

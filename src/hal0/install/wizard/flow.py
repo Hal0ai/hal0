@@ -69,6 +69,7 @@ from .flow_model import (
     secret_field_open,
 )
 from .paths import validate_folder
+from .render import has_unsafe_text
 
 __all__ = [
     "SAVE_COPY_KEY",
@@ -232,17 +233,12 @@ def start(
 _BAD_TEXT = "that text contains a character that cannot be used here"
 
 
-def _has_control(text: str) -> bool:
-    """Whether text holds a character below U+0020, U+007F or one of U+0080 to U+009F."""
-    return any(c < " " or "\x7f" <= c <= "\x9f" for c in text)
-
-
 def _edit(s: State, key: str) -> State:
     text = s.editing or ""
     if key == "ENTER":
         if not text and s.field != TOKEN_FIELD:
             return replace(s, editing=None, field="", error=None)
-        if _has_control(text):
+        if has_unsafe_text(text):
             # One place for every typed field, before any validator can trim the
             # character away; the text is dropped so it is never shown or kept.
             return replace(s, editing="", error=_BAD_TEXT)

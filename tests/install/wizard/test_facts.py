@@ -415,3 +415,28 @@ def test_a_wrong_typed_hermes_fact_is_refused(
 ) -> None:
     with pytest.raises(FactsError, match=message):
         load_facts(write(tmp_path, {**SAMPLE, **patch}), disks=[], ram_gb=None)
+
+
+@pytest.mark.parametrize(
+    ("section", "expected"),
+    [
+        ({"hermes": {"stopped_by_setup": True}}, True),
+        ({"hermes": {"stopped_by_setup": False}}, False),
+        ({}, None),
+        ({"hermes": {}}, None),
+        ({"hermes": {"installed": True}}, None),
+        ({"hermes": {"stopped_by_setup": None}}, None),
+    ],
+)
+def test_hermes_stopped_by_setup_is_read_or_unknown(
+    tmp_path: Path, section: dict[str, object], expected: bool | None
+) -> None:
+    f = load_facts(write(tmp_path, {**SAMPLE, **section}), disks=[], ram_gb=None)
+    assert f.hermes_stopped_by_setup is expected
+
+
+@pytest.mark.parametrize("wrong", ["yes", 1, 0, [], {}])
+def test_a_wrong_typed_stopped_by_setup_fact_is_refused(tmp_path: Path, wrong: object) -> None:
+    path = write(tmp_path, {**SAMPLE, "hermes": {"stopped_by_setup": wrong}})
+    with pytest.raises(FactsError, match=r"hermes\.stopped_by_setup"):
+        load_facts(path, disks=[], ram_gb=None)

@@ -7,6 +7,7 @@ Width counts visible characters and treats every character as one column; wide
 from __future__ import annotations
 
 import re
+import unicodedata
 from dataclasses import replace
 
 from .flow_model import Row, View
@@ -22,7 +23,19 @@ _Segment = tuple[str, str, str, bool]  # (text, style, separator before it, star
 
 
 # Text comes from input files too: no control character may reach the terminal.
-_CONTROLS = {code: "?" for code in (*range(0x20), 0x7F, *range(0x80, 0xA0))}
+def _unsafe(char: str) -> bool:
+    """Control, format (bidirectional and zero-width), surrogate, private-use,
+    unassigned, and the line and paragraph separators."""
+    category = unicodedata.category(char)
+    return category.startswith("C") or category in ("Zl", "Zp")
+
+
+def has_unsafe_text(text: str) -> bool:
+    """Whether text holds a character that could break or reorder a line.
+
+    One definition for typed input (refused) and for drawn data (replaced).
+    """
+    return any(_unsafe(c) for c in text)
 
 
 def strip_ansi(text: str) -> str:
@@ -30,7 +43,7 @@ def strip_ansi(text: str) -> str:
 
 
 def _clean(text: str) -> str:
-    return text.translate(_CONTROLS)
+    return "".join("?" if _unsafe(c) else c for c in text)
 
 
 def _cleaned(view: View) -> View:

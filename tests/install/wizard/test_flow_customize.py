@@ -934,7 +934,7 @@ def test_the_terminal_tool_is_unavailable_and_reviews_as_off_with_such_a_mode(
     assert "apps.hermes.terminal_tool" not in chosen(ticked)
     review = run(ticked, "ENTER")
     (shown,) = [r for r in view(review).rows if r.id == "terminal_tool"]
-    assert shown.detail == "off"
+    assert shown.detail == f"off (not set up with {mode})"
     assert effective_for(review)["apps"]["hermes"]["terminal_tool"] is False
 
 
@@ -1039,3 +1039,100 @@ def test_no_stop_note_with_a_mode_that_leaves_services_alone(
     facts = replace(usable_facts, hermes_installed=True)
     s = open_field(custom(catalog, facts, mode=mode), "hermes")
     assert _assistant_job(s).note == ""
+
+
+_NOTE_TABLE = [
+    # installed, stopped, ticked, expected note
+    (True, False, False, "installed; will be stopped"),
+    (True, None, False, "installed; will be stopped"),
+    (True, True, False, "installed; stopped"),
+    (True, True, True, "installed; will be started again"),
+    (True, False, True, ""),
+    (True, None, True, ""),
+    (False, True, False, ""),
+    (False, True, True, ""),
+    (None, True, False, ""),
+    (None, True, True, ""),
+]
+
+
+@pytest.mark.parametrize(("installed", "stopped", "ticked", "note"), _NOTE_TABLE)
+def test_the_assistant_note_follows_the_table(
+    catalog: Catalog,
+    usable_facts: Facts,
+    installed: bool | None,
+    stopped: bool | None,
+    ticked: bool,
+    note: str,
+) -> None:
+    facts = replace(usable_facts, hermes_installed=installed, hermes_stopped_by_setup=stopped)
+    s = custom(catalog, facts)
+    if not ticked:
+        s = open_field(s, "hermes")
+    row = _assistant_job(s)
+    assert row.value is ticked
+    assert row.note == note
+
+
+def test_the_stopped_note_follows_a_note_a_flag_already_gives(
+    catalog: Catalog, usable_facts: Facts
+) -> None:
+    facts = replace(usable_facts, hermes_installed=True, hermes_stopped_by_setup=True)
+    over = [Override("apps.hermes.enabled", False, "--no-hermes")]
+    assert _assistant_job(custom(catalog, facts, over=over)).note == (
+        "set by --no-hermes; installed; stopped"
+    )
+
+
+@pytest.mark.parametrize("mode", _MODES)
+@pytest.mark.parametrize("ticked", [True, False])
+def test_no_stopped_note_with_a_mode(
+    catalog: Catalog, usable_facts: Facts, mode: str, ticked: bool
+) -> None:
+    facts = replace(usable_facts, hermes_installed=True, hermes_stopped_by_setup=True)
+    s = custom(catalog, facts, mode=mode)
+    if not ticked:
+        s = open_field(s, "hermes")
+    assert _assistant_job(s).note == ""
+
+
+# ---------------- characters that reorder or break lines are refused when typed
+
+_REORDERING = [
+    "\u2028",
+    "\u2029",
+    "\u202e",
+    "\u2066",
+    "\u200b",
+    "\ufeff",
+    "\ue000",
+    "\u200e",
+    "\u061c",
+    "\u2060",
+    "\u202a",
+    "\u2069",
+]
+
+
+@pytest.mark.parametrize("field", _TEXT_FIELDS)
+@pytest.mark.parametrize("bad", _REORDERING)
+def test_a_reordering_character_in_typed_text_is_refused(
+    catalog: Catalog, npu_facts: Facts, field: str, bad: str
+) -> None:
+    from hal0.install.wizard.session import plain_keys
+
+    s = replace(custom(catalog, npu_facts), editing="", field=field)
+    keys = plain_keys(f"ok{bad}ok", view(s))[1]
+    after = run(s, *keys)
+    assert after.editing == ""
+    assert after.error is not None and "cannot be used here" in after.error
+    assert bad not in after.error
+    assert chosen(after) == chosen(s)
+    assert after.token is None
+
+
+@pytest.mark.parametrize("text", ["caf\u00e9", "\u65e5\u672c", "ok \U0001f600"])
+def test_ordinary_non_ascii_text_is_not_refused_by_the_shared_check(text: str) -> None:
+    from hal0.install.wizard.render import has_unsafe_text
+
+    assert not has_unsafe_text(text)

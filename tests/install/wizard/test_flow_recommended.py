@@ -867,10 +867,180 @@ def test_the_installed_fact_does_not_change_the_document(
     assert chosen(known) == chosen(unknown)
 
 
-def test_the_assistant_help_says_turning_it_off_stops_an_installed_one(catalog: Catalog) -> None:
+# ------------------------------- a stopped assistant that stays stopped or starts again
+
+_STAYS = "stays stopped"
+_AGAIN = "will be started again"
+
+
+def _facts_of(usable: Facts, installed: bool | None, stopped: bool | None) -> Facts:
+    return replace(usable, hermes_installed=installed, hermes_stopped_by_setup=stopped)
+
+
+_STOP_TABLE = [
+    # installed, stopped, assistant on, expected value (None = no row)
+    (True, False, False, _STOP_VALUE),
+    (True, None, False, _STOP_VALUE),
+    (True, True, False, _STAYS),
+    (True, True, True, _AGAIN),
+    (True, False, True, None),
+    (True, None, True, None),
+    (False, True, False, None),
+    (False, True, True, None),
+    (None, True, False, None),
+    (None, True, True, None),
+    (False, False, False, None),
+]
+
+
+@pytest.mark.parametrize(("installed", "stopped", "on", "expected"), _STOP_TABLE)
+def test_the_assistant_row_follows_the_table(
+    catalog: Catalog,
+    usable_facts: Facts,
+    installed: bool | None,
+    stopped: bool | None,
+    on: bool,
+    expected: str | None,
+) -> None:
+    over = [] if on else [Override("apps.hermes.enabled", False, "--no-hermes")]
+    rows = view(_minimal_review(catalog, _facts_of(usable_facts, installed, stopped), over)).rows
+    found = [(r.label, r.detail) for r in _stop_rows(rows)]
+    assert found == ([] if expected is None else [(_STOP_LABEL, expected)])
+    if expected is not None:
+        ids = [r.id for r in rows]
+        assert ids.index("assistant_stop") == ids.index("install") + 1
+        assert ids.index("terminal_tool") == ids.index("assistant_stop") + 1
+
+
+@pytest.mark.parametrize("mode", ["--dev", "--no-start"])
+@pytest.mark.parametrize("on", [True, False])
+@pytest.mark.parametrize("stopped", [True, False, None])
+def test_no_assistant_row_with_a_mode_in_any_case(
+    catalog: Catalog, usable_facts: Facts, mode: str, on: bool, stopped: bool | None
+) -> None:
+    over = list(_MINIMAL) + ([] if on else [Override("apps.hermes.enabled", False, "--no-hermes")])
+    s = run(
+        start(catalog, _facts_of(usable_facts, True, stopped), over=over, mode=mode),
+        "ENTER",
+        "ENTER",
+    )
+    assert _stop_rows(view(s).rows) == []
+
+
+def test_the_recommended_review_that_starts_the_assistant_again_fits_80_by_24(
+    catalog: Catalog, usable_facts: Facts
+) -> None:
+    s = run(start(catalog, _facts_of(usable_facts, True, True)), "ENTER", "ENTER")
+    review = view(s)
+    assert review.screen is Screen.REVIEW
+    assert [r.detail for r in _stop_rows(review.rows)] == [_AGAIN]
+    for plain in (False, True):
+        lines = render(review, width=80, plain=plain, color=False)
+        assert len(lines) <= 24, (plain, len(lines))
+        assert any(_AGAIN in strip_ansi(x) for x in lines)
+
+
+def test_the_minimal_review_that_keeps_the_assistant_stopped_fits_80_by_24(
+    catalog: Catalog, usable_facts: Facts
+) -> None:
+    review = view(_minimal_review(catalog, _facts_of(usable_facts, True, True)))
+    assert [r.detail for r in _stop_rows(review.rows)] == [_STAYS]
+    for plain in (False, True):
+        lines = render(review, width=80, plain=plain, color=False)
+        assert len(lines) <= 24, (plain, len(lines))
+        assert any(_STAYS in strip_ansi(x) for x in lines)
+
+
+@pytest.mark.parametrize("stopped", [True, False, None])
+def test_the_stopped_fact_does_not_change_the_document(
+    catalog: Catalog, usable_facts: Facts, stopped: bool | None
+) -> None:
+    from hal0.install.wizard.flow_model import effective_doc
+
+    base = _minimal_review(catalog, _facts_of(usable_facts, True, None))
+    other = _minimal_review(catalog, _facts_of(usable_facts, True, stopped))
+    assert effective_doc(other) == effective_doc(base)
+    assert chosen(other) == chosen(base)
+
+
+def test_the_assistant_help_says_it_stays_stopped_across_upgrades(catalog: Catalog) -> None:
     (hermes,) = [c for c in catalog.components if c.id == "hermes"]
     assert hermes.help.endswith(
         " Turning this off on a box that already has the assistant stops it; it stays "
-        "installed, and turning it on here again starts it."
+        "installed and stays stopped, also across upgrades, until you turn it on here again "
+        "or start it by hand."
     )
-    assert "does not remove or stop" not in hermes.help
+
+
+# ------------------------- the review does not overstate with --dev or --no-start
+
+_NO_PROVISION = ["--dev", "--no-start"]
+
+
+@pytest.mark.parametrize("mode", _NO_PROVISION)
+def test_the_terminal_row_says_off_with_a_mode_whatever_the_document_says(
+    catalog: Catalog, usable_facts: Facts, mode: str
+) -> None:
+    s = run(start(catalog, usable_facts, over=_TERMINAL_FIXED, mode=mode), "ENTER", "ENTER")
+    (row,) = _terminal_rows(view(s).rows)
+    assert row.detail == f"off (not set up with {mode})"
+    assert "ON" not in row.detail
+    assert effective_doc_of(s)["apps"]["hermes"]["terminal_tool"] is True  # the document keeps it
+
+
+def effective_doc_of(s: State) -> dict[str, dict[str, dict[str, object]]]:
+    from hal0.install.wizard.flow_model import effective_doc
+
+    return effective_doc(s)  # type: ignore[return-value]
+
+
+def test_the_terminal_row_without_a_mode_is_as_before(
+    catalog: Catalog, usable_facts: Facts
+) -> None:
+    s = run(start(catalog, usable_facts, over=_TERMINAL_FIXED), "ENTER", "ENTER")
+    (row,) = _terminal_rows(view(s).rows)
+    assert row.detail == _TERMINAL_ON
+
+
+def _with_image_size(catalog: Catalog, gb: float) -> Catalog:
+    comps = tuple(replace(c, download_gb=gb) if c.id == "images" else c for c in catalog.components)
+    return replace(catalog, components=comps)
+
+
+_IMAGES = [
+    Override("gen.mode", "scaffold_and_download", "HAL0_IMAGE_MODELS"),
+    Override("gen.models", [], "HAL0_IMAGE_MODELS"),
+]
+
+
+@pytest.mark.parametrize("mode", _NO_PROVISION)
+def test_the_review_lists_no_image_download_with_a_mode(
+    ladder_catalog: Catalog, usable_facts: Facts, mode: str
+) -> None:
+    cat = _with_image_size(ladder_catalog, 9.0)
+    s = run(start(cat, usable_facts, over=_IMAGES, mode=mode), "ENTER", "ENTER")
+    rows = {r.id: r for r in view(s).rows}
+    assert "Make images" not in rows["downloads"].detail
+    assert "9 GB" not in rows["downloads"].detail
+    assert rows["total"].detail.startswith("2 GB")  # the chat model alone
+
+
+def test_the_review_lists_the_image_download_without_a_mode(
+    ladder_catalog: Catalog, usable_facts: Facts
+) -> None:
+    cat = _with_image_size(ladder_catalog, 9.0)
+    s = run(start(cat, usable_facts, over=_IMAGES), "ENTER", "ENTER")
+    rows = {r.id: r for r in view(s).rows}
+    assert "Make images (ComfyUI) (9 GB)" in rows["downloads"].detail
+    assert rows["total"].detail.startswith("11 GB")
+
+
+@pytest.mark.parametrize("mode", _NO_PROVISION)
+def test_a_mode_with_only_images_to_download_has_no_total(
+    catalog: Catalog, usable_facts: Facts, mode: str
+) -> None:
+    cat = _with_image_size(catalog, 9.0)
+    s = run(start(cat, usable_facts, over=_IMAGES, mode=mode), "ENTER", "ENTER")
+    rows = {r.id: r for r in view(s).rows}
+    assert "total" not in rows
+    assert "Make images" not in rows["downloads"].detail
