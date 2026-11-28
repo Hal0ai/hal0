@@ -48,8 +48,18 @@ _KNOWN_TOP_LEVEL = frozenset(
         "npu",
         "gen",
         "apps",
+        # Consumed by the installer's own reader (installer/lib/answers_reader.py);
+        # this loader checks they are mappings and otherwise ignores them.
+        "access",
+        "maintenance",
+        "models",
+        "hardware",
+        "memory",
     }
 )
+
+#: Top-level sections validated by the installer's reader, not here: type only.
+_MAPPING_ONLY_KEYS = ("access", "maintenance", "models", "hardware", "memory")
 
 #: capabilities valid for a slot entry (spec §3/§8: "chat" | "coder").
 _VALID_SLOT_CAPABILITIES = frozenset({"chat", "coder"})
@@ -111,6 +121,14 @@ def _check_top_level_keys(doc: dict[str, Any]) -> None:
         raise AnswersError(f"unknown top-level key(s) in answer file: {sorted(unknown)}")
     for key in sorted(unknown):
         _warn(f"answer file key '{key}' is not recognized and was ignored (not yet applied)")
+
+
+def _check_mapping_sections(doc: dict[str, Any]) -> None:
+    for key in _MAPPING_ONLY_KEYS:
+        if key in doc and not isinstance(doc[key], dict):
+            raise AnswersError(
+                f"answer file key '{key}' must be a mapping (got {type(doc[key]).__name__})"
+            )
 
 
 def _resolve_storage_dir(doc: dict[str, Any]) -> str:
@@ -377,6 +395,7 @@ def load_answers(path: str, hw: HardwareInfo) -> Selections:
     doc = _load_yaml(path)
     _check_version(doc)
     _check_top_level_keys(doc)
+    _check_mapping_sections(doc)
     _apply_network(doc)
     _warn_not_yet_wired(doc)
 
