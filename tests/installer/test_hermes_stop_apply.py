@@ -6,7 +6,13 @@ and the few tools bash needs: every call is recorded in one log and nothing
 touches the real system or /etc. The stubs keep unit state in files, so a
 disable is visible to a later `is-enabled` / `is-active`. The record lives
 under the test's own folder through HAL0_FACTS_AGENTS_DIR (honoured by
-facts.sh only when not root).
+facts.sh only when not root), so the whole file is skipped when the effective
+uid is 0: as root the record path is the real /etc/hal0/agents one. As a second
+line of defence the stub `nofollow` and the stub `rm` refuse any path outside
+the test's folder. The cut region has no other literal path under /etc or /var
+that it writes: the venv path is replaced by a file in the test's folder, the
+units live under UNIT_DIR, and the only write to a fixed path (the wrapper at
+/usr/local/bin) sits above the start anchor.
 """
 
 from __future__ import annotations
@@ -21,6 +27,14 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
 TEXT = (ROOT / "installer" / "install.sh").read_text(encoding="utf-8")
+
+# facts.sh ignores HAL0_FACTS_AGENTS_DIR as root, so as root a run of the step
+# would read, write and remove the real /etc/hal0/agents record. `_run` skips
+# the test then (the text-only tests below do not run the step and still run).
+_AS_ROOT = os.geteuid() == 0
+_ROOT_REASON = (
+    "the record-path override is ignored as root: the real /etc/hal0/agents would be used"
+)
 FACTS = ROOT / "installer" / "lib" / "facts.sh"
 
 _FUNCS_START = "unit_enable_state() {\n"
@@ -98,34 +112,61 @@ case "$mode" in
         [[ $now -eq 1 ]] && rm -f "$S/$key.active"
         exit 0 ;;
     enable)
+        rcvar="STUB_ENABLE_RC_$key"
+        rc="${!rcvar:-0}"
+        [[ "$rc" -ne 0 ]] && exit "$rc"
         case "$(state)" in masked*) exit 1 ;; esac
         if [[ $runtime -eq 1 ]]; then echo enabled-runtime >"$S/$key.state"; else echo enabled >"$S/$key.state"; fi
         [[ $now -eq 1 ]] && touch "$S/$key.active"
         exit 0 ;;
+    start) touch "$S/$key.active"; exit 0 ;;
 esac
 exit 0
 """
+# `rm` (the region removes the record with it) refuses any path outside the
+# test's own folder, so a wrong record path can never remove a real file.
+_STUB_RM = """#!/bin/bash
+for a in "$@"; do
+    case "$a" in
+        -*) ;;
+        "$WORK_DIR"/*) ;;
+        *) printf 'REFUSED rm %s\\n' "$a" >>"$STUB_LOG"; exit 99 ;;
+    esac
+done
+exec __REAL_RM__ "$@"
+"""
 _STUB_HAL0 = """#!/bin/bash
 printf 'hal0 %s\\n' "$*" >>"$STUB_LOG"
+# `hal0 agent install hermes` provisions the venv, then enables and starts the
+# agent unit (src/hal0/cli/agent_commands.py), like the real one.
+if [[ "$*" == "agent install hermes"* ]]; then
+    printf '#!/bin/sh\\n' >"$STUB_HERMES"; chmod 755 "$STUB_HERMES"
+    systemctl enable --now hal0-agent@hermes.service
+fi
 exit 0
 """
-# hal0's venv python: `migrate` moves a hashed unit onto the canonical one and
-# keeps its state; `state` prints the gateway the operator has.
+# hal0's venv python. `migrate` is what the stop must NEVER call: as the real
+# one does, it moves a hashed unit onto the canonical one and enables AND
+# starts that when the hashed one was enabled, through the recorded systemctl.
+# `state` prints the gateway the operator has; `units` names the hashed unit.
 _STUB_PYTHON = """#!/bin/bash
 printf 'python %s\\n' "$*" >>"$STUB_LOG"
 S="$STATE_DIR"
 st() { cat "$S/$1.state" 2>/dev/null; }
 act() { if [[ -f "$S/$1.active" ]]; then echo 1; else echo 0; fi; }
 case "$*" in
+    "-I -m hal0.agents.hermes_gateway_regen units")
+        [[ "${STUB_UNITS_RC:-0}" -ne 0 ]] && exit "$STUB_UNITS_RC"
+        [[ -f "$S/hashed.state" ]] && echo hermes-gateway-abcd1234.service
+        exit 0 ;;
     "-I -m hal0.agents.hermes_gateway_regen migrate")
-        [[ "${STUB_MIGRATE_RC:-0}" -ne 0 ]] && exit "$STUB_MIGRATE_RC"
-        [[ -f "$S/hashed.state" && -z "${STUB_MIGRATE_NOOP:-}" ]] || exit 0
+        [[ -f "$S/hashed.state" ]] || exit 0
         h="$(st hashed)"; ha="$(act hashed)"
         case "$(st gw)" in
             masked*|enabled*) ;;
             *)
-                if [[ "$h" == enabled* ]]; then echo enabled >"$S/gw.state"; touch "$S/gw.active"
-                elif [[ "$ha" == 1 ]]; then touch "$S/gw.active"; fi ;;
+                if [[ "$h" == enabled* ]]; then systemctl enable --now hermes-gateway.service
+                elif [[ "$ha" == 1 ]]; then systemctl start hermes-gateway.service; fi ;;
         esac
         rm -f "$S/hashed.state" "$S/hashed.active"
         exit 0 ;;
@@ -153,6 +194,10 @@ nofollow() {
         prev="$a"
         last="$a"
     done
+    case "$last" in
+        "$WORK_DIR"/*) ;;
+        *) printf 'REFUSED nofollow %s\n' "$last" >>"$STUB_LOG"; return 99 ;;
+    esac
     case "$verb" in
         dir) mkdir -p "$last" ;;
         write) cat >"$last"; chmod "$mode" "$last" ;;
@@ -183,16 +228,28 @@ class Box:
         assert self.proc.returncode == 0 and "REGION_DONE" in self.proc.stdout, (
             self.proc.stdout + self.proc.stderr
         )
+        assert not [c for c in self.calls if c.startswith("REFUSED")], self.calls
+
+    def migrated(self) -> bool:
+        return any(c.startswith("python ") and c.endswith(" migrate") for c in self.calls)
+
+    def installed_by_hal0(self) -> bool:
+        return "hal0 agent install hermes" in self.calls
 
     def sys(self) -> list[str]:
         return [c for c in self.calls if c.startswith("systemctl ")]
+
+    def sys_calls(self, verb: str) -> list[str]:
+        return [c for c in self.sys() if c.startswith(f"systemctl {verb}")]
 
     def writes(self) -> list[str]:
         """systemctl calls that change anything (not is-enabled / is-active / daemon-reload)."""
         return [
             c
             for c in self.sys()
-            if c.startswith(("systemctl disable", "systemctl enable", "systemctl stop"))
+            if c.startswith(
+                ("systemctl disable", "systemctl enable", "systemctl stop", "systemctl start")
+            )
         ]
 
     def record_path(self) -> Path:
@@ -239,6 +296,8 @@ def _run(
     name: str = "run",
 ) -> Box:
     """Run the Hermes step; return the process, the recorded calls and the files left."""
+    if _AS_ROOT:
+        pytest.skip(_ROOT_REASON)
     work = tmp_path / name
     bindir = work / "bin"
     state = work / "state"
@@ -300,12 +359,16 @@ def _run(
     for tool in ("rm", "mkdir", "chmod", "cat", "touch"):
         found = next(p for p in ("/usr/bin/" + tool, "/bin/" + tool) if os.path.exists(p))
         link = bindir / tool
-        if not link.exists():
+        if tool == "rm":
+            _exe(link, _STUB_RM.replace("__REAL_RM__", found))
+        elif not link.exists():
             link.symlink_to(found)
     env = {
         "PATH": str(bindir),
         "STUB_LOG": str(log),
         "STATE_DIR": str(state),
+        "WORK_DIR": str(work),
+        "STUB_HERMES": str(fake_hermes),
         "HAL0_FACTS_AGENTS_DIR": str(agents),
     }
     if stop is not None:
@@ -416,10 +479,11 @@ def test_a_masked_or_disabled_gateway_gets_no_call_at_all(tmp_path: Path, state:
         c for c in box.calls if _GATEWAY in c and "is-enabled" not in c and "is-active" not in c
     ]
     assert not [c for c in box.calls if "mask" in c.replace("masked", "")]
-    # only the read-only `state` query and `migrate` (which keeps a mask) may run
+    # only the read-only `state` and `units` queries may run; never `migrate`
     assert not [
-        c for c in box.calls if c.startswith("python ") and not c.endswith((" state", " migrate"))
+        c for c in box.calls if c.startswith("python ") and not c.endswith((" state", " units"))
     ]
+    assert not box.migrated()
     assert box.unit("gw") == state
     assert box.state() == "stopped"
     assert box.record() == "agent\n"
@@ -430,13 +494,24 @@ def test_a_runtime_enabled_gateway_is_disabled_for_the_runtime_only(tmp_path: Pa
     box.ok()
     assert f"systemctl disable --runtime --now {_GATEWAY}" in box.calls
     assert box.state() == "stopped"
-    assert box.record() == "agent\ngateway\n"
+    assert box.record() == "agent\ngateway-runtime\n"  # on for this boot only: noted so
+
+
+def test_an_agent_enabled_for_this_boot_only_is_disabled_with_runtime(tmp_path: Path) -> None:
+    box = _run(tmp_path, stop="1", skip="1", agent_state="enabled-runtime", agent_active=True)
+    box.ok()
+    assert f"systemctl disable --runtime --now {_AGENT}" in box.calls
+    assert box.state() == "stopped"  # not stop-failed
+    assert box.unit("agent") == "disabled" and not box.running("agent")
 
 
 # ── the gateway that is really running, whichever name it has ────────────────
 
 
-def test_a_hashed_gateway_alone_is_moved_onto_the_canonical_name_and_stopped(
+_HASHED = "hermes-gateway-abcd1234.service"
+
+
+def test_a_hashed_gateway_alone_is_disabled_where_it_stands_and_migrate_is_never_called(
     tmp_path: Path,
 ) -> None:
     box = _run(
@@ -449,15 +524,36 @@ def test_a_hashed_gateway_alone_is_moved_onto_the_canonical_name_and_stopped(
         agent_state="enabled",
     )
     box.ok()
-    migrate = "python -I -m hal0.agents.hermes_gateway_regen migrate"
-    assert migrate in box.calls
-    assert box.calls.index(migrate) < box.calls.index(f"systemctl disable --now {_GATEWAY}")
-    assert box.unit("hashed") is None and not box.running("hashed")
-    assert box.unit("gw") == "disabled" and not box.running("gw")
+    assert not box.migrated()  # migrate would enable AND start the canonical unit
+    assert f"systemctl disable --now {_HASHED}" in box.calls
+    assert box.unit("hashed") == "disabled" and not box.running("hashed")
+    assert box.unit("gw") is None and not box.running("gw")  # nothing moved, nothing started
     assert box.state() == "stopped"
     assert box.record() == "agent\ngateway\n"
-    assert not [c for c in box.sys() if c.startswith("systemctl enable")]
+    assert not box.sys_calls("enable") and not box.sys_calls("start")
     assert not box.warns()
+
+
+def test_a_hashed_gateway_enabled_but_not_running_is_stopped_without_being_started(
+    tmp_path: Path,
+) -> None:
+    # the crash-looping or stopped one: the old `migrate` still started it
+    box = _run(
+        tmp_path,
+        stop="1",
+        skip="1",
+        gw_state=None,
+        hashed="enabled",
+        hashed_active=False,
+        agent_state="enabled",
+    )
+    box.ok()
+    assert not box.migrated()
+    assert f"systemctl disable --now {_HASHED}" in box.calls
+    assert box.unit("hashed") == "disabled" and not box.running("hashed")
+    assert not box.running("gw") and not box.sys_calls("enable") and not box.sys_calls("start")
+    assert box.state() == "stopped"
+    assert box.record() == "agent\ngateway\n"
 
 
 def test_a_hashed_gateway_beside_a_disabled_canonical_one_is_stopped_too(tmp_path: Path) -> None:
@@ -472,10 +568,24 @@ def test_a_hashed_gateway_beside_a_disabled_canonical_one_is_stopped_too(tmp_pat
         agent_state="enabled",
     )
     box.ok()
-    assert box.unit("hashed") is None and not box.running("hashed")
+    assert not box.migrated()
+    assert box.unit("hashed") == "disabled" and not box.running("hashed")
     assert box.unit("gw") == "disabled" and not box.running("gw")
+    assert not box.sys_calls("enable") and not box.sys_calls("start")
     assert box.state() == "stopped"
     assert box.record() == "agent\ngateway\n"
+
+
+def test_a_hashed_gateway_that_is_enabled_for_this_boot_only_is_disabled_with_runtime(
+    tmp_path: Path,
+) -> None:
+    box = _run(
+        tmp_path, stop="1", skip="1", gw_state=None, hashed="enabled-runtime", hashed_active=True
+    )
+    box.ok()
+    assert f"systemctl disable --runtime --now {_HASHED}" in box.calls
+    assert box.state() == "stopped"
+    assert box.record() == "agent\ngateway-runtime\n"
 
 
 def test_a_gateway_started_by_hand_is_stopped_and_not_named_in_the_record(
@@ -492,7 +602,8 @@ def test_a_gateway_started_by_hand_is_stopped_and_not_named_in_the_record(
 def test_the_state_is_stopped_only_when_no_gateway_unit_of_either_name_is_left_running(
     tmp_path: Path,
 ) -> None:
-    # a mover that leaves the hashed unit running (it did nothing)
+    # the hashed unit refuses to be disabled and keeps running: the warning
+    # names THAT unit, not the canonical one
     box = _run(
         tmp_path,
         stop="1",
@@ -501,15 +612,30 @@ def test_the_state_is_stopped_only_when_no_gateway_unit_of_either_name_is_left_r
         gw_active=False,
         hashed="enabled",
         hashed_active=True,
-        env_extra={"STUB_MIGRATE_NOOP": "1"},
+        env_extra={"STUB_DISABLE_RC_hashed": "1"},
     )
     box.ok()
     assert box.state() == "stop-failed"
-    assert any(_MANUAL in w and "may still be running" in w for w in box.warns())
+    warn = [w for w in box.warns() if "may still be running" in w]
+    assert len(warn) == 1 and _MANUAL in warn[0] and _HASHED in warn[0]
+    assert f"still on: {_HASHED}" in warn[0]
     assert box.record() is None
+    assert not box.migrated()
 
 
-def test_a_failing_migrate_is_a_failed_stop(tmp_path: Path) -> None:
+def test_the_warning_names_the_canonical_unit_when_that_is_the_one_still_on(
+    tmp_path: Path,
+) -> None:
+    box = _run(tmp_path, stop="1", skip="1", env_extra={"STUB_DISABLE_RC_gw": "1"})
+    box.ok()
+    (warn,) = [w for w in box.warns() if "may still be running" in w]
+    assert f"still on: {_GATEWAY}" in warn and _HASHED not in warn
+
+
+def test_a_hashed_unit_the_units_verb_could_not_name_is_still_a_failed_stop(
+    tmp_path: Path,
+) -> None:
+    # an old module with no `units` verb: the `state` check still sees it
     box = _run(
         tmp_path,
         stop="1",
@@ -517,12 +643,13 @@ def test_a_failing_migrate_is_a_failed_stop(tmp_path: Path) -> None:
         gw_state=None,
         hashed="enabled",
         hashed_active=True,
-        env_extra={"STUB_MIGRATE_RC": "1"},
+        env_extra={"STUB_UNITS_RC": "2"},
     )
     box.ok()
     assert box.state() == "stop-failed"
-    assert box.record() is None
-    assert not [c for c in box.sys() if c.startswith("systemctl enable")]
+    assert not box.migrated()
+    assert box.unit("hashed") == "enabled"  # nothing guessed at, nothing disabled blindly
+    assert any("hermes_gateway_regen state" in w for w in box.warns())
 
 
 def test_a_failing_disable_warns_with_the_command_and_marks_the_stop_failed(
@@ -770,12 +897,180 @@ def test_a_stop_signal_leaves_a_damaged_record_as_it_is(tmp_path: Path) -> None:
     assert any("not a record this installer wrote" in w for w in box.warns())
 
 
+# ── the hold does not depend on the venv (repair path) ───────────────────────
+
+
+@pytest.mark.parametrize("skip", [None, "1"])
+def test_record_and_venv_missing_a_run_without_screens_does_not_reinstall_or_enable(
+    tmp_path: Path, skip: str | None
+) -> None:
+    # `hal0 agent install hermes` would enable and start the agent, and the next
+    # run would read that as the person's own lift
+    box = _run(
+        tmp_path,
+        record="agent\ngateway\n",
+        venv=False,
+        gw_state="disabled",
+        gw_active=False,
+        agent_state="disabled",
+        skip=skip,
+    )
+    box.ok()
+    assert not box.installed_by_hal0(), box.calls
+    assert not [c for c in box.calls if c.startswith("hal0 agent")]
+    assert not box.writes(), box.calls
+    assert not [c for c in box.calls if c.startswith("python ") and c.endswith(" install")]
+    assert (box.unit("agent"), box.unit("gw")) == ("disabled", "disabled")
+    assert not box.running("agent") and not box.running("gw")
+    assert box.state() == "stopped"
+    assert box.record() == "agent\ngateway\n"  # kept
+    if skip is None:
+        held = [c for c in box.infos() if "not reinstalled until it is turned on again there" in c]
+        assert len(held) == 1 and "agent install hermes' by hand" in held[0]
+        assert "stopped from the setup screens" in held[0]
+    else:  # the skip flag's own line comes first; nothing is provisioned either way
+        assert [c for c in box.infos() if "skipping hermes provisioning" in c]
+    assert not box.warns()
+
+
+def test_record_and_venv_missing_a_stop_signal_does_not_reinstall_either(tmp_path: Path) -> None:
+    box = _run(
+        tmp_path,
+        stop="1",
+        record="agent\n",
+        venv=False,
+        gw_state="disabled",
+        gw_active=False,
+        agent_state="disabled",
+    )
+    box.ok()
+    assert not box.installed_by_hal0() and not box.writes()
+    assert box.record() == "agent\n"
+
+
+def test_record_and_venv_missing_a_confirmed_on_run_provisions_and_lifts(tmp_path: Path) -> None:
+    box = _run(
+        tmp_path,
+        stop="0",
+        record="agent\ngateway\n",
+        venv=False,
+        gw_state="disabled",
+        gw_active=False,
+        agent_state="disabled",
+    )
+    box.ok()
+    assert box.installed_by_hal0()
+    assert box.unit("agent") == "enabled" and box.running("agent")
+    assert box.record() is None
+    assert any("stop from the setup screens is lifted" in c for c in box.infos())
+
+
+def test_a_second_run_after_a_held_repair_run_still_holds(tmp_path: Path) -> None:
+    # the old loop: run 1 reinstalls (enables the agent), run 2 reads that as a lift
+    first = _run(
+        tmp_path,
+        record="agent\n",
+        venv=False,
+        gw_state="disabled",
+        gw_active=False,
+        agent_state="disabled",
+        name="first",
+    )
+    first.ok()
+    second = _run(
+        tmp_path,
+        record=first.record(),
+        venv=False,
+        gw_state="disabled",
+        gw_active=False,
+        agent_state=first.unit("agent"),
+        name="second",
+    )
+    second.ok()
+    assert not second.installed_by_hal0() and not second.writes()
+    assert second.record() == "agent\n"
+
+
+# ── a lift keeps what it could not restore ───────────────────────────────────
+
+
+def test_a_lift_whose_gateway_enable_failed_keeps_the_gateway_line_only(tmp_path: Path) -> None:
+    box = _run(
+        tmp_path,
+        stop="0",
+        record="agent\ngateway\n",
+        gw_state="disabled",
+        gw_active=False,
+        agent_state="disabled",
+        env_extra={"STUB_ENABLE_RC_gw": "1"},
+    )
+    box.ok()
+    assert box.unit("agent") == "enabled"
+    assert box.unit("gw") == "disabled"
+    assert box.record() == "gateway\n"
+    assert any("its gateway is not enabled yet" in w for w in box.warns())
+    assert not any("stop from the setup screens is lifted" in c for c in box.infos())
+    # the next run, without screens: the gateway is not read as the person's off switch
+    later = _run(
+        tmp_path,
+        record=box.record(),
+        gw_state="disabled",
+        gw_active=False,
+        agent_state=box.unit("agent"),
+        name="later",
+    )
+    later.ok()
+    assert later.enables_gateway() and later.unit("gw") == "enabled"
+    assert later.record() is None
+
+
+def test_a_gateway_only_record_is_a_lift_in_progress_not_a_stop(tmp_path: Path) -> None:
+    # the agent could not be enabled last time either: this run enables it
+    box = _run(
+        tmp_path, record="gateway\n", gw_state="disabled", gw_active=False, agent_state="disabled"
+    )
+    box.ok()
+    assert f"systemctl enable --now {_AGENT}" in box.calls
+    assert box.enables_gateway() and box.unit("gw") == "enabled"
+    assert box.record() is None
+    assert not [c for c in box.calls if "stays stopped" in c]
+
+
+def test_a_gateway_that_was_on_for_this_boot_only_comes_back_that_way(tmp_path: Path) -> None:
+    box = _run(
+        tmp_path,
+        stop="0",
+        record="agent\ngateway-runtime\n",
+        gw_state="disabled",
+        gw_active=False,
+        agent_state="disabled",
+    )
+    box.ok()
+    assert f"systemctl enable --runtime --now {_GATEWAY}" in box.calls
+    assert box.unit("gw") == "enabled-runtime"
+    assert box.record() is None
+
+
+def test_a_stop_that_finds_a_runtime_record_keeps_the_word(tmp_path: Path) -> None:
+    box = _run(
+        tmp_path,
+        stop="1",
+        skip="1",
+        record="agent\ngateway-runtime\n",
+        gw_state="disabled",
+        gw_active=False,
+        agent_state="disabled",
+    )
+    box.ok()
+    assert box.record() == "agent\ngateway-runtime\n"
+
+
 # ── structure ─────────────────────────────────────────────────────────────
 
 
 def test_the_step_sits_after_the_terminal_apply_and_before_the_enable_block() -> None:
     apply_call = TEXT.index('"${HAL0_BIN}" agent reprovision hermes')
-    stop = TEXT.index('"${HAL0_HERMES_STOP:-}" == "1"')
+    stop = TEXT.index('"${HAL0_HERMES_STOP:-}" == "1" && "${_hermes_was_provisioned}" -eq 1')
     enable = TEXT.index("systemctl enable --now hal0-agent@hermes.service")
     assert apply_call < stop < enable
     assert TEXT.count("HAL0_HERMES_STOP") >= 1

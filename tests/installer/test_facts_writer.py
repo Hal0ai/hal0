@@ -30,7 +30,14 @@ command() {
     builtin command "$@"
 }
 podman() { [[ "$1" == "--version" ]] && return "${STUB_PODMAN_INFO_RC:-0}"; echo "podman $*" >> "$STUB_FAIL_LOG"; return 1; }
+systemctl() { echo "systemctl $*" >> "$STUB_FAIL_LOG"; return 1; }
 """
+
+# The record-path override (HAL0_FACTS_AGENTS_DIR) is ignored as root, so a test
+# that plants a record would meet the real /etc/hal0/agents one there.
+_NOT_ROOT = pytest.mark.skipif(
+    os.geteuid() == 0, reason="the record-path override is ignored as root"
+)
 
 
 def _make_sys(root: Path, *, vram: int | None, gtt: int | None, amdgpu: bool = True) -> None:
@@ -84,6 +91,7 @@ echo "write_rc=$?"
     full_env.setdefault("HAL0_FACTS_UNIT_DIR", str(tmp_path / "units"))
     full_env.setdefault("HAL0_FACTS_HERMES_BIN", str(tmp_path / "hermes-venv" / "hermes"))
     full_env.setdefault("HAL0_FACTS_AGENTS_DIR", str(tmp_path / "agents"))
+    full_env.setdefault("HAL0_FACTS_AGENT_STATE", "disabled")
     proc = subprocess.run(
         ["bash", "-c", script], capture_output=True, text=True, env=full_env, check=False
     )
@@ -428,6 +436,7 @@ def _record(tmp_path: Path, text: str | None, *, link: bool = False) -> None:
         rec.write_text(text)
 
 
+@_NOT_ROOT
 @pytest.mark.parametrize("installed", [True, False])
 @pytest.mark.parametrize("stopped", [True, False])
 def test_the_hermes_fact_is_written_as_two_bare_json_booleans(
@@ -448,19 +457,62 @@ def test_the_hermes_fact_is_written_as_two_bare_json_booleans(
     }
 
 
+@_NOT_ROOT
 @pytest.mark.parametrize("text", ["", "agent", "nonsense\n", "agent\ngarbage\n", "\x00\xff"])
 def test_a_damaged_record_still_counts_as_stopped_by_setup(tmp_path: Path, text: str) -> None:
     _record(tmp_path, text)
     assert _facts(tmp_path)["hermes"]["stopped_by_setup"] is True
 
 
-def test_a_link_or_a_directory_at_the_record_path_is_not_a_record(tmp_path: Path) -> None:
+@_NOT_ROOT
+def test_a_link_or_a_directory_at_the_record_path_counts_like_the_step_reads_it(
+    tmp_path: Path,
+) -> None:
+    # the step holds the stop for anything at the path (a damaged record), so the
+    # fact says true: tested without following the link
     _record(tmp_path, None, link=True)
-    assert _facts(tmp_path)["hermes"]["stopped_by_setup"] is False
+    assert _facts(tmp_path)["hermes"]["stopped_by_setup"] is True
+    dangling = tmp_path / "dangling"
+    (dangling / "agents").mkdir(parents=True)
+    (dangling / "agents" / "hermes-stopped-by-setup").symlink_to(dangling / "nowhere")
+    assert _facts(dangling)["hermes"]["stopped_by_setup"] is True
     other = tmp_path / "other"
     other.mkdir()
     (other / "agents" / "hermes-stopped-by-setup").mkdir(parents=True)
-    assert _facts(other)["hermes"]["stopped_by_setup"] is False
+    assert _facts(other)["hermes"]["stopped_by_setup"] is True
+
+
+@_NOT_ROOT
+@pytest.mark.parametrize("state", ["enabled", "enabled-runtime"])
+def test_an_agent_unit_enabled_by_hand_is_a_lift_so_the_fact_is_false(
+    tmp_path: Path, state: str
+) -> None:
+    _record(tmp_path, "agent\ngateway\n")
+    assert (
+        _facts(tmp_path, env={"HAL0_FACTS_AGENT_STATE": state})["hermes"]["stopped_by_setup"]
+        is False
+    )
+    for other in ("disabled", "masked", "not-found", "static"):
+        assert (
+            _facts(tmp_path, env={"HAL0_FACTS_AGENT_STATE": other})["hermes"]["stopped_by_setup"]
+            is True
+        ), other
+
+
+@_NOT_ROOT
+def test_a_gateway_only_record_is_a_lift_in_progress_so_the_fact_is_false(tmp_path: Path) -> None:
+    for text in ("gateway\n", "gateway-runtime\n", "gateway"):
+        _record(tmp_path, text)
+        assert _facts(tmp_path)["hermes"]["stopped_by_setup"] is False, text
+    _record(tmp_path, "agent\ngateway\n")
+    assert _facts(tmp_path)["hermes"]["stopped_by_setup"] is True
+
+
+def test_the_fact_makes_no_systemctl_call_without_a_record(tmp_path: Path) -> None:
+    _hermes_box(tmp_path, unit=True, venv=True)
+    assert _facts(tmp_path)["hermes"] == {"installed": True, "stopped_by_setup": False}
+    log = tmp_path / "fail.log"
+    assert not log.exists() or "systemctl" not in log.read_text()
 
 
 def test_the_record_path_is_one_function_and_the_overrides_are_for_non_root() -> None:
@@ -470,6 +522,22 @@ def test_the_record_path_is_one_function_and_the_overrides_are_for_non_root() ->
     assert facts.count("hermes-stopped-by-setup") == 1
     assert "hal0_hermes_stop_record_path" in install
     assert "/etc/hal0/agents/hermes-stopped-by-setup" not in install
-    for name in ("HAL0_FACTS_UNIT_DIR", "HAL0_FACTS_HERMES_BIN", "HAL0_FACTS_AGENTS_DIR"):
+    for name in (
+        "HAL0_FACTS_UNIT_DIR",
+        "HAL0_FACTS_HERMES_BIN",
+        "HAL0_FACTS_AGENTS_DIR",
+        "HAL0_FACTS_AGENT_STATE",
+    ):
         use = facts.index(f"${{{name}:-")
         assert facts.rindex('"${EUID}" -ne 0', 0, use) > facts.rindex("() {", 0, use), name
+
+
+def test_the_fact_and_the_step_ask_the_same_function_whether_the_stop_is_in_force() -> None:
+    root = FACTS_SH.parents[2]
+    install = (root / "installer" / "install.sh").read_text(encoding="utf-8")
+    facts = FACTS_SH.read_text(encoding="utf-8")
+    assert "hal0_hermes_stop_in_force" in install  # the step
+    assert facts.count("hal0_hermes_stop_in_force") >= 2  # defined and used by the fact
+    assert "hal0_hermes_stop_record_present" in install  # one test for "something is there"
+    # the step keeps no private copy of either test
+    assert '[[ -L "${_hermes_record}"' not in install

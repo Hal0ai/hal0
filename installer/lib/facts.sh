@@ -104,14 +104,66 @@ hal0_hermes_installed() {
     [[ -f "${unit_dir}/hal0-agent@.service" && -x "${bin}" ]]
 }
 
-# Did the installer stop the assistant from the setup screens and has no one
-# turned it on since? True when the record exists as a regular file (a link is
-# never followed here). A damaged record counts: it still means "stopped by
-# setup, not lifted".
-hal0_hermes_stopped_by_setup() {
+# Is there anything at the record's path? Tested without following a link, so
+# a link or a folder there counts (the Hermes step reads it as a damaged
+# record, which still holds the assistant stopped).
+hal0_hermes_stop_record_present() {
     local rec
     rec="$(hal0_hermes_stop_record_path)"
-    [[ -f "${rec}" && ! -L "${rec}" ]]
+    [[ -L "${rec}" || -e "${rec}" ]]
+}
+
+# A record that names only a gateway (`gateway` / `gateway-runtime`), no `agent`
+# line: what a lift leaves behind when the assistant is back on but its gateway
+# could not be enabled yet. It is a lift in progress, not a stop.
+hal0_hermes_stop_record_is_gateway_only() {
+    local rec line lines=0 agent=0
+    rec="$(hal0_hermes_stop_record_path)"
+    [[ -f "${rec}" && ! -L "${rec}" ]] || return 1
+    while IFS= read -r line || [[ -n "${line}" ]]; do
+        lines=$((lines + 1))
+        case "${line}" in
+            agent) agent=1 ;;
+            gateway | gateway-runtime) ;;
+            *) return 1 ;;
+        esac
+    done < "${rec}" 2>/dev/null || return 1
+    [[ "${lines}" -ge 1 && "${lines}" -le 8 && "${agent}" -eq 0 ]]
+}
+
+# The is-enabled word of the agent unit. The seam HAL0_FACTS_AGENT_STATE is
+# honoured only when not root, like the others above.
+hal0_hermes_agent_unit_state() {
+    local state=""
+    if [[ "${EUID}" -ne 0 && -n "${HAL0_FACTS_AGENT_STATE:-}" ]]; then
+        printf '%s\n' "${HAL0_FACTS_AGENT_STATE}"
+        return 0
+    fi
+    state="$(systemctl is-enabled hal0-agent@hermes.service 2>/dev/null || true)"
+    printf '%s\n' "${state:-not-found}"
+}
+
+# "The stop from the setup screens is in force": ONE definition, asked by the
+# facts writer below and by the Hermes step of install.sh. $1 is the is-enabled
+# word of hal0-agent@hermes.service. In force when there is a record (anything
+# at its path), it is not a gateway-only leftover of a lift, and the agent unit
+# is not enabled: a person who enables the agent unit by hand has lifted the
+# stop. (A confirmed run of the setup screens lifts it too; that is the run's
+# own answer, which the Hermes step reads itself.)
+hal0_hermes_stop_in_force() {
+    hal0_hermes_stop_record_present || return 1
+    hal0_hermes_stop_record_is_gateway_only && return 1
+    [[ "${1:-}" != enabled* ]]
+}
+
+# Did the installer stop the assistant from the setup screens and has no one
+# turned it on since? This describes the BOX, not the coming run: under --dev or
+# --no-start the run never touches the assistant whatever this says (the setup
+# screens read those flags themselves). The unit state is read only when a
+# record exists, so a box without one costs no systemctl call.
+hal0_hermes_stopped_by_setup() {
+    hal0_hermes_stop_record_present || return 1
+    hal0_hermes_stop_in_force "$(hal0_hermes_agent_unit_state)"
 }
 
 # Contents of current/VERSION (first line), or nothing.
@@ -190,6 +242,10 @@ hal0_facts_gather() {
 
     FACT_HERMES_INSTALLED=false
     hal0_hermes_installed && FACT_HERMES_INSTALLED=true
+    # Both Hermes facts describe the BOX, not this run: under --dev or
+    # --no-start the Hermes step does not run and nothing is stopped or started
+    # whatever they say. The setup screens read those flags themselves and show
+    # nothing about the assistant in those modes.
     FACT_HERMES_STOPPED_BY_SETUP=false
     hal0_hermes_stopped_by_setup && FACT_HERMES_STOPPED_BY_SETUP=true
 

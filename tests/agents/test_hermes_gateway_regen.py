@@ -866,6 +866,18 @@ def test_main_needs_a_verb_and_root(monkeypatch: Any) -> None:
     assert regen.main(["install"]) == 1
 
 
+def test_the_units_verb_names_the_suffixed_unit_and_needs_no_root(
+    tmp_path: Path, monkeypatch: Any, capsys: Any
+) -> None:
+    monkeypatch.setattr(regen.os, "geteuid", lambda: 1000)
+    monkeypatch.setattr(regen, "GATEWAY_UNIT_PATH", tmp_path / CANON)
+    assert regen.main(["units"]) == 0
+    assert capsys.readouterr().out == ""  # no suffixed unit: nothing printed
+    _hashed_unit(tmp_path)
+    assert regen.main(["units"]) == 0
+    assert capsys.readouterr().out == HASHED + "\n"
+
+
 def test_the_update_probe_sees_a_suffixed_box(tmp_path: Path) -> None:
     """The unprivileged probe gates the heal; a box with only the suffixed unit
     must ask for it rather than read as "no gateway unit"."""
