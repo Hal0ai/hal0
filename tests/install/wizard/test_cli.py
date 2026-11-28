@@ -338,6 +338,143 @@ def test_an_unwritable_out_path_is_one_line_exit_2(catalog_path: Path, tmp_path:
     assert r.returncode == 2 and len(r.stderr.strip().splitlines()) == 1
 
 
+# ------------------------------------------- the chat model of a run with no screens
+
+
+def _starter_run(
+    tmp_path: Path,
+    catalog_path: Path,
+    *args: object,
+    env: dict[str, str] | None = None,
+    tty: str | None = None,
+) -> dict[str, dict[str, object]]:
+    """Run the wizard to the end and return the document it wrote."""
+    out = tmp_path / "starter.json"
+    r = wizard("--catalog", catalog_path, "--out", out, *args, env=env, tty=tty)
+    assert r.returncode == 0, r.stderr
+    doc: dict[str, dict[str, object]] = json.loads(out.read_text())
+    return doc
+
+
+def _saved_with(tmp_path: Path, models: dict[str, object] | None) -> Path:
+    saved: dict[str, object] = {
+        "version": 1,
+        "install": {"type": "recommended"},
+        "model_store": {"path": str(tmp_path)},
+        "meta": {"saved_at": "2026-01-02T03:04:05Z"},
+    }
+    if models is not None:
+        saved["models"] = models
+    return _write_json(tmp_path / "saved-starter.json", saved)
+
+
+@pytest.mark.parametrize("how", ["headless", "noninteractive", "no_terminal"])
+def test_a_fresh_run_with_no_screens_leaves_the_chat_model_out(
+    how: str, catalog_path: Path, tmp_path: Path
+) -> None:
+    extra: dict[str, tuple[list[object], dict[str, str]]] = {
+        "headless": (["--headless"], {}),
+        "noninteractive": ([], {"HAL0_NONINTERACTIVE": "1"}),
+        "no_terminal": (["--tty", tmp_path / "absent-terminal"], {}),
+    }
+    args, env = extra[how]
+    doc = _starter_run(tmp_path, catalog_path, *args, env=env)
+    assert "starter" not in doc["models"]
+    assert doc["install"]["type"] == "recommended" and doc["models"]["brain"] == "auto"
+
+
+@pytest.mark.parametrize(
+    ("env", "expected"),
+    [
+        ({"HAL0_PULL_AGENT_MODEL": "1"}, "auto"),
+        ({"HAL0_PULL_AGENT_MODEL": "0"}, "none"),
+        ({"HAL0_AGENT_MODEL": "small-1"}, "small-1"),
+    ],
+)
+def test_a_variable_that_names_the_chat_model_keeps_it(
+    env: dict[str, str], expected: str, catalog_path: Path, ladder_models_path: Path, tmp_path: Path
+) -> None:
+    doc = _starter_run(
+        tmp_path,
+        catalog_path,
+        "--models",
+        ladder_models_path,
+        "--headless",
+        env={**env, "HAL0_NONINTERACTIVE": "1"},
+    )
+    assert doc["models"]["starter"] == expected
+
+
+@pytest.mark.parametrize(
+    ("given_doc", "expected"),
+    [
+        ({"models": {"starter": "auto"}}, "auto"),
+        ({"models": {"starter": "big-1"}}, "big-1"),
+        ({"install": {"type": "recommended"}}, None),
+    ],
+)
+def test_a_given_document_keeps_the_chat_model_only_when_it_names_one(
+    given_doc: dict[str, object],
+    expected: str | None,
+    catalog_path: Path,
+    ladder_models_path: Path,
+    tmp_path: Path,
+) -> None:
+    given = _write_json(tmp_path / "given.json", given_doc)
+    doc = _starter_run(tmp_path, catalog_path, "--models", ladder_models_path, "--answers", given)
+    if expected is None:
+        assert "starter" not in doc["models"]
+        assert doc["models"]["brain"] == "auto"
+    else:
+        assert doc["models"]["starter"] == expected
+
+
+@pytest.mark.parametrize(
+    ("saved_models", "expected"),
+    [
+        ({"starter": "auto"}, "auto"),
+        ({"starter": "big-1"}, "big-1"),
+        ({"brain": "auto"}, None),
+        (None, None),
+        ({"starter": "retired-9"}, None),
+    ],
+)
+def test_an_upgrade_keeps_a_saved_chat_model_only_when_it_is_still_offered(
+    saved_models: dict[str, object] | None,
+    expected: str | None,
+    catalog_path: Path,
+    ladder_models_path: Path,
+    upgrade_facts_path: Path,
+    tmp_path: Path,
+) -> None:
+    saved = _saved_with(tmp_path, saved_models)
+    doc = _starter_run(
+        tmp_path,
+        catalog_path,
+        "--models",
+        ladder_models_path,
+        "--facts",
+        upgrade_facts_path,
+        "--saved",
+        saved,
+    )
+    if expected is None:
+        assert "starter" not in doc["models"]
+        assert doc["models"]["brain"] == "auto"
+    else:
+        assert doc["models"]["starter"] == expected
+
+
+def test_minimal_with_no_screens_keeps_none_as_the_chat_model(
+    catalog_path: Path, tmp_path: Path
+) -> None:
+    doc = _starter_run(tmp_path, catalog_path, "--headless", "--", "--bare")
+    assert doc["models"]["starter"] == "none"
+    given = _write_json(tmp_path / "given-minimal.json", {"install": {"type": "minimal"}})
+    doc = _starter_run(tmp_path, catalog_path, "--answers", given)
+    assert doc["models"]["starter"] == "none"
+
+
 # --------------------------------------------------------------- upgrade
 
 
@@ -427,7 +564,12 @@ def test_typing_enter_three_times_writes_the_same_document_as_headless(
     wait_for_output(master)
     os.write(master, ENTER * 3)
     assert wait_exit(p, master)[0] == 0
-    assert strip_meta(json.loads(a.read_text())) == strip_meta(json.loads(b.read_text()))
+    headless, screens = json.loads(a.read_text()), json.loads(b.read_text())
+    # The review screen lists the chat model, so a run that showed it keeps the preset's
+    # `auto`; a run with no screens leaves it out (nobody saw its size).
+    assert "starter" not in headless["models"] and screens["models"]["starter"] == "auto"
+    headless["models"]["starter"] = "auto"
+    assert strip_meta(headless) == strip_meta(screens)
     assert stat.S_IMODE(b.stat().st_mode) == 0o600
 
 

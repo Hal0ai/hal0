@@ -24,6 +24,7 @@ from .document import (
     DocumentError,
     effective,
     get,
+    is_gone_starter,
     load_document,
     overrides,
     write_document,
@@ -162,8 +163,34 @@ def _gone_saved_folder(inp: Inputs, doc: Document) -> str | None:
     return path
 
 
+def _leave_out_unseen_starter(inp: Inputs, doc: Document) -> None:
+    """Take the chat model out of a document that nobody saw it in.
+
+    A run with no screens must not start the large download on the preset's say
+    alone: the key stays only when a flag or variable, the given answers or the
+    saved answers (unless the list no longer offers that model) name it, or when
+    the preset's value is ``none``.
+    """
+    question = inp.catalog.questions.get("starter_model")
+    if question is None:
+        return
+    key = question.answer_key
+    saved = get(inp.saved or {}, key)
+    named = (
+        any(o.key == key for o in inp.over)
+        or get(inp.given or {}, key) is not None
+        or (saved is not None and not is_gone_starter(inp.catalog, saved))
+    )
+    parent_key, _, name = key.rpartition(".")
+    parent = get(doc, parent_key) if parent_key else doc
+    if named or get(doc, key) in (None, "none") or not isinstance(parent, dict):
+        return
+    parent.pop(name, None)
+
+
 def _run_headless(inp: Inputs, out: Path) -> int:
     doc = _document(inp, {})
+    _leave_out_unseen_starter(inp, doc)
     stop = _headless_stop(inp, doc)
     if stop is not None:
         print(f"hal0 setup: {stop}", file=sys.stderr)
