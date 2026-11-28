@@ -1,0 +1,149 @@
+{
+  "schema": "hal0.install-matrix.shapes.v1",
+  "shapes": [
+    {
+      "id": "u2604-cpu-unattended",
+      "row": 1,
+      "template": "ubuntu-26.04-standard",
+      "unprivileged": 1,
+      "hardware": "cpu",
+      "entry": "oneliner-unattended",
+      "cores": 8,
+      "memory_mb": 16384,
+      "disk_gb": 60,
+      "runnable": "yes"
+    },
+    {
+      "id": "u2604-cpu-terminal",
+      "row": 2,
+      "template": "ubuntu-26.04-standard",
+      "unprivileged": 1,
+      "hardware": "cpu",
+      "entry": "terminal",
+      "cores": 8,
+      "memory_mb": 16384,
+      "disk_gb": 60,
+      "runnable": "yes"
+    },
+    {
+      "id": "u2604-gpu",
+      "row": 3,
+      "template": "ubuntu-26.04-standard",
+      "unprivileged": 1,
+      "hardware": "gpu",
+      "entry": "oneliner",
+      "cores": 8,
+      "memory_mb": 32768,
+      "disk_gb": 120,
+      "runnable": "yes"
+    },
+    {
+      "id": "u2604-gpu-npu",
+      "row": 4,
+      "template": "ubuntu-26.04-standard",
+      "unprivileged": 1,
+      "hardware": "gpu+npu",
+      "entry": "oneliner",
+      "cores": 8,
+      "memory_mb": 32768,
+      "disk_gb": 120,
+      "runnable": "yes"
+    },
+    {
+      "id": "u2604-gpu-privileged",
+      "row": 5,
+      "template": "ubuntu-26.04-standard",
+      "unprivileged": 0,
+      "hardware": "gpu",
+      "entry": "oneliner",
+      "cores": 8,
+      "memory_mb": 32768,
+      "disk_gb": 120,
+      "runnable": "yes"
+    },
+    {
+      "id": "u2404-cpu",
+      "row": 6,
+      "template": "ubuntu-24.04-standard",
+      "unprivileged": 1,
+      "hardware": "cpu",
+      "entry": "oneliner",
+      "cores": 8,
+      "memory_mb": 16384,
+      "disk_gb": 60,
+      "runnable": "yes"
+    },
+    {
+      "id": "deb13-cpu",
+      "row": 7,
+      "template": "debian-13-standard",
+      "unprivileged": 1,
+      "hardware": "cpu",
+      "entry": "oneliner",
+      "cores": 8,
+      "memory_mb": 16384,
+      "disk_gb": 60,
+      "runnable": "yes"
+    },
+    {
+      "id": "fedora43-cpu",
+      "row": 8,
+      "template": "fedora-43-default",
+      "unprivileged": 1,
+      "hardware": "cpu",
+      "entry": "oneliner",
+      "cores": 8,
+      "memory_mb": 16384,
+      "disk_gb": 60,
+      "runnable": "yes"
+    },
+    {
+      "id": "u2604-box",
+      "row": 9,
+      "template": "ubuntu-26.04-standard",
+      "unprivileged": 1,
+      "hardware": "cpu",
+      "entry": "box",
+      "cores": 8,
+      "memory_mb": 16384,
+      "disk_gb": 60,
+      "runnable": "yes"
+    },
+    {
+      "id": "vm-u2604-cpu",
+      "row": 10,
+      "template": "-",
+      "unprivileged": 0,
+      "hardware": "cpu",
+      "entry": "vm",
+      "cores": 8,
+      "memory_mb": 16384,
+      "disk_gb": 60,
+      "runnable": "needs-image"
+    },
+    {
+      "id": "baremetal-amd",
+      "row": 11,
+      "template": "-",
+      "unprivileged": 0,
+      "hardware": "gpu+npu",
+      "entry": "oneliner",
+      "cores": 8,
+      "memory_mb": 32768,
+      "disk_gb": 120,
+      "runnable": "needs-hardware"
+    },
+    {
+      "id": "upgrade-18x",
+      "row": 12,
+      "template": "-",
+      "unprivileged": 0,
+      "hardware": "gpu",
+      "entry": "update",
+      "cores": 8,
+      "memory_mb": 32768,
+      "disk_gb": 120,
+      "runnable": "needs-existing-box"
+    }
+  ]
+}
