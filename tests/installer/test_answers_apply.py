@@ -109,7 +109,7 @@ def test_stop_name_is_taken_from_the_wizard_origin_with_the_value_one(tmp_path: 
     assert proc.stdout.splitlines() == ["rc=0", "1", "child:1"], proc.stderr
 
 
-@pytest.mark.parametrize("value", ["0", "true", "yes", "", "11", " 1", "1 "])
+@pytest.mark.parametrize("value", ["2", "true", "yes", "", "11", " 1", "1 ", "01", "-1"])
 def test_stop_name_with_any_other_value_is_refused(tmp_path: Path, value: str) -> None:
     fake = _fake(tmp_path, f"HAL0_HERMES_STOP={value}", SAVED)
     proc = _bash(
@@ -119,12 +119,42 @@ def test_stop_name_with_any_other_value_is_refused(tmp_path: Path, value: str) -
         reader=fake,
     )
     assert proc.stdout.splitlines() == ["rc=1", "unset"], proc.stderr
-    assert "takes only the value 1" in proc.stderr
+    assert "takes only the value 0 or 1" in proc.stderr
+
+
+def test_stop_name_value_zero_is_taken_from_the_wizard_origin_and_refused_for_a_file(
+    tmp_path: Path,
+) -> None:
+    fake = _fake(tmp_path, "HAL0_HERMES_STOP=0", SAVED)
+    proc = _bash(
+        'hal0_apply_answers /x/doc.json wizard screens-shown; echo "rc=$?"; '
+        'echo "${HAL0_HERMES_STOP:-unset}"',
+        tmp_path,
+        reader=fake,
+    )
+    assert proc.stdout.splitlines() == ["rc=0", "0"], proc.stderr
+    for value in ("0", "1"):
+        fake = _fake(tmp_path, f"HAL0_HERMES_STOP={value}", SAVED)
+        proc = _bash(
+            'hal0_apply_answers /x/doc.json file; echo "rc=$?"; echo "${HAL0_HERMES_STOP:-unset}"',
+            tmp_path,
+            reader=fake,
+        )
+        assert proc.stdout.splitlines() == ["rc=1", "unset"], (value, proc.stderr)
+        assert "only the install wizard" in proc.stderr
 
 
 def test_the_reader_and_the_library_allow_the_same_stop_name() -> None:
-    assert "HAL0_HERMES_STOP" in ANSWERS_SH.read_text(encoding="utf-8")
-    assert "HAL0_HERMES_STOP" in READER.read_text(encoding="utf-8")
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("answers_reader_under_test", READER)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    assert "HAL0_HERMES_STOP" in module.ALLOWED_NAMES
+    text = ANSWERS_SH.read_text(encoding="utf-8")
+    block = text[text.index("_HAL0_ANSWER_NAMES=(") :]
+    assert "HAL0_HERMES_STOP" in block[: block.index(")")].split()
 
 
 def _flag_reader(tmp_path: Path) -> Path:

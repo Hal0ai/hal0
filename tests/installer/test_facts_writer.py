@@ -83,6 +83,7 @@ echo "write_rc=$?"
     full_env.update(env or {})
     full_env.setdefault("HAL0_FACTS_UNIT_DIR", str(tmp_path / "units"))
     full_env.setdefault("HAL0_FACTS_HERMES_BIN", str(tmp_path / "hermes-venv" / "hermes"))
+    full_env.setdefault("HAL0_FACTS_AGENTS_DIR", str(tmp_path / "agents"))
     proc = subprocess.run(
         ["bash", "-c", script], capture_output=True, text=True, env=full_env, check=False
     )
@@ -110,7 +111,7 @@ def test_full_amd_box(tmp_path: Path) -> None:
         "gpu": {"outcome": "usable", "reason": None, "vendor": "amd", "pool_gb": 96.0},
         "npu": {"device": True, "memlock_ok": True, "flm_build": True},
         "install": {"state": "fresh", "version": None},
-        "hermes": {"installed": False},
+        "hermes": {"installed": False, "stopped_by_setup": False},
         "memory_python": True,
     }
 
@@ -244,7 +245,7 @@ def test_writer_needs_no_python(tmp_path: Path) -> None:
         "gpu": {"outcome": "usable", "reason": None, "vendor": None, "pool_gb": None},
         "npu": {"device": True, "memlock_ok": True, "flm_build": True},
         "install": {"state": "fresh", "version": None},
-        "hermes": {"installed": False},
+        "hermes": {"installed": False, "stopped_by_setup": False},
         "memory_python": True,
     }
 
@@ -371,7 +372,7 @@ def test_hermes_installed_needs_the_unit_file_and_an_executable_venv(
 ) -> None:
     _hermes_box(tmp_path, unit=unit, venv=venv)
     facts = _facts(tmp_path)
-    assert facts["hermes"] == {"installed": installed}
+    assert facts["hermes"] == {"installed": installed, "stopped_by_setup": False}
     assert facts["version"] == 1
     assert set(facts) == {
         "version", "distro", "container", "podman", "gpu", "npu", "install", "hermes",
@@ -383,7 +384,7 @@ def test_hermes_installed_needs_the_unit_file_and_an_executable_venv(
 def test_a_venv_binary_that_is_not_executable_does_not_count(tmp_path: Path) -> None:
     _hermes_box(tmp_path, unit=True, venv=True)
     (tmp_path / "hermes-venv" / "hermes").chmod(0o644)
-    assert _facts(tmp_path)["hermes"] == {"installed": False}
+    assert _facts(tmp_path)["hermes"] == {"installed": False, "stopped_by_setup": False}
 
 
 def test_hermes_defaults_match_the_hermes_step_of_install_sh() -> None:
@@ -394,7 +395,7 @@ def test_hermes_defaults_match_the_hermes_step_of_install_sh() -> None:
     facts = FACTS_SH.read_text(encoding="utf-8")
     venv = "/var/lib/hal0/venvs/hermes/bin/hermes"
     assert f'[[ -x "{venv}" ]] && _hermes_was_provisioned=1' in install
-    assert f"HAL0_FACTS_HERMES_BIN:-{venv}" in facts
+    assert f'local bin="{venv}"' in facts
     assert 'AGENT_UNIT_DST="${UNIT_DIR}/hal0-agent@.service"' in install
     assert "${UNIT_DIR}/hal0-agent@.service" in facts
 
@@ -409,14 +410,66 @@ def test_hermes_fact_reads_unit_dir_from_the_installer_variable(tmp_path: Path) 
         env={"HAL0_FACTS_UNIT_DIR": ""},
     )
     assert "write_rc=0" in proc.stdout, proc.stdout + proc.stderr
-    assert json.loads(out.read_text())["hermes"] == {"installed": True}
+    assert json.loads(out.read_text())["hermes"] == {
+        "installed": True,
+        "stopped_by_setup": False,
+    }
 
 
-@pytest.mark.parametrize(("installed", "text"), [(True, "true"), (False, "false")])
-def test_the_hermes_fact_is_written_as_a_bare_json_boolean(
-    tmp_path: Path, installed: bool, text: str
+def _record(tmp_path: Path, text: str | None, *, link: bool = False) -> None:
+    agents = tmp_path / "agents"
+    agents.mkdir(exist_ok=True)
+    rec = agents / "hermes-stopped-by-setup"
+    if link:
+        target = tmp_path / "elsewhere"
+        target.write_text("agent\n")
+        rec.symlink_to(target)
+    elif text is not None:
+        rec.write_text(text)
+
+
+@pytest.mark.parametrize("installed", [True, False])
+@pytest.mark.parametrize("stopped", [True, False])
+def test_the_hermes_fact_is_written_as_two_bare_json_booleans(
+    tmp_path: Path, installed: bool, stopped: bool
 ) -> None:
     _hermes_box(tmp_path, unit=installed, venv=installed)
+    _record(tmp_path, "agent\ngateway\n" if stopped else None)
     proc, out = _run(tmp_path)
     assert "write_rc=0" in proc.stdout, proc.stdout + proc.stderr
-    assert f'  "hermes": {{"installed": {text}}},\n' in out.read_text(encoding="utf-8")
+    want = (
+        f'  "hermes": {{"installed": {str(installed).lower()}, '
+        f'"stopped_by_setup": {str(stopped).lower()}}},\n'
+    )
+    assert want in out.read_text(encoding="utf-8")
+    assert json.loads(out.read_text())["hermes"] == {
+        "installed": installed,
+        "stopped_by_setup": stopped,
+    }
+
+
+@pytest.mark.parametrize("text", ["", "agent", "nonsense\n", "agent\ngarbage\n", "\x00\xff"])
+def test_a_damaged_record_still_counts_as_stopped_by_setup(tmp_path: Path, text: str) -> None:
+    _record(tmp_path, text)
+    assert _facts(tmp_path)["hermes"]["stopped_by_setup"] is True
+
+
+def test_a_link_or_a_directory_at_the_record_path_is_not_a_record(tmp_path: Path) -> None:
+    _record(tmp_path, None, link=True)
+    assert _facts(tmp_path)["hermes"]["stopped_by_setup"] is False
+    other = tmp_path / "other"
+    other.mkdir()
+    (other / "agents" / "hermes-stopped-by-setup").mkdir(parents=True)
+    assert _facts(other)["hermes"]["stopped_by_setup"] is False
+
+
+def test_the_record_path_is_one_function_and_the_overrides_are_for_non_root() -> None:
+    root = FACTS_SH.parents[2]
+    install = (root / "installer" / "install.sh").read_text(encoding="utf-8")
+    facts = FACTS_SH.read_text(encoding="utf-8")
+    assert facts.count("hermes-stopped-by-setup") == 1
+    assert "hal0_hermes_stop_record_path" in install
+    assert "/etc/hal0/agents/hermes-stopped-by-setup" not in install
+    for name in ("HAL0_FACTS_UNIT_DIR", "HAL0_FACTS_HERMES_BIN", "HAL0_FACTS_AGENTS_DIR"):
+        use = facts.index(f"${{{name}:-")
+        assert facts.rindex('"${EUID}" -ne 0', 0, use) > facts.rindex("() {", 0, use), name

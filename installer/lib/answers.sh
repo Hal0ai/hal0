@@ -205,7 +205,7 @@ hal0_apply_answers() {
 # hal0_apply_answers applies: a name off the allow-list, a name printed twice, a
 # folder path outside _hal0_answers_path_ok, HAL0_HERMES_TERMINAL or
 # HAL0_HERMES_STOP for any origin but `wizard`, HAL0_HERMES_STOP with a value
-# other than 1, a missing, second or malformed `#saved` line, or any line
+# other than 0 or 1, a missing, second or malformed `#saved` line, or any line
 # after it, fails the parse (return 1, one line on stderr). Shared by the apply
 # and by the read of the root-only saved copy (_hal0_saved_store), so the two
 # can never disagree on what a line means.
@@ -252,8 +252,8 @@ _hal0_answers_parse() {
                 echo "error: only the install wizard may stop an installed assistant" >&2
                 return 1
             fi
-            if [[ "${value}" != "1" ]]; then
-                echo "error: HAL0_HERMES_STOP takes only the value 1" >&2
+            if [[ "${value}" != "1" && "${value}" != "0" ]]; then
+                echo "error: HAL0_HERMES_STOP takes only the value 0 or 1" >&2
                 return 1
             fi
         fi

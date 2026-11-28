@@ -73,15 +73,45 @@ hal0_install_state() {
     fi
 }
 
+# The facts seams below (HAL0_FACTS_UNIT_DIR, HAL0_FACTS_HERMES_BIN,
+# HAL0_FACTS_AGENTS_DIR) point the detection at a test tree. They are honoured
+# only when not root, like the setup screens' own overrides: root's environment
+# never decides what the installer reads about the assistant.
+
+# The root-only record that the installer stopped the assistant from the setup
+# screens (one line per unit it disabled). ONE definition: the facts writer
+# below and the Hermes step of install.sh both ask this function.
+hal0_hermes_stop_record_path() {
+    local dir="/etc/hal0/agents"
+    if [[ "${EUID}" -ne 0 && -n "${HAL0_FACTS_AGENTS_DIR:-}" ]]; then
+        dir="${HAL0_FACTS_AGENTS_DIR}"
+    fi
+    printf '%s/hermes-stopped-by-setup\n' "${dir}"
+}
+
 # Is the assistant (Hermes) installed on this box? True when the agent unit file
 # exists AND the venv's `hermes` is executable: the test the Hermes step of
 # install.sh makes (the unit file AGENT_UNIT_DST=${UNIT_DIR}/hal0-agent@.service
 # and the executable /var/lib/hal0/venvs/hermes/bin/hermes). A test in
 # tests/installer/test_facts_writer.py keeps the two paths equal.
 hal0_hermes_installed() {
-    local unit_dir="${HAL0_FACTS_UNIT_DIR:-${UNIT_DIR:-/etc/systemd/system}}"
-    local bin="${HAL0_FACTS_HERMES_BIN:-/var/lib/hal0/venvs/hermes/bin/hermes}"
+    local unit_dir="${UNIT_DIR:-/etc/systemd/system}"
+    local bin="/var/lib/hal0/venvs/hermes/bin/hermes"
+    if [[ "${EUID}" -ne 0 ]]; then
+        unit_dir="${HAL0_FACTS_UNIT_DIR:-${unit_dir}}"
+        bin="${HAL0_FACTS_HERMES_BIN:-${bin}}"
+    fi
     [[ -f "${unit_dir}/hal0-agent@.service" && -x "${bin}" ]]
+}
+
+# Did the installer stop the assistant from the setup screens and has no one
+# turned it on since? True when the record exists as a regular file (a link is
+# never followed here). A damaged record counts: it still means "stopped by
+# setup, not lifted".
+hal0_hermes_stopped_by_setup() {
+    local rec
+    rec="$(hal0_hermes_stop_record_path)"
+    [[ -f "${rec}" && ! -L "${rec}" ]]
 }
 
 # Contents of current/VERSION (first line), or nothing.
@@ -160,11 +190,18 @@ hal0_facts_gather() {
 
     FACT_HERMES_INSTALLED=false
     hal0_hermes_installed && FACT_HERMES_INSTALLED=true
+    FACT_HERMES_STOPPED_BY_SETUP=false
+    hal0_hermes_stopped_by_setup && FACT_HERMES_STOPPED_BY_SETUP=true
 
     FACT_MEMORY_PYTHON=false
     # Detection only: the wrapper never installs; a skip request must not read as "usable".
     (HAL0_SKIP_HINDSIGHT=0 preflight_hindsight_python) >/dev/null 2>&1 && FACT_MEMORY_PYTHON=true
     return 0
+}
+
+# JSON true or false and nothing else: anything but the word `true` is false.
+_hal0_facts_bool() {
+    if [[ "${1-}" == "true" ]]; then printf 'true'; else printf 'false'; fi
 }
 
 # JSON string, or null when empty.
@@ -216,7 +253,9 @@ hal0_facts_write() {
         printf '  "install": {"state": "%s", "version": %s},\n' \
             "${FACT_INSTALL_STATE:-fresh}" \
             "$(_hal0_facts_str_or_null "${FACT_INSTALL_VERSION:-}")"
-        printf '  "hermes": {"installed": %s},\n' "${FACT_HERMES_INSTALLED:-false}"
+        printf '  "hermes": {"installed": %s, "stopped_by_setup": %s},\n' \
+            "$(_hal0_facts_bool "${FACT_HERMES_INSTALLED:-false}")" \
+            "$(_hal0_facts_bool "${FACT_HERMES_STOPPED_BY_SETUP:-false}")"
         printf '  "memory_python": %s\n' "${FACT_MEMORY_PYTHON:-false}"
         printf '}\n'
     } > "${tmp}" || { rm -f "${tmp}"; return 1; }

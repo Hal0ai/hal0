@@ -827,15 +827,50 @@ def test_a_confirmed_screens_run_with_the_assistant_off_sets_the_stop_signal(
     assert "HAL0_HERMES_STOP" in _exported(proc)
 
 
+_HERMES_ON = json.dumps({"version": 1, "apps": {"hermes": {"enabled": True}}})
+
+
+def test_a_confirmed_screens_run_with_the_assistant_on_sets_the_lift_signal(
+    tmp_path: Path, stub: dict[str, str]
+) -> None:
+    proc = _collect(
+        tmp_path, {**stub, "STUB_DOC": _HERMES_ON, "STUB_SHOWN": "shown\n"}, after=_STOP_AFTER
+    )
+    assert _state(proc)["RC"] == "0", proc.stdout + proc.stderr
+    assert _stop(proc) == "STOP=0" and "CHILD=0" in proc.stdout
+
+
+def test_a_headless_or_given_run_with_the_assistant_on_sets_no_lift_signal(
+    tmp_path: Path, stub: dict[str, str]
+) -> None:
+    given = tmp_path / "given.json"
+    given.write_text(_HERMES_ON, encoding="utf-8")
+    for extra in (
+        {"HAL0_ANSWERS_FILE": str(given), "STUB_SHOWN": "shown\n"},
+        {"HAL0_NONINTERACTIVE": "1"},
+        {"HAL0_ANSWERS_FILE": str(given), "HAL0_HERMES_STOP": "0"},
+        {"HAL0_NONINTERACTIVE": "1", "HAL0_HERMES_STOP": "0"},
+    ):
+        proc = _collect(tmp_path, {**stub, "STUB_DOC": _HERMES_ON, **extra}, after=_STOP_AFTER)
+        assert _state(proc)["RC"] == "0", proc.stdout + proc.stderr
+        assert _stop(proc) == "STOP=unset" and "CHILD=unset" in proc.stdout, extra
+
+
 def test_an_inherited_stop_signal_is_dropped_when_the_library_is_sourced(
     tmp_path: Path, stub: dict[str, str]
 ) -> None:
     # root's environment says stop; no screens were confirmed in this process
-    for extra in ({}, {"STUB_SHOWN": "shown\n"}):
-        env = {**stub, "STUB_DOC": _TERMINAL_OFF, "HAL0_HERMES_STOP": "1", **extra}
-        proc = _collect(tmp_path, env, after=_STOP_AFTER)
-        assert _state(proc)["RC"] == "0", proc.stdout + proc.stderr
-        assert _stop(proc) == "STOP=unset" and "CHILD=unset" in proc.stdout, extra
+    proc = _collect(
+        tmp_path, {**stub, "STUB_DOC": _TERMINAL_OFF, "HAL0_HERMES_STOP": "1"}, after=_STOP_AFTER
+    )
+    assert _state(proc)["RC"] == "0", proc.stdout + proc.stderr
+    assert _stop(proc) == "STOP=unset" and "CHILD=unset" in proc.stdout
+    # screens confirmed with the assistant ON: the inherited 1 is gone, and the
+    # run's own answer (the lift, 0) is what is set; never the inherited 1
+    env = {**stub, "STUB_DOC": _TERMINAL_OFF, "HAL0_HERMES_STOP": "1", "STUB_SHOWN": "shown\n"}
+    proc = _collect(tmp_path, env, after=_STOP_AFTER)
+    assert _state(proc)["RC"] == "0", proc.stdout + proc.stderr
+    assert _stop(proc) == "STOP=0" and "CHILD=0" in proc.stdout
 
 
 def test_an_inherited_stop_signal_does_not_survive_a_headless_or_given_run(

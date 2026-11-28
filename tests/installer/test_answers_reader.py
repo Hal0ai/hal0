@@ -515,13 +515,33 @@ def test_the_stop_signal_table(tmp_path: Path, origin: str, shown: bool, enabled
         assert proc.returncode == 2 and proc.stdout == ""  # usage error, nothing printed
         return
     got = lines(proc)
-    expected = origin == "wizard" and shown and enabled == "off"
-    assert ("HAL0_HERMES_STOP=1" in got) is expected, (origin, shown, enabled, got)
-    assert not any(x.startswith("HAL0_HERMES_STOP=") and x != "HAL0_HERMES_STOP=1" for x in got)
+    confirmed = origin == "wizard" and shown
+    want = {"off": "1", "on": "0"}.get(enabled) if confirmed else None
+    emitted = [x for x in got if x.startswith("HAL0_HERMES_STOP=")]
+    assert emitted == ([f"HAL0_HERMES_STOP={want}"] if want else []), (origin, shown, enabled, got)
     # the skip variable is emitted exactly as before
     assert ("HAL0_SKIP_HERMES=1" in got) is (enabled == "off")
-    if expected:
+    if want == "1":
         assert got.index("HAL0_SKIP_HERMES=1") < got.index("HAL0_HERMES_STOP=1")
+
+
+@pytest.mark.parametrize("flags", [(), _SCREENS])
+def test_a_null_enabled_says_nothing_about_the_assistant(tmp_path: Path, flags: tuple) -> None:
+    # null reads as absent (the type check only refuses a non-boolean value):
+    # no stop, no lift, no skip.
+    doc = {"version": 1, "apps": {"hermes": {"enabled": None}}}
+    got = lines(run(doc, tmp_path, origin="wizard", flags=flags))
+    assert not any(x.startswith(("HAL0_HERMES_STOP", "HAL0_SKIP_HERMES")) for x in got), got
+
+
+@pytest.mark.parametrize("value", ["0", "1", "false", "off", 0, 1, "", [], {}])
+def test_a_non_boolean_enabled_is_refused_and_emits_no_stop_signal(
+    tmp_path: Path, value: object
+) -> None:
+    doc = {"version": 1, "apps": {"hermes": {"enabled": value}}}
+    proc = run(doc, tmp_path, origin="wizard", flags=_SCREENS)
+    assert proc.returncode != 0, proc.stdout
+    assert "HAL0_HERMES_STOP" not in proc.stdout
 
 
 def test_the_stop_signal_is_not_emitted_for_a_saved_form(tmp_path: Path) -> None:
@@ -547,7 +567,7 @@ def test_the_stop_signal_is_not_emitted_for_a_saved_form(tmp_path: Path) -> None
                 continue
             tampered = {"version": 1, "apps": {"hermes": {"enabled": True, "stop": True}}}
             proc = run(tampered, tmp_path, origin=origin, flags=flags)
-            assert "HAL0_HERMES_STOP" not in proc.stdout
+            assert "HAL0_HERMES_STOP=1" not in proc.stdout
 
 
 @pytest.mark.parametrize(
@@ -561,7 +581,9 @@ def test_the_stop_signal_is_not_emitted_for_a_saved_form(tmp_path: Path) -> None
 def test_a_document_cannot_set_the_stop_signal(tmp_path: Path, doc: dict) -> None:
     for origin, flags in (("wizard", ()), ("wizard", _SCREENS), ("file", ())):
         proc = run(doc, tmp_path, origin=origin, flags=flags)
-        assert "HAL0_HERMES_STOP" not in proc.stdout, (origin, flags)
+        assert "HAL0_HERMES_STOP=1" not in proc.stdout, (origin, flags)
+        if flags != _SCREENS:
+            assert "HAL0_HERMES_STOP" not in proc.stdout, (origin, flags)
 
 
 def test_a_document_cannot_claim_the_screens_were_shown(tmp_path: Path) -> None:
