@@ -29,6 +29,10 @@ _INSTALL_SH = _REPO_ROOT / "installer" / "install.sh"
 
 _TIMEOUT = 60
 
+# The child shells get a fixed environment, never the runner's own, so a stray
+# HAL0_* variable on the machine cannot change a result.
+_BASE_PATH = "/usr/bin:/bin:/usr/sbin:/sbin"
+
 _IDENTITY_MAP = "         0          0 4294967295\n"
 _SHIFTED_MAP = "         0     100000      65536\n"
 
@@ -140,6 +144,20 @@ def test_unreadable_marker_is_container(tmp_path: Path) -> None:
         marker.chmod(stat.S_IRUSR | stat.S_IWUSR)
 
 
+@pytest.mark.skipif(os.geteuid() == 0, reason="root can read a mode-000 file")
+def test_unreadable_marker_prints_nothing_on_stderr(tmp_path: Path) -> None:
+    env = _classify_env(tmp_path, marker="")
+    marker = Path(env["HAL0_CONTAINER_RUN_DIR"]) / "systemd" / "container"
+    marker.chmod(0o000)
+    try:
+        script = f"source {shlex.quote(str(_PREFLIGHT))} >/dev/null 2>&1\nhal0_lxc_kind\n"
+        result = _bash(script, env)
+    finally:
+        marker.chmod(stat.S_IRUSR | stat.S_IWUSR)
+    assert result.stdout.strip() == "container"
+    assert result.stderr == ""
+
+
 def test_marker_content_beats_a_pid1_lxc_signal(tmp_path: Path) -> None:
     env = _classify_env(tmp_path, marker="docker\n", pid1="container=lxc\0")
     assert _kind(env) == "container"
@@ -165,7 +183,8 @@ def _gpu(tmp_path: Path, kind: str, extra: dict[str, str]) -> tuple[int, str]:
         "rc=0\npreflight_gpu || rc=$?\nexit $rc\n"
     )
     env = {
-        **os.environ,
+        "PATH": _BASE_PATH,
+        "HOME": str(tmp_path),
         "HAL0_GPU_GATE": "1",
         "HAL0_GPU_AMD_OVERRIDE": "0",
         "HAL0_GPU_VULKAN_LANE_OVERRIDE": "0",
@@ -310,8 +329,8 @@ def _runtime_gate(tmp_path: Path, kind: str) -> tuple[int, str]:
         "rc=0\n_container_runtime_gate podman || rc=$?\nexit $rc\n"
     )
     env = {
-        **os.environ,
-        "PATH": f"{tmp_path}:{os.environ.get('PATH', '')}",
+        "PATH": f"{tmp_path}:{_BASE_PATH}",
+        "HOME": str(tmp_path),
         "REPO_ROOT": str(_REPO_ROOT),
         "HAL0_APPARMOR_CONF": str(tmp_path / "containers.conf"),
         "HAL0_APPARMOR_D": str(tmp_path / "apparmor.d"),
@@ -376,13 +395,12 @@ def _install_gate(tmp_path: Path, kind: str, gpu_rc: int, extra: dict[str, str])
         "echo PROCEEDED\n"
     )
     env = {
-        **os.environ,
+        "PATH": _BASE_PATH,
+        "HOME": str(tmp_path),
         "HAL0_LXC_KIND_OVERRIDE": kind,
         "HAL0_GPU_KFD_PATH": str(tmp_path / "no-kfd"),
         **extra,
     }
-    env.pop("HAL0_ALLOW_CPU_ONLY", None)
-    env.update(extra)
     proc = subprocess.run(
         ["bash", "-c", script],
         env=env,
