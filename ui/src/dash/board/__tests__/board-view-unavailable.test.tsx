@@ -52,7 +52,7 @@ describe('BoardView unavailable states', () => {
       expect(state!.textContent).toContain(body)
       const a = state!.querySelector('a')!
       expect(a.textContent).toBe(link)
-      expect(a.getAttribute('href')).toBe('#agents')
+      expect(a.getAttribute('href')).toBe('#agent')
       expect(host.querySelector('[data-testid="board-lane-backlog"]')).toBeNull()
     })
   }

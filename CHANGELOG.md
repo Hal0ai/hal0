@@ -30,6 +30,11 @@ applying. Add those subsections to a version's section to surface them; see
 
 ## [Unreleased]
 
+### Fixed
+
+- **The installer's closing memory-engine check no longer says "ok" when the memory engine was never installed.** When memory was turned off for the run it says the check was skipped. When memory was wanted but not installed (its install failed, or no usable Python was found) it warns that the memory engine is not installed, points to the warnings above for the cause, and lists the check in the "Verify FAILED" part of the closing summary; the installer's exit status is unchanged. (#4007)
+- **When the default `python3` is older than 3.12, `install.sh` no longer treats the installer's own progress messages as the name of the Python it installed.** After installing Python 3.12 itself the installer passed the "attempting to install" and "installed" lines, followed by the interpreter name, on to the step that builds the venv. Those two lines now go to standard error, so the step gets one interpreter name, and the installer stops with its "no compatible interpreter" message if what it received is not a single name of an executable. (#4005)
+
 ## [1.8.3] — 2026-11-28
 
 ### Highlights

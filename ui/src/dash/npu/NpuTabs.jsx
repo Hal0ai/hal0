@@ -60,7 +60,7 @@ function AbsentPanel({ host }) {
           </div>
         ))}
       </dl>
-      <a href="/docs/getting-started/drivers/" target="_blank" rel="noreferrer">
+      <a href="https://hal0.dev/docs/getting-started/drivers/" target="_blank" rel="noreferrer">
         NPU driver setup
       </a>
     </div>

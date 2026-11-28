@@ -262,7 +262,8 @@ _main_py_autoinstall() {
     pkg_mgr >/dev/null 2>&1 || return 1
     local fam cand; fam="$(distro_family)"
     cand="python3.${MAIN_PY_MIN_MINOR}"
-    info "no Python >=3.${MAIN_PY_MIN_MINOR} found — attempting to install ${cand} (${fam})"
+    # stdout is the interpreter name (the caller captures it): progress goes to stderr (#4005).
+    info "no Python >=3.${MAIN_PY_MIN_MINOR} found — attempting to install ${cand} (${fam})" >&2
     case "${fam}" in
         debian)
             DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=120 update -qq >/dev/null 2>&1 || true
@@ -274,7 +275,7 @@ _main_py_autoinstall() {
         *) return 1 ;;
     esac
     if command -v "${cand}" >/dev/null 2>&1; then
-        info "installed ${cand} for the main hal0 venv"
+        info "installed ${cand} for the main hal0 venv" >&2
         printf '%s\n' "${cand}"
         return 0
     fi

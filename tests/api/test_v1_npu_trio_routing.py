@@ -627,3 +627,14 @@ def test_embed_naming_the_npu_slot_with_the_role_on_but_no_router_says_so(
     assert error["code"] == "dispatch.no_route"
     assert error["details"]["reason"] == "npu_embed_router_unavailable"
     assert "which is on" in error["message"] and "is off" not in error["message"]
+
+
+def test_npu_embed_response_names_the_model_and_slot_that_answered(
+    trio_client: tuple[TestClient, dict[str, Any]],
+) -> None:
+    """The caller sent a slot name; the header carries the FastFlowLM tag."""
+    client, _captures = trio_client
+    r = client.post("/v1/embeddings", json={"model": "flm-embed", "input": "hello"})
+    assert r.status_code == 200, r.text
+    assert r.headers["x-hal0-resolved-model"] == "embed-gemma"
+    assert r.headers["x-hal0-slot"] == "flm-embed"

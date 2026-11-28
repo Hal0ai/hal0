@@ -76,7 +76,7 @@ describe('NpuTabs', () => {
     box.occ = { present: false, slots: [], npu_host: { device_node: null, driver_loaded: false, xdna_gen: null } }
     render({})
     expect(host.querySelector('[data-testid="npu-absent"]')).toBeTruthy()
-    expect(host.querySelector('a[href="/docs/getting-started/drivers/"]')).toBeTruthy()
+    expect(host.querySelector('a[href="https://hal0.dev/docs/getting-started/drivers/"]')).toBeTruthy()
     expect(host.querySelector('[data-testid="npu-tab-lanes"]')).toBeNull()
   })
   it('npu slots with present:false keep the tab shell (degraded)', () => {

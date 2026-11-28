@@ -55,7 +55,7 @@ from hal0.dispatcher.stream_usage import ensure_include_usage, strip_usage_only_
 from hal0.memory.extraction_env import MEMORY_ALIAS
 from hal0.normalize.output_cap import MAX_TOKENS_HEADER, apply_output_cap, parse_output_cap
 from hal0.slots.abandon import ClientGoneProbe, abandon_probe
-from hal0.slots.state import SlotNpuConflict
+from hal0.slots.state import SlotNotReady, SlotNpuConflict
 from hal0.upstreams.catalog import (
     ModelAmbiguous,
     Resolved,
@@ -956,6 +956,10 @@ async def _ensure_backend_for_model(request: Request, body: dict[str, Any]) -> N
     except SlotNpuConflict:
         # Traffic never unloads the NPU holder; the 409 is the answer (#3666).
         raise
+    except SlotNotReady as exc:
+        # #4082: running, left alone, not answering /health yet. Expected at
+        # request cadence; the dispatcher's ready check answers the 503.
+        log.debug("v1.backend_aware_load_not_ready", slot=slot_name, error=str(exc))
     except Exception as exc:
         log.warning(
             "v1.backend_aware_load_failed",
@@ -1113,6 +1117,9 @@ async def _wake_capability_slot(request: Request, body: Mapping[str, Any]) -> No
         # Waking an FLM-backed capability slot never unloads a per-op holder:
         # the 409 is the answer, not a retryable 503 (#3666).
         raise
+    except SlotNotReady as exc:
+        # #4082: as above, expected while an adopted slot warms.
+        log.debug("v1.capability_wake_not_ready", slot=slot_name, error=str(exc))
     except Exception as exc:
         log.warning(
             "v1.capability_wake_failed",
@@ -1170,6 +1177,121 @@ def _client_gone_response(request: Request) -> Response:
     return Response(status_code=499)
 
 
+#: Response headers naming what actually answered a ``/v1`` request (#4017).
+#: A caller may address a slot by name or alias, and a request for a model no
+#: slot is bound to can be answered by a default slot serving another model,
+#: so the request's ``model`` is not proof of which model produced the reply.
+#: Additive: the body is unchanged.
+RESOLVED_MODEL_HEADER = "X-hal0-Resolved-Model"
+RESOLVED_SLOT_HEADER = "X-hal0-Slot"
+
+
+def _sent_model(call: Any) -> str:
+    """The ``model`` hal0 put in the body it forwarded, or ``""`` when the body
+    is not JSON (a multipart upload) or carries none."""
+    try:
+        parsed = json.loads(getattr(call, "body", b"") or b"")
+    except (ValueError, TypeError, UnicodeDecodeError):
+        return ""
+    model = parsed.get("model") if isinstance(parsed, dict) else None
+    return model.strip() if isinstance(model, str) else ""
+
+
+#: Providers whose engine chooses the model from the request: a slot of one
+#: of these may answer with a model other than the one its record holds.
+_REQUEST_MODEL_PROVIDERS: frozenset[str] = frozenset({"flm"})
+
+
+async def _slot_picks_model_by_request(request: Request, slot: str) -> bool:
+    """Whether ``slot``'s engine may answer with the model a request names.
+
+    A llama-server slot and every single-purpose engine serve the one model
+    they loaded whatever the request's ``model`` says. FastFlowLM holds
+    several tags and picks by the request. Read from the slot's config through
+    the same function the launch uses, so it cannot disagree with what runs.
+    Anything unreadable or unknown counts as "may pick by request": the
+    cautious answer for a caller deciding whether to vouch for a model.
+    """
+    slot_manager = getattr(request.app.state, "slot_manager", None)
+    get_config = getattr(slot_manager, "get_config", None)
+    if not callable(get_config):
+        return True
+    try:
+        from hal0.slots.config_write import _cfg_effective_provider
+
+        provider = _cfg_effective_provider(await get_config(slot))
+    except Exception:
+        return True
+    return provider is None or str(provider) in _REQUEST_MODEL_PROVIDERS
+
+
+async def _resolved_identity(
+    request: Request, call: Any, *, sent_model: str | None = None
+) -> tuple[str, str]:
+    """``(model, slot)`` that answered ``call``; either may be ``""`` (unknown).
+
+    THE RULE (#4017), applied at every stamp site through this function and
+    :func:`_stamp_resolved`: the model header appears only on a successful
+    response, and carries only one of two things hal0 can vouch for:
+
+    1. the id hal0 put on the wire, or
+    2. the slot's own record of what it has loaded.
+
+    Never the routing decision's ``resolved_model``, which on some paths is
+    the caller's requested name and on others an id the provider never saw.
+
+    * Remote provider (no slot): (1). The JSON body the dispatcher built, or
+      ``sent_model`` when the forwarded body is not JSON (a multipart upload
+      keeps the caller's own ``model`` field). hal0 states what it asked for;
+      a provider that chooses a model itself is not second-guessed.
+    * Slot whose engine serves the one model it loaded whatever the request
+      names (llama-server and the single-purpose engines): (2).
+    * Slot whose engine picks the model from the request (FastFlowLM): (2)
+      only when it equals (1); otherwise the model is left out and the slot
+      alone is named.
+    """
+    wire = (sent_model if sent_model is not None else _sent_model(call)).strip()
+    slot = (
+        getattr(call, "slot_name", "") or getattr(call, "container_slot_name", "") or ""
+    ).strip()
+    if not slot:
+        return wire, ""
+    slot_manager = getattr(request.app.state, "slot_manager", None)
+    loaded = getattr(slot_manager, "loaded_model_id", None)
+    try:
+        model = loaded(slot) if callable(loaded) else ""
+    except Exception:
+        return "", slot
+    if not isinstance(model, str) or not model:
+        return "", slot
+    if await _slot_picks_model_by_request(request, slot) and wire != model:
+        return "", slot
+    return model, slot
+
+
+def _stamp_resolved(response: Response, *, model: str, slot: str) -> None:
+    """Set the resolved-model and slot headers on ``response``, or remove them.
+
+    The second half of the rule in :func:`_resolved_identity`: the model is
+    stated only on a successful (2xx) response. An upstream's error, mirrored
+    to the client, was not produced by a model hal0 can name. The slot is
+    stated on any response, since it says who answered, errors included.
+
+    Whatever the upstream sent under these names is dropped first: they are
+    hal0's statement, and an upstream that happens to send one (another hal0
+    behind this one) must not be passed through as if hal0 had said it. A
+    value a header cannot carry (non-ASCII, control characters, surrounding
+    spaces) leaves the header absent.
+    """
+    if not 200 <= getattr(response, "status_code", 200) < 300:
+        model = ""
+    for header, value in ((RESOLVED_MODEL_HEADER, model), (RESOLVED_SLOT_HEADER, slot)):
+        if header in response.headers:
+            del response.headers[header]
+        if value and value == value.strip() and value.isascii() and value.isprintable():
+            response.headers[header] = value
+
+
 async def _dispatch_and_forward(
     request: Request,
     dispatcher: DispatcherDep,
@@ -1203,8 +1325,11 @@ async def _dispatch_and_forward_probed(
         body = await _rewrite_chat_slot_alias(request, body)
         # #430: backend-aware load BEFORE dispatch, so a slot-backed model is
         # loaded under its declared backend whichever routing path dispatch
-        # then takes. A model no upstream serves surfaces as the dispatcher's
-        # NoRouteFound envelope (404) — there is no catch-all fall-through.
+        # then takes. A model no upstream serves is NOT always a 404: the
+        # dispatcher's capability fallback can send it to a default slot of
+        # the right kind (#4017), which is why the response names the slot
+        # and the model that answered (``_stamp_resolved``). Only when no
+        # such slot exists does it surface as NoRouteFound.
         loading_since = time.monotonic()
         await _ensure_backend_for_model(request, body)
         if _load_was_slow(loading_since) and await probe():
@@ -1251,6 +1376,9 @@ async def _dispatch_and_forward_probed(
         if seam is not None:
             seam.record_error(exc, call=call, request=request, t_entry=t_entry)
         raise
+    if isinstance(response, Response):
+        model, slot = await _resolved_identity(request, call)
+        _stamp_resolved(response, model=model, slot=slot)
     if isinstance(response, StreamingResponse):
         response = _instrument_streaming_throughput(
             response,
@@ -2022,10 +2150,15 @@ async def _dispatch_via_npu_trio(
     # the request is still in flight (the counter increments on completion).
     _stamp_slot_last_used(request.app.state, "flm-embed")
     # Copy: the caller's dict is not ours to mutate.
-    body = {**body, "model": await _npu_embed_tag(request, body)}
+    tag = await _npu_embed_tag(request, body)
+    body = {**body, "model": tag}
     upstream_resp = await router_obj.dispatch_embed_npu(body=body)
     _touch_npu_shadow_count(request, "flm-embed")
-    return _wrap_npu_trio_response(upstream_resp)
+    response = _wrap_npu_trio_response(upstream_resp)
+    # The tag is what hal0 itself put in the forwarded body's ``model`` above
+    # (FastFlowLM validates that field), so hal0 can vouch for it.
+    _stamp_resolved(response, model=tag, slot="flm-embed")
+    return response
 
 
 def _wrap_npu_trio_response(upstream: Any) -> Response:
@@ -2890,7 +3023,12 @@ async def _forward_multipart(
                     content_type=content_type,
                 )
                 _touch_npu_shadow_count(request, "flm-stt")
-                return _wrap_npu_trio_response(upstream_resp)
+                stt_response = _wrap_npu_trio_response(upstream_resp)
+                # Slot only. The multipart body is forwarded verbatim, the
+                # caller's ``model`` field included, and FastFlowLM chooses
+                # from it; hal0 has no reading of which model transcribed.
+                _stamp_resolved(stt_response, model="", slot="flm-stt")
+                return stt_response
 
     call = await dispatcher.dispatch(request, body={"model": model_value} if model_value else {})
 
@@ -2904,7 +3042,11 @@ async def _forward_multipart(
 
     # Reuse the dispatcher's existing forward path.
     try:
-        return await dispatcher.forward(call)
+        forwarded = await dispatcher.forward(call)
+        if isinstance(forwarded, Response):
+            model, slot = await _resolved_identity(request, call, sent_model=model_value or "")
+            _stamp_resolved(forwarded, model=model, slot=slot)
+        return forwarded
     except httpx.HTTPError as exc:
         from hal0.dispatcher.router import UpstreamUnavailable
 
