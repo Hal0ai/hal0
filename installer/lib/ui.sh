@@ -406,7 +406,8 @@ ui_box() {
 # While the key is read and written, xtrace is switched off (and restored
 # after), so `bash -x` or BASH_XTRACEFD never records the value. With no
 # terminal, or no key line in the file, nothing about the value
-# is printed anywhere and the log points at the root-only env file instead.
+# is printed anywhere and the log names the command that prints a fresh key
+# (pointing at the root-only file would invite copying it into a scrollback).
 # Every terminal write is guarded and the function always returns 0, so it can
 # never fail an install running under `set -e` and an ERR trap.
 ui_closing_screen() {
@@ -465,7 +466,7 @@ ui_closing_screen() {
     if [[ "${_shown}" == "1" ]]; then
         info "An admin key was created and shown on the terminal."
     else
-        info "An admin key was created. It is stored in ${API_ENV:-the api.env file} (root only)."
+        info "An admin key was created but could not be shown here. To get one, run: sudo hal0 auth rotate admin (it replaces the key with a new one and prints it)."
     fi
     return 0
 }

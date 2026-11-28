@@ -22,6 +22,10 @@ UI_SH = REPO_ROOT / "installer" / "lib" / "ui.sh"
 INSTALL_SH = REPO_ROOT / "installer" / "install.sh"
 
 KEY = "hk_test_1234567890abcdef"
+NOT_SHOWN = (
+    "An admin key was created but could not be shown here. To get one, run: "
+    "sudo hal0 auth rotate admin (it replaces the key with a new one and prints it)."
+)
 
 
 @dataclass
@@ -163,7 +167,7 @@ def test_no_terminal_prints_no_value_and_does_not_fail(run_closing: Callable[...
     assert KEY not in r.stdout + r.stderr
     assert r.returncode == 0
     assert "ERR-TRAP" not in r.stderr
-    assert "It is stored in" in r.stdout and "(root only)" in r.stdout
+    assert NOT_SHOWN in r.stdout
 
 
 def test_marker_unset_says_nothing_about_a_key(run_closing: Callable[..., Run]) -> None:
@@ -175,7 +179,7 @@ def test_marker_unset_says_nothing_about_a_key(run_closing: Callable[..., Run]) 
 def test_key_line_missing_from_the_file_is_not_an_error(run_closing: Callable[..., Run]) -> None:
     r = run_closing(minted=1, api_env_lines=["OTHER=1"])
     assert r.returncode == 0
-    assert "It is stored in" in r.stdout
+    assert NOT_SHOWN in r.stdout
     assert "Admin key (shown once)" not in r.tty
 
 
@@ -237,7 +241,7 @@ def test_a_value_of_the_wrong_shape_is_treated_as_missing(
     assert r.returncode == 0
     assert "Admin key (shown once)" not in r.tty
     assert r.tty == ""
-    assert "It is stored in" in r.stdout and "(root only)" in r.stdout
+    assert NOT_SHOWN in r.stdout
     if value:
         assert value not in r.stdout + r.stderr
 
@@ -303,7 +307,7 @@ def test_shown_is_said_only_when_the_write_worked(
     assert r.returncode == 0
     assert "ERR-TRAP" not in r.stderr
     assert "and shown on the terminal" not in r.stdout
-    assert "It is stored in" in r.stdout and "(root only)" in r.stdout
+    assert NOT_SHOWN in r.stdout
     assert KEY not in r.stdout + r.stderr
 
 
@@ -362,7 +366,7 @@ def test_root_never_takes_the_terminal_path_from_the_environment(
     assert "ERR-TRAP" not in r.stderr
     assert not out.exists(), "root wrote the key to a path the environment chose"
     assert KEY not in r.stdout + r.stderr
-    assert "It is stored in" in r.stdout and "(root only)" in r.stdout
+    assert NOT_SHOWN in r.stdout
 
 
 def test_another_user_may_point_the_terminal_at_a_file(tmp_path: Path) -> None:
