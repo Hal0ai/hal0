@@ -213,12 +213,12 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # reverse proxy (Traefik, nginx, Cloudflare Tunnel) — hal0 does not ship
 # an edge terminator.
 # Pull destination for `hal0 model pull` and the dashboard's pull buttons.
-# Empty → prompt on an interactive terminal, else default to <var-lib>/models.
+# Empty → the folder chosen on the setup screens, else <var-lib>/models.
 # The chosen path is written to hal0.toml as [models].store (+ the deprecated
 # pull_root) and also auto-included in [models].roots so it's scanned at startup.
 MODELS_DIR="${HAL0_MODELS_DIR:-}"
 # Set when --models-dir / HAL0_MODELS_DIR supplied the value: an EXPLICIT
-# choice is never re-asked at the TTY prompt below.
+# choice is kept as given (the setup screens do not replace it).
 MODELS_DIR_EXPLICIT=0
 # Set by the --models-dir flag only; the answers document must not override it.
 MODELS_DIR_FLAG_GIVEN=0
@@ -737,9 +737,9 @@ if [[ "${DEV_MODE}" -eq 0 \
 fi
 
 # Resolve pull destination: explicit flag / env wins, then the FHS default.
-# On an interactive terminal the operator gets a chance to change it (see the
-# "Operator input" block after the pre-flight gates — it must run AFTER the
-# sudo re-exec, or the answer would be lost and the question asked twice).
+# The folder comes from the setup screens, a flag or a variable; nothing here
+# asks (the "Operator input" block after the pre-flight gates only carries the
+# values on).
 # Always absolute — relative paths under sudo would land in /root or wherever
 # the install was launched.
 DEFAULT_MODELS_DIR="${VAR_DIR}/models"
@@ -1192,9 +1192,10 @@ _tty_read() {
 
 if [[ "${DEV_MODE}" -eq 0 ]]; then
     # gpu_rc was captured by the detection half of this step, before the answers
-    # seam; the branches below act on it, unchanged. After the setup screens the
-    # CPU-only question is not asked again: they asked it, and their answer is
-    # HAL0_ALLOW_CPU_ONLY (hardware.allow_cpu_only in their document).
+    # seam; the branches below act on it, unchanged. HAL0_ALLOW_CPU_ONLY=1 is the
+    # only consent to a CPU-only install, whether it came from the setup screens
+    # (hardware.allow_cpu_only in their document) or from the environment;
+    # nothing here asks.
     if (( gpu_rc == HAL0_GPU_RC_BROKEN_GID )); then
         err "GPU passthrough is broken: the render device is visible but its gid does not map to the render group in this container (no group, or the wrong one)."
         err "Every GPU slot would silently fall back to CPU. Apply the dev0/gid fix shown above on the Proxmox host, then re-run install.sh."
@@ -2370,7 +2371,8 @@ fi
 # HF_TOKEN_VAL was GATHERED in the "Operator input" block near the top: the
 # env (HF_TOKEN, falling back to HUGGING_FACE_HUB_TOKEN — the same precedence
 # the in-process apply path and the /api/install/* + /api/models pull routes
-# use, #1094) pre-fills a TTY prompt, and a headless
+# use, #1094) is used as given, a token typed on the setup screens replaces
+# it, and a headless
 # `HF_TOKEN=hf_xxx sudo -E bash install.sh` run supplies it directly. Empty is
 # a clean, silent skip — public model pulls need no token.
 #
@@ -5514,8 +5516,8 @@ fi
 # There used to be a "Launch the guided hal0 setup now? [Y/n]" prompt here
 # (issue #1112's Stage-2). It is deliberately GONE: install.sh is the single
 # user-facing entry point, and every answer that wizard collected is now
-# either asked by this script (model store + HF token, in the "Operator input"
-# block) or already done by it (slot scaffolding, extensions, NPU probe).
+# either asked by the setup screens (this script only carries the model store
+# and HF token on, in the "Operator input" block) or already done by it (slot scaffolding, extensions, NPU probe).
 # Offering it again sent operators through a five-question flow that only
 # re-derived what had just been derived. What is genuinely left after an
 # install is picking models per slot, which is a dashboard job — see the

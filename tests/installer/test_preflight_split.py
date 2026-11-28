@@ -75,7 +75,6 @@ def test_first_half_calls_no_mutating_function() -> None:
         "preflight_container_runtime",
         "resolve_hindsight_python",
         "chgrp",
-        "_confirm_cpu_only",
     ):
         assert name not in first, f"{name} must not run before the answers seam"
     # Detection helpers are present, so the check above is looking at the right text.
@@ -94,7 +93,6 @@ def test_file_origin_region_holds_only_the_python_install() -> None:
         "preflight_container_runtime",
         "resolve_hindsight_python",
         "chgrp",
-        "_confirm_cpu_only",
         "apt-get",
         "podman",
         "pip",
@@ -176,10 +174,13 @@ _PROMPTS_START = "# ── Operator input: model store + HuggingFace token"
 _PROMPTS_END = "# The Hindsight memory engine"
 
 
-def _prompts_script(tmp_path: Path, applied: str | None, interactive: bool) -> str:
+def _prompts_script(
+    tmp_path: Path, applied: str | None, interactive: bool, wizard_token: bool = False
+) -> str:
     head = TEXT.index(_PROMPTS_START)
     block = TEXT[head : TEXT.index(_PROMPTS_END, head)]
     log = tmp_path / "asked.log"
+    wiz = "_HAL0_WIZARD_HF_TOKEN=wiz-secret-1\n" if wizard_token else ""
     preset = f"HAL0_ANSWERS_APPLIED={applied}\n" if applied is not None else ""
     return f"""
 set -euo pipefail
@@ -195,8 +196,10 @@ _tty_read() {{
 MODELS_DIR=/srv/models
 MODELS_DIR_EXPLICIT=0
 HF_TOKEN=tok
-{preset}{block}
+{wiz}{preset}{block}
 echo "MODELS_DIR=${{MODELS_DIR}} TOKEN_SET=${{HF_TOKEN_VAL:+yes}}"
+if [[ "${{HF_TOKEN_VAL}}" == "wiz-secret-1" ]]; then echo MATCH=1; else echo MATCH=0; fi
+if [[ -z "${{_HAL0_WIZARD_HF_TOKEN+x}}" ]]; then echo GONE=1; else echo GONE=0; fi
 """
 
 
@@ -210,7 +213,17 @@ def test_operator_input_region_never_asks(
     assert not (tmp_path / "asked.log").exists(), "a prompt ran in the operator-input region"
     assert "ASKED:" not in proc.stdout + proc.stderr
     assert "MODELS_DIR=/srv/models TOKEN_SET=yes" in proc.stdout
-    assert "tok" not in proc.stdout.replace("TOKEN_SET", "")
+    combined = proc.stdout + proc.stderr
+    assert "tok" not in combined.replace("TOKEN_SET", "")
+    assert "MATCH=0" in proc.stdout and "GONE=1" in proc.stdout
+
+
+def test_wizard_token_replaces_the_environment_one_and_is_unset(tmp_path: Path) -> None:
+    proc = _run(_prompts_script(tmp_path, "1", False, wizard_token=True))
+    assert proc.returncode == 0, proc.stderr
+    assert "MATCH=1" in proc.stdout and "GONE=1" in proc.stdout
+    assert "wiz-secret-1" not in proc.stdout + proc.stderr
+    assert "tok" not in (proc.stdout + proc.stderr).replace("TOKEN_SET", "")
 
 
 def test_operator_input_region_rejects_a_relative_models_dir(tmp_path: Path) -> None:

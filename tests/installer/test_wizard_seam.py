@@ -1437,6 +1437,62 @@ def test_cpu_only_prompt_is_gone_and_consent_is_the_variable() -> None:
         assert "exit 1" in branch.split("else", 1)[1], code
 
 
+def _gpu_gate_script(code: str) -> str:
+    head = TEXT.index('if [[ "${DEV_MODE}" -eq 0 ]]; then\n    # gpu_rc was captured')
+    block = TEXT[head : TEXT.index("# ── Operator input", head)]
+    return f"""
+set -euo pipefail
+DEV_MODE=0
+HAL0_GPU_RC_BROKEN_GID=11
+HAL0_GPU_RC_NO_KFD=12
+HAL0_GPU_RC_KFD_GID=13
+HAL0_GPU_RC_NO_DEVICE=14
+gpu_rc=${{HAL0_GPU_RC_{code}}}
+info() {{ echo "INFO: $*"; }}
+warn() {{ echo "WARN: $*"; }}
+err() {{ echo "ERR: $*"; }}
+_cpu_only_image_gate() {{ return 0; }}
+_cpu_only_remedy_lines() {{ echo "REMEDY-MARKER"; }}
+hal0_lxc_kind() {{ echo none; }}
+{block}
+echo "CONTINUED"
+"""
+
+
+@pytest.mark.parametrize("code", ["NO_KFD", "NO_DEVICE"])
+@pytest.mark.parametrize("consent", [None, "0", "yes"])
+def test_gpu_refusal_exits_unless_consent_is_exactly_one(code: str, consent: str | None) -> None:
+    env = {"PATH": os.environ["PATH"]}
+    if consent is not None:
+        env["HAL0_ALLOW_CPU_ONLY"] = consent
+    proc = _run_group(
+        ["bash", "-c", _gpu_gate_script(code)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env=env,
+    )
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert "REMEDY-MARKER" in proc.stdout
+    assert "CONTINUED" not in proc.stdout
+    assert "WARN:" not in proc.stdout
+
+
+@pytest.mark.parametrize("code", ["NO_KFD", "NO_DEVICE"])
+def test_gpu_consent_continues_with_a_warning(code: str) -> None:
+    proc = _run_group(
+        ["bash", "-c", _gpu_gate_script(code)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env={"PATH": os.environ["PATH"], "HAL0_ALLOW_CPU_ONLY": "1"},
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "WARN:" in proc.stdout and "CPU-only" in proc.stdout
+    assert "CONTINUED" in proc.stdout
+    assert "REMEDY-MARKER" not in proc.stdout
+
+
 # ── a folder the flag or the environment chose stays theirs ─────────────────
 
 

@@ -80,7 +80,7 @@ def persist_block(install_sh_text: str) -> str:
 
 
 class TestGather:
-    """Pre-filled from env; the prompt is TTY-only, so headless never blocks."""
+    """The block only carries values in (env or setup screens); it asks nothing."""
 
     def test_reads_hf_token_env_var(self, gather_block: str) -> None:
         assert "HF_TOKEN_VAL=" in gather_block
