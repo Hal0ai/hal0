@@ -554,13 +554,19 @@ def test_a_refused_create_never_destroys_the_guest_it_found(host):
     assert not any("pct create" in c for c in calls)
     assert not any("pct destroy" in c for c in calls)
     assert "LEFT BEHIND" not in r.stderr
+    assert "UNSURE" not in r.stderr, (
+        "a run that never started a create has nothing to be unsure about"
+    )
     assert (host.state / "present").exists()
 
 
 def test_a_lost_race_for_the_vmid_names_no_container_and_no_destroy_command(host):
     """N5: another run's guest appears at the VMID after this run's checks, and
     this run's own pct create fails. It created nothing: no LEFT BEHIND, no
-    destroy command, no VMID named, and the other guest is not touched."""
+    destroy command, no VMID named, and the other guest is not touched. The
+    other guest is known to be foreign because its description carries
+    another run's nonce."""
+    (host.state / "description").write_text("hal0-matrix run " + "f" * 16)
     r = host.run(
         "u2404-cpu", "--vmid", "172", "--out", str(host.out),
         FAKE_PRESENT_AFTER="2", FAKE_CREATE_FAILS="1",
@@ -575,6 +581,48 @@ def test_a_lost_race_for_the_vmid_names_no_container_and_no_destroy_command(host
     assert (host.state / "present").exists()
     said = [x for x in r.stderr.splitlines() if "created no container" in x]
     assert said and "172" not in said[0]
+    assert "UNSURE" not in r.stderr
+
+
+UNSURE_LINE = (
+    "UNSURE: guest 172 exists and this run started a create for it; it may be this run's. "
+    "Check it by hand: pct config 172"
+)
+
+
+def test_an_unrecognised_description_after_a_failed_create_is_unsure_not_silent(host):
+    """L1: this run's pct create made the guest but returned 1, and the
+    description reads back in a form the nonce check does not recognise. The
+    run cannot prove the guest is its own, so it says so with the VMID, gives
+    no destroy command, records unsure= and exits non-zero."""
+    r = host.run(
+        "u2404-cpu", "--vmid", "172", "--out", str(host.out),
+        FAKE_DESC_ODD="1", FAKE_CREATE_RC="1",
+    )  # fmt: skip
+    assert r.returncode == 1, r.stderr
+    assert UNSURE_LINE in r.stderr.splitlines()
+    for text in ("LEFT BEHIND", "destroy it with", "pct destroy", "created no container"):
+        assert text not in r.stderr, text
+    note = (host.out / "run.txt").read_text().splitlines()
+    assert "unsure=172" in note
+    assert not any(
+        x.startswith(("left_behind=", "created_nothing=", "destroy_command=")) for x in note
+    )
+    assert not any("pct destroy" in c for c in host.calls())
+    assert (host.state / "present").exists(), "an unproven guest is left alone"
+
+
+def test_a_failed_create_with_the_right_description_is_proven_and_destroyed(host):
+    """The create returned 1 but the guest carries this run's nonce: it is
+    this run's, and the nonce-checked destroy removes it."""
+    r = host.run(
+        "u2404-cpu", "--vmid", "172", "--out", str(host.out), FAKE_CREATE_RC="1"
+    )  # fmt: skip
+    assert r.returncode == 1, r.stderr
+    assert "UNSURE" not in r.stderr
+    assert "destroyed container 172" in r.stderr
+    assert not (host.state / "present").exists()
+    assert "unsure=" not in (host.out / "run.txt").read_text()
 
 
 def test_the_guest_this_run_created_carries_its_nonce(host):

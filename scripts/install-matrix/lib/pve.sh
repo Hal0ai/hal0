@@ -359,9 +359,13 @@ ct_owned() {
 }
 
 # ct_mark_state <vmid> <nonce>: prints mine, other or unknown. mine: the guest's
-# description is `hal0-matrix run <nonce>`; other: the config was read and the
-# description is not that; unknown: it could not be read. Read only. The reply
-# is untrusted text and is only compared, never evaluated.
+# description is `hal0-matrix run <nonce>`; other: the description is
+# `hal0-matrix run <16 hex>` with a different nonce, which is positive evidence
+# that another run made it; unknown: anything else (the config could not be
+# read, a create is still running and has no hostname yet, the description is
+# in a form this harness does not recognise): ownership is not proven either
+# way. Read only. The reply is untrusted text and is only compared, never
+# evaluated.
 ct_mark_state() {
   local vmid="${1:-}" nonce="${2:-}" conf line desc="" host="" _PVE_DEADLINE
   _PVE_DEADLINE="$(_pve_t READ 60)"
@@ -383,7 +387,13 @@ ct_mark_state() {
   desc="${desc//%20/ }"
   desc="${desc# }"
   desc="${desc% }"
-  if [[ "$desc" == "hal0-matrix run ${nonce}" ]]; then printf 'mine\n'; else printf 'other\n'; fi
+  if [[ "$desc" == "hal0-matrix run ${nonce}" ]]; then
+    printf 'mine\n'
+  elif [[ "$desc" =~ ^hal0-matrix\ run\ [0-9a-f]{16}$ ]]; then
+    printf 'other\n'
+  else
+    printf 'unknown\n'
+  fi
 }
 
 # ct_guard <vmid> [nonce]: remote shell text that ends in `&& ` and succeeds

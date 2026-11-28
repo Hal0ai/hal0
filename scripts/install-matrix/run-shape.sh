@@ -464,7 +464,7 @@ on_watchdog() {
 
 # ── cleanup: runs once, on EXIT and (via on_signal) on INT, TERM and HUP ─────
 cleanup() {
-  local rc=$? state="absent" foreign=0
+  local rc=$? state="absent" foreign=0 unsure=0
   exec 1>&6 2>&7
   trap '' INT TERM HUP USR1
   trap - EXIT
@@ -491,18 +491,30 @@ cleanup() {
       # (bounded) before looking, and note a lock it left behind.
       ct_wait_create_done "$VMID" || log "a pct create for ${VMID} may still be running; checking anyway"
       state="$(_ct_presence "$VMID")"
-      # A guest this run did not create (it lost a race for the VMID) is not
-      # named, announced or given a destroy command: it belongs to someone else.
+      # This run's create did not return 0, yet a guest may exist. Ownership is
+      # decided only by its description: this run's nonce (proven: the usual
+      # destroy and LEFT BEHIND apply), another run's nonce (foreign: not
+      # named, no destroy command), anything else (unsure: the run started a
+      # create for this VMID, so the guest may be its own, but it cannot be
+      # proven; the person is told to look, with no destroy command).
       if [[ "$state" != "absent" && "$CT_CREATED" != "1" ]]; then
-        [[ "$(ct_mark_state "$VMID" "$NONCE")" != "other" ]] || foreign=1
+        case "$(ct_mark_state "$VMID" "$NONCE")" in
+          mine) ;;
+          other) foreign=1 ;;
+          *) unsure=1 ;;
+        esac
       fi
-      if [[ "$foreign" != "1" ]] && ct_lock_held "$VMID"; then
+      if [[ "$foreign" != "1" && "$unsure" != "1" ]] && ct_lock_held "$VMID"; then
         GUEST_LOCKED=1
         announce_container
       fi
     fi
     if [[ "$state" == "absent" ]]; then
       log "no container ${VMID} exists; nothing to clean up"
+    elif [[ "$unsure" == "1" ]]; then
+      printf "UNSURE: guest %s exists and this run started a create for it; it may be this run's. Check it by hand: pct config %s\n" "$VMID" "$VMID" >&2
+      [[ -z "$ART" ]] || printf 'unsure=%s\n' "$VMID" >>"${ART}/run.txt"
+      [[ "$rc" -ne 0 ]] || rc=1
     elif [[ "$foreign" == "1" ]]; then
       log "this run created no container: what exists at the VMID it tried was made by someone else and was left alone"
       [[ -z "$ART" ]] || printf 'created_nothing=1\n' >>"${ART}/run.txt"
