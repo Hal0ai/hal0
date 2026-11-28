@@ -209,43 +209,38 @@ def _tree_with_wizard(tmp_path: Path) -> Path:
     return tree
 
 
-def test_absent_wizard_tests_do_not_depend_on_the_real_tree(tmp_path: Path) -> None:
-    tree = _tree_with_wizard(tmp_path)
-    log = {"STUB_LOG": str(tmp_path / "stub.log")}
-    bad = tmp_path / "bad.json"
-    bad.write_text('{"version": 7}', encoding="utf-8")
+@pytest.fixture(params=["real-tree", "tree-with-wizard"])
+def root(request: pytest.FixtureRequest, tmp_path: Path) -> Path:
+    """What the installer code sees as its release tree.
 
-    # control: this tree has the wizard, and without the seams it is found
-    proc = _collect(tmp_path, log, root=tree)
+    Every test that means "the wizard is absent" runs against both: the real
+    repository (whatever it holds today) and a tree that holds the wizard's two
+    files. Such a test passes on both only if it makes the wizard absent itself,
+    through the seams (`_absent`), and not through the tree's contents.
+    """
+    return ROOT if request.param == "real-tree" else _tree_with_wizard(tmp_path)
+
+
+def test_the_tree_with_the_wizard_is_found_without_the_seams(tmp_path: Path) -> None:
+    # control for the `root` fixture: without `_absent` the second tree IS the wizard
+    tree = _tree_with_wizard(tmp_path)
+    proc = _collect(tmp_path, {"STUB_LOG": str(tmp_path / "stub.log")}, root=tree)
     assert len(_records(tmp_path)) == 1, proc.stdout + proc.stderr
     proc = _flag_loop(tmp_path, ["--no-tls"], {}, root=tree)
     assert proc.returncode == 1, proc.stderr
-    (tmp_path / "stub.log").unlink()
-
-    # the environment the three absent-wizard tests use: the wizard is not called
-    env = {**log, **_absent(tmp_path)}
-    proc = _collect(tmp_path, env, root=tree)
-    assert proc.returncode == 0, proc.stderr
-    assert _state(proc)["RC"] == "0" and _state(proc)["APPLIED"] == "0"
-    proc = _flag_loop(tmp_path, ["--no-tls", "--no-owui"], _absent(tmp_path), root=tree)
-    assert proc.returncode == 0, proc.stderr
-    assert "WARN: unknown flag: --no-tls (ignored)" in proc.stderr
-    proc = _seam_run(tmp_path, {**env, "HAL0_ANSWERS_FILE": str(bad)}, root=tree)
-    assert proc.returncode == 1
-    assert "ERR TRAP" in (tmp_path / "report.log").read_text()
-    assert _records(tmp_path) == []
+    assert "ERR: unknown flag: --no-tls" in proc.stderr
 
 
-def test_not_run_when_wizard_absent(tmp_path: Path, stub: dict[str, str]) -> None:
+def test_not_run_when_wizard_absent(tmp_path: Path, stub: dict[str, str], root: Path) -> None:
     env = {"STUB_LOG": stub["STUB_LOG"], **_absent(tmp_path)}
-    proc = _collect(tmp_path, env)
+    proc = _collect(tmp_path, env, root=root)
     assert proc.returncode == 0, proc.stderr
     assert _state(proc)["RC"] == "0" and _state(proc)["APPLIED"] == "0"
     assert _records(tmp_path) == []
     # a given document takes today's path: origin file, no wizard
     doc = tmp_path / "given.json"
     doc.write_text(json.dumps({"version": 1, "memory": {"enabled": False}}), encoding="utf-8")
-    proc = _collect(tmp_path, {**env, "HAL0_ANSWERS_FILE": str(doc)})
+    proc = _collect(tmp_path, {**env, "HAL0_ANSWERS_FILE": str(doc)}, root=root)
     state = _state(proc)
     assert state["RC"] == "0" and state["APPLIED"] == "1" and state["RAN"] == "0"
     assert "HAL0_SKIP_HINDSIGHT" in proc.stdout
@@ -572,8 +567,8 @@ def test_every_accepted_flag_passes_when_wizard_present(
         assert proc.returncode == 0 and "--reconfigure" in proc.stdout
 
 
-def test_unknown_flag_only_warns_when_wizard_absent(tmp_path: Path) -> None:
-    proc = _flag_loop(tmp_path, ["--no-tls", "--no-owui"], _absent(tmp_path))
+def test_unknown_flag_only_warns_when_wizard_absent(tmp_path: Path, root: Path) -> None:
+    proc = _flag_loop(tmp_path, ["--no-tls", "--no-owui"], _absent(tmp_path), root=root)
     assert proc.returncode == 0, proc.stderr
     assert "WARN: unknown flag: --no-tls (ignored)" in proc.stderr
     assert "LOOP DONE reconfigure=0 args=2" in proc.stdout
@@ -788,10 +783,12 @@ def test_the_installer_sets_no_interrupt_trap_of_its_own() -> None:
         assert not (stripped.startswith("trap ") and stripped.endswith(" INT")), line
 
 
-def test_without_the_wizard_a_bad_document_still_goes_through_the_err_trap(tmp_path: Path) -> None:
+def test_without_the_wizard_a_bad_document_still_goes_through_the_err_trap(
+    tmp_path: Path, root: Path
+) -> None:
     bad = tmp_path / "bad.json"
     bad.write_text('{"version": 7}', encoding="utf-8")
-    proc = _seam_run(tmp_path, {**_absent(tmp_path), "HAL0_ANSWERS_FILE": str(bad)})
+    proc = _seam_run(tmp_path, {**_absent(tmp_path), "HAL0_ANSWERS_FILE": str(bad)}, root=root)
     assert proc.returncode == 1
     assert "ERR TRAP" in (tmp_path / "report.log").read_text()
 
@@ -991,7 +988,7 @@ def test_chosen_folder_ignored_when_headless_or_absent(
 
 
 def test_the_two_reasons_are_never_taken_from_the_environment(
-    tmp_path: Path, stub: dict[str, str]
+    tmp_path: Path, stub: dict[str, str], root: Path
 ) -> None:
     env = {
         **stub,
@@ -999,13 +996,20 @@ def test_the_two_reasons_are_never_taken_from_the_environment(
         "_HAL0_WIZARD_CHOSEN_STORE": "/home/alice/models",
         "_HAL0_SAVED_STORE": "/home/alice/models",
     }
-    proc = _collect(tmp_path, env, after=CHECK)
+    proc = _collect(tmp_path, env, after=CHECK, root=root)
     state = _state(proc)
     assert state["RC"] == "0" and state["OWN"] == "no", proc.stdout + proc.stderr
     # nor when the wizard is absent
-    env = {"_HAL0_WIZARD_CHOSEN_STORE": "/x/y", "_HAL0_SAVED_STORE": "/x/y"}
+    env = {
+        **_absent(tmp_path),
+        "_HAL0_WIZARD_CHOSEN_STORE": "/x/y",
+        "_HAL0_SAVED_STORE": "/x/y",
+    }
     proc = _collect(
-        tmp_path, env, after="hal0_store_is_operator_choice /x/y && echo OWN=yes || echo OWN=no"
+        tmp_path,
+        env,
+        after="hal0_store_is_operator_choice /x/y && echo OWN=yes || echo OWN=no",
+        root=root,
     )
     assert _state(proc)["OWN"] == "no"
 
