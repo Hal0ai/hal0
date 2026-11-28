@@ -606,3 +606,24 @@ def test_embed_for_another_model_still_reaches_the_dispatcher_when_the_role_is_o
         r = client.post("/v1/embeddings", json={"model": "qwen3-embedding", "input": "hello"})
     assert r.status_code == 200, r.text
     assert reached == [{"model": "qwen3-embedding", "input": "hello"}]
+
+
+def test_embed_naming_the_npu_slot_with_the_role_on_but_no_router_says_so(
+    seed_npu_trio: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The role is on, but this process has no trio router (it failed to build
+    at start-up). The request is still refused, and not with "the role is off"."""
+    from hal0.api.routes import v1
+
+    async def _must_not_dispatch(request: Any, dispatcher: Any, **kwargs: Any) -> Any:
+        raise AssertionError("an NPU-addressed embed request reached the dispatcher")
+
+    monkeypatch.setattr(v1, "_dispatch_and_forward", _must_not_dispatch)
+    with TestClient(create_app()) as client:
+        client.app.state.npu_trio_router = None
+        r = client.post("/v1/embeddings", json={"model": "flm-embed", "input": "hello"})
+    assert r.status_code == 404, r.text
+    error = r.json()["error"]
+    assert error["code"] == "dispatch.no_route"
+    assert error["details"]["reason"] == "npu_embed_router_unavailable"
+    assert "which is on" in error["message"] and "is off" not in error["message"]

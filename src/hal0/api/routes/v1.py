@@ -1929,10 +1929,13 @@ async def _refuse_npu_embed_substitute(request: Request, body: dict[str, Any]) -
     """Raise the no-route envelope when ``body`` names the NPU embed slot.
 
     Called only after the trio declined the request, so reaching here with a
-    match means the NPU embed role cannot answer (no anchor, the anchor's
-    ``[npu].embed`` off, or no trio router). The envelope is the dispatcher's
-    own ``dispatch.no_route`` (404), which is what such a request already got
-    on a box with no other embed slot; ``details.reason`` says why.
+    match means the NPU embed path cannot answer. Usually the role is off (no
+    anchor, or the anchor's ``[npu].embed`` off). The other case is the role
+    on with no trio router on ``app.state`` (its construction failed at
+    start-up); ``details.reason`` says which, so the message never claims the
+    role is off when it is on. The envelope is the dispatcher's own
+    ``dispatch.no_route`` (404), which is what such a request already got on a
+    box with no other embed slot.
     """
     slot_manager = getattr(request.app.state, "slot_manager", None)
     raw_model = body.get("model") if body else None
@@ -1947,13 +1950,25 @@ async def _refuse_npu_embed_substitute(request: Request, body: dict[str, Any]) -
     if cfg is None:
         return
     from hal0.dispatcher.router import NoRouteFound
+    from hal0.slots.activation import npu_modality_active
 
     slot_name = str(cfg.get("name", "")).strip()
+    served_by = f"the NPU embed role ({slot_name or 'flm-embed'})"
+    if npu_modality_active(configs, "embedding"):
+        reason = "npu_embed_router_unavailable"
+        why = (
+            "which is on but has no dispatch path in this hal0-api process; "
+            "restart hal0-api, or name another embedding model"
+        )
+    else:
+        reason = "npu_embed_role_off"
+        why = (
+            "which is off; turn the NPU embed role on and load the NPU chat slot, "
+            "or name another embedding model"
+        )
     raise NoRouteFound(
-        f"model {requested!r} is served by the NPU embed role ({slot_name or 'flm-embed'}), "
-        "which is off; turn the NPU embed role on and load the NPU chat slot, or name "
-        "another embedding model",
-        details={"model": requested, "slot": slot_name, "reason": "npu_embed_role_off"},
+        f"model {requested!r} is served by {served_by}, {why}",
+        details={"model": requested, "slot": slot_name, "reason": reason},
     )
 
 
