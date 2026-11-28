@@ -448,6 +448,7 @@ class SlotWatchdog:
                     # flipped to ERROR while its load holds the lock (that raced
                     # load's WARMING→READY into an illegal error→ready). See
                     # _stamp_locked.
+                    await self._log_unit_exited(slot_name, current)
                     await self._stamp_locked(
                         slot_name,
                         SlotState.ERROR,
@@ -466,6 +467,7 @@ class SlotWatchdog:
                 # Under the per-slot lock + re-verification (still inactive): a
                 # concurrent load that just brought the unit up must not be
                 # clobbered to OFFLINE mid-flight (OFFLINE→READY is illegal too).
+                await self._log_unit_exited(slot_name, current)
                 await self._stamp_locked(
                     slot_name,
                     SlotState.OFFLINE,
@@ -476,6 +478,38 @@ class SlotWatchdog:
         except asyncio.CancelledError:
             # Normal shutdown path — slot left live-state cleanly.
             raise
+
+    async def _log_unit_exited(self, slot_name: str, state: SlotState) -> None:
+        """Say in the journal that a live slot's unit stopped by itself (#4082).
+
+        hal0 did not stop it: an out-of-memory killer, a crash or an operator's
+        ``systemctl stop`` did. Without this line the reload that follows reads
+        as hal0 restarting a healthy slot. The fields are in the message
+        because hal0-api's console handler drops ``extra``. Best-effort: the
+        unit's properties are evidence, never a precondition.
+        """
+        result = status = ""
+        try:
+            from hal0.providers.container import container_provider
+
+            cfg = await self._host._maybe_load_config(slot_name)
+            read = getattr(container_provider(), "unit_status", None)
+            if cfg and callable(read):
+                loop = asyncio.get_running_loop()
+                props = await loop.run_in_executor(None, read, cfg)
+                result = str(props.get("Result", "")).strip()
+                status = str(props.get("ExecMainStatus", "")).strip()
+        except Exception as exc:
+            log.debug("slot.unit_exited_probe_failed", extra={"slot": slot_name, "error": str(exc)})
+        parts = [f"slot.unit_exited slot={slot_name} state={state.value} stopped_by=not_hal0"]
+        if result:
+            parts.append(f"result={result}")
+        if status:
+            parts.append(f"exit_status={status}")
+        log.warning(
+            " ".join(parts),
+            extra={"slot": slot_name, "state": state.value, "result": result, "status": status},
+        )
 
     async def _classify_health_fault(self, slot_name: str) -> tuple[str, dict[str, Any]] | None:
         """Classify a confirmed /health failure on an active unit (#1820, #3724).
