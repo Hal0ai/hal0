@@ -451,7 +451,13 @@ cleanup() {
     if [[ "$state" == "absent" ]]; then
       log "no container ${VMID} exists; nothing to clean up"
     else
-      if [[ "$DRY_RUN" != "1" && "$RESULT_WRITTEN" == "0" ]]; then
+      if [[ -n "$ABORT_REASON" ]]; then
+        # The host is short of memory or gone: the container goes first and
+        # nothing is collected from the guest. The result is written below,
+        # from what is already on this side.
+        POST_DONE=1
+        PULL_DONE=1
+      elif [[ "$DRY_RUN" != "1" && "$RESULT_WRITTEN" == "0" ]]; then
         log "saving what the run measured before the container goes"
         run_bounded 240 finish_result
       fi
@@ -466,6 +472,8 @@ cleanup() {
       fi
     fi
   fi
+  # After an abort the result is written last, from local files only.
+  [[ -z "$ABORT_REASON" || -z "$ART" || "$RESULT_WRITTEN" != "0" ]] || write_result
   [[ -z "$TREE_TAR" ]] || rm -f -- "$TREE_TAR"
   [[ -z "$WATCH_FILE" ]] || rm -f -- "$WATCH_FILE"
   [[ -z "$SCRATCH" ]] || rm -rf -- "$SCRATCH"

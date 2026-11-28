@@ -329,6 +329,35 @@ def test_a_low_reading_stops_the_host_call_in_progress_at_once(host):
     assert not (host.state / "present").exists()
 
 
+@pytest.mark.parametrize(
+    "env",
+    [
+        {"FAKE_MEM_AFTER": "5"},
+        {"FAKE_MEM_FAIL_AFTER": "1"},
+    ],
+    ids=["host_memory_low", "host_unreachable"],
+)
+def test_after_an_abort_cleanup_destroys_first_and_collects_nothing(host, env):
+    """N2: with the host short of memory, the container goes before anything is
+    collected from it; the result comes from what is already on this side."""
+    r = host.run(
+        "u2604-cpu-unattended", "--vmid", "172", "--out", str(host.out),
+        **_watch_env(FAKE_INSTALL_SLEEP="10", **env),
+    )  # fmt: skip
+    assert r.returncode == 1, r.stderr
+    calls = host.calls()
+    install_at = max(i for i, c in enumerate(calls) if "summary-json" in c)
+    after = calls[install_at + 1 :]
+    destroy_at = next(i for i, c in enumerate(after) if "pct destroy 172" in c)
+    assert not [c for c in after[:destroy_at] if "pct exec" in c], "nothing is run in the guest"
+    assert not [c for c in after if "collect.sh post" in c or "install-1.log" in c], after
+    assert not [c for c in after if "hal0-summary.json" in c]
+    result = json.loads((host.out / "result.json").read_text())
+    assert result["aborted"] in ("host_memory_low", "host_unreachable")
+    assert result["abort_detail"]
+    assert not (host.state / "present").exists()
+
+
 def test_watchdog_aborts_after_three_unreadable_readings_in_a_row(host):
     r = host.run(
         "u2604-cpu-unattended", "--vmid", "172", "--out", str(host.out),
