@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import pathlib
 import signal
 import termios
 import threading
@@ -67,6 +68,9 @@ def _write_later(master: int, data: bytes, delay: float = 0.3) -> threading.Thre
         (b"\x1b[", [], b"\x1b["),
         (b"\x1b", [], b"\x1b"),
         (b"\x1b[1;5C", [], b""),
+        (b"\x1b\x1b[A", ["UP"], b""),
+        (b"\x1b\x1bOB", ["DOWN"], b""),
+        (b"\x1bO\x1b[A", ["UP"], b""),
         (b"\x1b[C\x1b[D\x1bOP", [], b""),
         (b"/data/models", list("/data/models"), b""),
         ("é".encode(), ["é"], b""),
@@ -113,6 +117,17 @@ def test_read_key_joins_a_sequence_split_across_two_reads(pty_pair: tuple[int, s
         assert t.read_key() == "DOWN"
 
 
+def test_read_key_waits_for_the_second_half_of_a_sequence(pty_pair: tuple[int, str]) -> None:
+    master, slave_path = pty_pair
+    with Terminal(slave_path, raw=True) as t:
+        os.write(master, b"\x1b")
+        writer = _write_later(master, b"[B", delay=0.02)
+        try:
+            assert t.read_key() == "DOWN"
+        finally:
+            writer.join()
+
+
 def test_read_key_returns_every_key_of_a_burst(pty_pair: tuple[int, str]) -> None:
     master, slave_path = pty_pair
     with Terminal(slave_path, raw=True) as t:
@@ -122,11 +137,18 @@ def test_read_key_returns_every_key_of_a_burst(pty_pair: tuple[int, str]) -> Non
 
 def test_a_lone_escape_is_ignored_after_the_wait(pty_pair: tuple[int, str]) -> None:
     master, slave_path = pty_pair
+    results: list[str] = []
     with Terminal(slave_path, raw=True) as t:
+        reader = threading.Thread(target=lambda: results.append(t.read_key()))
         os.write(master, b"\x1b")
-        writer = _write_later(master, b"z", delay=0.3)
-        assert t.read_key() == "z"
-        writer.join()
+        reader.start()
+        try:
+            time.sleep(0.3)  # long past the escape wait: the ESC has been dropped
+            assert results == []
+            os.write(master, b"z")
+        finally:
+            reader.join(timeout=5)
+        assert results == ["z"]
 
 
 def test_ctrl_c_is_a_key_not_a_signal(pty_pair: tuple[int, str]) -> None:
@@ -177,19 +199,21 @@ def test_width_falls_back_to_eighty(pty_pair: tuple[int, str]) -> None:
         assert t.width() == 80
 
 
-def test_no_terminal_is_reported(tmp_path: object) -> None:
-    absent = str(tmp_path / "absent")  # type: ignore[operator]
+def test_no_terminal_is_reported(tmp_path: pathlib.Path) -> None:
+    absent = str(tmp_path / "absent")
     assert can_open(absent) is False
     with pytest.raises(TerminalUnavailable):
         Terminal(absent, raw=True).__enter__()
 
 
-def test_a_file_is_not_a_terminal(tmp_path: object) -> None:
-    plain = tmp_path / "file"  # type: ignore[operator]
-    plain.write_text("x")
+@pytest.mark.parametrize("raw", [True, False])
+def test_a_file_is_not_a_terminal(tmp_path: pathlib.Path, raw: bool) -> None:
+    plain = tmp_path / "file"
+    plain.write_bytes(b"IMPORTANT DATA\n")
     assert can_open(str(plain)) is False
     with pytest.raises(TerminalUnavailable):
-        Terminal(str(plain), raw=False).__enter__()
+        Terminal(str(plain), raw=raw).__enter__()
+    assert plain.read_bytes() == b"IMPORTANT DATA\n"
 
 
 def test_can_open_a_terminal(pty_pair: tuple[int, str]) -> None:
@@ -240,23 +264,46 @@ def test_read_line_without_echo_hides_what_is_typed_and_restores_echo(
     before = _attrs(slave_path)
     with Terminal(slave_path, raw=False) as t:
         writer = _write_later(master, b"s3cret\n")
-        assert t.read_line("token: ", echo=False) == "s3cret"
-        writer.join()
+        try:
+            assert t.read_line("token: ", echo=False) == "s3cret"
+        finally:
+            writer.join()
         assert _attrs(slave_path) == before
     out = read_all(master)
     assert b"token: " in out
     assert b"s3cret" not in out
 
 
-def test_read_line_in_raw_mode_reads_a_line_and_returns_to_raw(
+def test_echo_is_restored_when_the_read_raises(
+    pty_pair: tuple[int, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, slave_path = pty_pair
+    before = _attrs(slave_path)
+
+    def boom(self: Terminal) -> str | None:
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(Terminal, "_take_line", boom)
+    with Terminal(slave_path, raw=False) as t:
+        with pytest.raises(RuntimeError):
+            t.read_line("token: ", echo=False)
+        assert _attrs(slave_path) == before
+
+
+def test_read_line_is_for_the_plain_form(pty_pair: tuple[int, str]) -> None:
+    _, slave_path = pty_pair
+    with Terminal(slave_path, raw=True) as t, pytest.raises(RuntimeError, match="plain form"):
+        t.read_line("> ")
+
+
+def test_a_block_as_tall_as_the_window_clears_instead_of_climbing(
     pty_pair: tuple[int, str],
 ) -> None:
     master, slave_path = pty_pair
+    set_winsize(master, rows=5, cols=40)
     with Terminal(slave_path, raw=True) as t:
-        raw_attrs = _attrs(slave_path)
-        writer = _write_later(master, b"abc\n")
-        assert t.read_line("> ") == "abc"
-        writer.join()
-        assert _attrs(slave_path) == raw_attrs
-        os.write(master, b"x")
-        assert t.read_key() == "x"
+        t.draw([f"line {n}" for n in range(8)])
+        t.draw([f"line {n}" for n in range(8)])
+    out = read_all(master)
+    assert b"\x1b[2J" in out
+    assert b"\x1b[8A" not in out

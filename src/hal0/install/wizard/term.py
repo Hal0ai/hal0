@@ -23,6 +23,7 @@ _SHOW_CURSOR = "\x1b[?25h"
 _CLEAR_ROW = "\x1b[2K"
 _ESCAPE_WAIT = 0.05  # seconds to wait for the rest of an escape sequence
 _FALLBACK_WIDTH = 80
+_FALLBACK_HEIGHT = 24
 
 _ARROWS = {ord("A"): "UP", ord("B"): "DOWN"}
 
@@ -60,6 +61,8 @@ def _escape(data: bytes, i: int) -> tuple[str | None, int] | None:
     if i + 1 >= len(data):
         return None
     kind = data[i + 1]
+    if kind < 0x20:  # ESC again or another control byte: only this ESC is consumed
+        return None, i + 1
     if kind == ord("["):
         j = i + 2
         while j < len(data) and 0x20 <= data[j] <= 0x3F:  # parameters and intermediates
@@ -73,6 +76,8 @@ def _escape(data: bytes, i: int) -> tuple[str | None, int] | None:
     if kind == ord("O"):
         if i + 2 >= len(data):
             return None
+        if data[i + 2] < 0x20:  # a new sequence starts: drop only ESC O
+            return None, i + 2
         return _ARROWS.get(data[i + 2]), i + 3
     return None, i + 2  # Alt plus a key: swallowed
 
@@ -143,6 +148,7 @@ class Terminal:
         self._keys: list[str] = []
         self._tail = b""
         self._line_rest = b""
+        self._cursor_hidden = False
 
     def __enter__(self) -> Self:
         try:
@@ -159,6 +165,7 @@ class Terminal:
                 except (termios.error, OSError) as exc:
                     raise TerminalUnavailable(f"cannot configure {self._path}: {exc}") from exc
                 self.write(_HIDE_CURSOR)
+                self._cursor_hidden = True
         except BaseException:
             self._close()
             raise
@@ -177,15 +184,18 @@ class Terminal:
         if fd < 0:
             return
         try:
-            if self._raw:
-                self._write_fd(fd, _SHOW_CURSOR)
             if self._saved is not None:
                 with contextlib.suppress(termios.error, OSError):
                     termios.tcsetattr(fd, termios.TCSADRAIN, self._saved)
         finally:
-            self._saved = None
-            with contextlib.suppress(OSError):
-                os.close(fd)
+            try:
+                if self._cursor_hidden:
+                    self._write_fd(fd, _SHOW_CURSOR)
+            finally:
+                self._saved = None
+                self._cursor_hidden = False
+                with contextlib.suppress(OSError):
+                    os.close(fd)
 
     @staticmethod
     def _write_fd(fd: int, text: str) -> None:
@@ -206,9 +216,21 @@ class Terminal:
         except OSError:
             return _FALLBACK_WIDTH
 
+    def _height(self) -> int:
+        try:
+            return os.get_terminal_size(self._fd).lines or _FALLBACK_HEIGHT
+        except OSError:
+            return _FALLBACK_HEIGHT
+
     def draw(self, lines: Sequence[str]) -> None:
         if not self._raw:
             self.write("".join(f"{line}\n" for line in lines) + "\n")
+            return
+        height = self._height()
+        if len(lines) >= height or self._rows >= height:
+            # Too tall to climb back over: start from a clean screen instead.
+            self._rows = len(lines)
+            self.write("\x1b[H\x1b[2J" + "".join(f"{line}\r\n" for line in lines))
             return
         out = f"\x1b[{self._rows}A" if self._rows else ""
         out += "".join(f"{_CLEAR_ROW}{line}\r\n" for line in lines)
@@ -242,21 +264,16 @@ class Terminal:
             self._keys, self._tail = decode_keys(self._tail + data)
 
     def read_line(self, prompt: str, *, echo: bool = True) -> str | None:
-        """Read one line in cooked mode. None at end of input."""
-        cooked = self._saved if self._raw and self._saved is not None else None
+        """Read one line (plain form only). None at end of input."""
+        if self._raw:
+            raise RuntimeError("read_line is for the plain form")
         before: list[Any] | None = None
         try:
-            before = termios.tcgetattr(self._fd)
-            attrs = [*(cooked if cooked is not None else before)]
             if not echo:
+                before = termios.tcgetattr(self._fd)
+                attrs = [*before]
                 attrs[3] &= ~termios.ECHO
-            if cooked is not None or not echo:
                 termios.tcsetattr(self._fd, termios.TCSADRAIN, attrs)
-            if cooked is not None:
-                self.write(_SHOW_CURSOR)
-        except (termios.error, OSError):
-            before = None
-        try:
             self.write(prompt)
             line = self._take_line()
             if not echo and line is not None:
@@ -266,8 +283,6 @@ class Terminal:
             if before is not None:
                 with contextlib.suppress(termios.error, OSError):
                     termios.tcsetattr(self._fd, termios.TCSADRAIN, before)
-            if cooked is not None:
-                self.write(_HIDE_CURSOR)
 
     def _take_line(self) -> str | None:
         buf = self._line_rest
