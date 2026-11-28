@@ -1,7 +1,7 @@
 // @vitest-environment happy-dom
 import { createElement } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { cleanup, click, mount, settle } from './test-harness'
+import { advance, cleanup, click, mount, settle } from './test-harness'
 
 const { clipboard } = vi.hoisted(() => ({ clipboard: { ok: true, calls: [] as string[] } }))
 
@@ -83,8 +83,8 @@ describe('CommandBox', () => {
     click(parts(host).button)
     await settle()
     expect(parts(host).status.textContent).toBe('Copied')
-    await vi.advanceTimersByTimeAsync(3000)
-    await settle()
+    // Inside act: the timer's setStatus('') is committed before the assertion (#4098).
+    await advance(3000)
     expect(parts(host).status.textContent).toBe('')
   })
 })
