@@ -239,6 +239,8 @@ hal0_facts_gather() {{ echo gather >> "$LOG"; }}
 hal0_facts_write() {{ echo write >> "$LOG"; }}
 resolve_main_python() {{ echo "resolve autoinstall=${{HAL0_PY_AUTOINSTALL:-}}" >> "$LOG"; echo python3.12; }}
 hal0_collect_answers() {{ echo seam >> "$LOG"; }}
+hal0_wizard_present() {{ return 1; }}
+hal0_answers_python() {{ return 1; }}
 DEV_MODE=0
 PY={py}
 VAR_DIR=/var/lib/hal0
