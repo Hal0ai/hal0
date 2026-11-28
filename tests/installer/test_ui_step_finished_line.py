@@ -33,6 +33,9 @@ def run_ui(tmp_path: Path) -> Callable[..., str]:
                     f"source {shlex.quote(str(UI_SH))}",
                     f"UI_PLAIN={plain}",
                     cursor_setup,
+                    # Freeze the clock: with SECONDS unset it is a plain variable that never ticks.
+                    "unset SECONDS",
+                    "SECONDS=0",
                     "UI_STEP_TOTAL=",
                     body,
                 ]
@@ -86,3 +89,25 @@ def test_durations_are_still_recorded(run_ui: Callable[..., str]) -> None:
         plain=1,
     )
     assert "D=5" in out
+
+
+def test_the_clock_is_frozen_for_these_tests(run_ui: Callable[..., str]) -> None:
+    # The one deliberate sleep: with the live clock this would print "done in 1s".
+    out = run_ui('ui_step "One"; sleep 1.1; ui_step "Two"; ui_step_finalize', plain=1)
+    assert "done in" not in out
+
+
+@pytest.mark.parametrize(
+    ("seconds", "text"),
+    [
+        (1, "1s"),
+        (59, "59s"),
+        (60, "1m 0s"),
+        (61, "1m 1s"),
+        (3600, "60m 0s"),
+        (3661, "61m 1s"),
+    ],
+)
+def test_time_text_at_the_boundaries(run_ui: Callable[..., str], seconds: int, text: str) -> None:
+    out = run_ui(f'ui_step "One"; SECONDS=$((SECONDS+{seconds})); ui_step_finalize', plain=1)
+    assert f"   done in {text}" in out.splitlines()
