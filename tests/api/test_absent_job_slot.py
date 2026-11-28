@@ -248,6 +248,34 @@ def test_transcription_slot_keeps_its_path(
     assert calls.ports == [8097]
 
 
+def test_npu_slot_under_another_name_is_reached_by_its_own_name(
+    three_slot_client: tuple[TestClient, _Calls], tmp_hal0_home: str
+) -> None:
+    """An NPU-device slot is a transcriber by what it is, whatever the operator named it."""
+    client, calls = three_slot_client
+    (_slots_dir(tmp_hal0_home) / "npu.toml").write_text(
+        'name = "npu"\nport = 8095\ndevice = "npu"\nruntime = "container"\n'
+        'profile = "flm"\ntype = "llm"\n'
+    )
+    _register_ready_slot(client, "npu", 8095)
+    response = _transcribe(client, "npu")
+    assert response.status_code == 200, response.text
+    assert calls.ports == [8095]
+
+
+def test_chat_slot_name_as_transcription_model_is_refused(
+    three_slot_client: tuple[TestClient, _Calls], tmp_hal0_home: str
+) -> None:
+    """A chat slot's name as the model does not send audio to the chat upstream."""
+    client, calls = three_slot_client
+    (_slots_dir(tmp_hal0_home) / "chatty.toml").write_text(
+        'name = "chatty"\nport = 8094\ntype = "llm"\nruntime = "container"\n'
+    )
+    _register_ready_slot(client, "chatty", 8094)
+    _assert_refusal(_transcribe(client, "chatty"), "stt")
+    assert calls.paths == []
+
+
 def test_embed_named_transcription_model_does_not_reach_an_embed_slot(
     three_slot_client: tuple[TestClient, _Calls], tmp_hal0_home: str
 ) -> None:

@@ -176,6 +176,11 @@ def configs_serve(capability: str, configs: Iterable[Mapping[str, Any]]) -> bool
     return any(isinstance(cfg, Mapping) and _matches(job, cfg) for cfg in configs)
 
 
+def config_can_transcribe(cfg: Mapping[str, Any]) -> bool:
+    """Whether the slot config ``cfg`` can transcribe: an NPU-device or a transcription slot."""
+    return configs_serve("npu", [cfg]) or configs_serve("stt", [cfg])
+
+
 async def job_slot_present(
     slot_manager: Any,
     capability: str,
@@ -206,6 +211,7 @@ __all__ = [
     "CapabilityNotEnabled",
     "OptionalJob",
     "capability_not_enabled_message",
+    "config_can_transcribe",
     "configs_serve",
     "job_for_path",
     "job_for_slot_name",

@@ -43,7 +43,7 @@ import asyncio
 import json
 import math
 import time
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -79,6 +79,7 @@ from hal0.forwarded_headers import forwardable_request_headers
 from hal0.http_client import async_client
 from hal0.jobs import (
     CapabilityNotEnabled,
+    config_can_transcribe,
     job_for_path,
     job_for_slot_name,
     job_slot_present,
@@ -1129,8 +1130,9 @@ class Dispatcher:
         # slot it would end at the ``agent`` chat slot (or an embed slot, by its model
         # name). Refuse it here, after the routes that can serve it: rule 5 sends a
         # ``name:tag`` model (``whisper-v3:turbo``) to the ``flm`` slot, which transcribes
-        # natively, and that request must still get through.
-        if job_for_slot_name(_slot_name_of(slot_upstream) or "") != "npu":
+        # natively, and a model that names an NPU or transcription slot reaches it by
+        # rule 8; both must still get through.
+        if not await self._resolved_slot_transcribes(slot_upstream):
             await self._refuse_absent_job(path, None, only="stt")
 
         call = UpstreamCall(
@@ -2070,6 +2072,20 @@ class Dispatcher:
             seeded_name=_TTS_DEFAULT,
             is_serving=self._slot_manager.is_ready_for_dispatch,
             advertised=lambda name: self._cached_models(name),
+        )
+
+    async def _resolved_slot_transcribes(self, upstream: Upstream) -> bool:
+        """Whether the slot behind ``upstream`` can transcribe, by its config, not its name."""
+        slot = _slot_name_of(upstream)
+        if not slot or self._slot_manager is None:
+            return False
+        try:
+            configs = await self._slot_manager.iter_configs()
+        except Exception:  # TIER2 — unreadable inventory: not exempt, the check decides
+            return False
+        return any(
+            isinstance(cfg, Mapping) and cfg.get("name") == slot and config_can_transcribe(cfg)
+            for cfg in configs
         )
 
     async def _refuse_absent_job(
