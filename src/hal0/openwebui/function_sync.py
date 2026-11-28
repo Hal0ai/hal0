@@ -8,6 +8,7 @@ must never be used to provision one hal0-managed filter.
 from __future__ import annotations
 
 import hashlib
+import http.client
 import json
 import os
 import urllib.error
@@ -19,6 +20,9 @@ from typing import Any
 FUNCTION_ID = "hal0_hindsight_rag"
 FUNCTION_NAME = "hal0 Hindsight RAG"
 _DEFAULT_BASE_URL = "http://127.0.0.1:3001"
+#: The address hal0-api uses when api.env sets none. ``hal0 doctor`` passes it
+#: explicitly so its own shell environment never chooses where the token goes.
+DEFAULT_BASE_URL = _DEFAULT_BASE_URL
 
 Response = tuple[int, Any]
 Requester = Callable[[str, str, dict[str, Any] | None], Response]
@@ -164,9 +168,86 @@ def reconcile_hindsight_rag_function(
         return {"status": "unavailable", "function_id": FUNCTION_ID}
 
 
+def inspect_hindsight_rag_function(
+    *,
+    token: str | None = None,
+    base_url: str | None = None,
+    requester: Requester | None = None,
+    timeout: float = 5.0,
+) -> dict[str, Any]:
+    """Report the bundled filter's state in Open WebUI without changing it.
+
+    The read-only counterpart of :func:`reconcile_hindsight_rag_function`,
+    for ``hal0 doctor`` (#4066): two GETs, never a create, update or toggle.
+    ``status`` is one of ``auth_required`` (no token to ask with),
+    ``auth_rejected``, ``unavailable``, ``absent``, ``conflict`` (the ID
+    belongs to a Function hal0 does not manage), ``outdated`` or
+    ``converged``; the last two carry ``active`` and ``global``.
+    """
+    token = token if token is not None else os.environ.get("HAL0_OPENWEBUI_ADMIN_TOKEN", "").strip()
+    if requester is None and not token:
+        return {"status": "auth_required", "function_id": FUNCTION_ID}
+    base_url = base_url or os.environ.get("HAL0_OPENWEBUI_INTERNAL_URL", _DEFAULT_BASE_URL)
+    request = requester or _http_requester(base_url, token or "", timeout)
+    try:
+        status, listed = request("GET", "/api/v1/functions/list", None)
+        if status in {401, 403}:
+            return {"status": "auth_rejected", "function_id": FUNCTION_ID}
+        if status < 200 or status >= 300:
+            return {"status": "unavailable", "function_id": FUNCTION_ID, "http_status": status}
+        if not isinstance(listed, list):
+            return {
+                "status": "unavailable",
+                "function_id": FUNCTION_ID,
+                "http_status": status,
+                "reason": "unexpected_body",
+            }
+        if not any(isinstance(e, dict) and e.get("id") == FUNCTION_ID for e in listed):
+            return {"status": "absent", "function_id": FUNCTION_ID}
+        status, existing = request("GET", f"/api/v1/functions/id/{FUNCTION_ID}", None)
+        if status < 200 or status >= 300:
+            return {"status": "unavailable", "function_id": FUNCTION_ID, "http_status": status}
+        if not isinstance(existing, dict):
+            return {
+                "status": "unavailable",
+                "function_id": FUNCTION_ID,
+                "http_status": status,
+                "reason": "unexpected_body",
+            }
+        if not _managed(existing):
+            return {"status": "conflict", "function_id": FUNCTION_ID}
+        current = hashlib.sha256(str(existing.get("content") or "").encode("utf-8")).hexdigest()
+        return {
+            "status": "converged" if current == bundled_source_hash() else "outdated",
+            "function_id": FUNCTION_ID,
+            "active": bool(existing.get("is_active")),
+            "global": bool(existing.get("is_global")),
+        }
+    except json.JSONDecodeError:
+        # A 2xx whose body is not JSON: Open WebUI answered, with something
+        # that is not its Functions API (a login page, a proxy's HTML).
+        return {"status": "unavailable", "function_id": FUNCTION_ID, "reason": "unexpected_body"}
+    except (
+        OSError,
+        TimeoutError,
+        ValueError,
+        # Not an OSError: a listener that is not HTTP (BadStatusLine), a
+        # malformed URL (InvalidURL), a cut-off body (IncompleteRead). A
+        # diagnostic must report these, never raise through its caller.
+        http.client.HTTPException,
+    ) as exc:
+        return {
+            "status": "unavailable",
+            "function_id": FUNCTION_ID,
+            "reason": type(exc).__name__,
+        }
+
+
 __all__ = [
+    "DEFAULT_BASE_URL",
     "FUNCTION_ID",
     "bundled_source",
     "bundled_source_hash",
+    "inspect_hindsight_rag_function",
     "reconcile_hindsight_rag_function",
 ]

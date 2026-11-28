@@ -1511,6 +1511,13 @@ def test_build_all_checks_includes_hermes_api(monkeypatch: pytest.MonkeyPatch) -
     )
     monkeypatch.setattr(
         da,
+        "check_openwebui_memory_filter",
+        lambda **_kw: Check(
+            "openwebui_memory_filter", "Open WebUI memory filter", "pass", "stubbed"
+        ),
+    )
+    monkeypatch.setattr(
+        da,
         "check_hermes_generation_extras",
         lambda **_kw: Check("hermes_generation", "Hermes pm generation", "pass", "stubbed"),
     )
@@ -1709,7 +1716,7 @@ def test_build_all_checks_includes_hermes_api(monkeypatch: pytest.MonkeyPatch) -
     assert set(projects_kwargs) == {"memory", "base"}
     assert set(owners_kwargs) == {"memory", "base"}
     # Verify rows plus the extra evidence rows (gtt-leak, api-unit).
-    assert keys[-55:] == [
+    assert keys[-56:] == [
         "auth",
         "models",
         "registry-toml",
@@ -1744,6 +1751,7 @@ def test_build_all_checks_includes_hermes_api(monkeypatch: pytest.MonkeyPatch) -
         "bridge-store",
         "agent-bridge",
         "openwebui_mcp",
+        "openwebui_memory_filter",
         "openwebui-task-model",
         "hermes_generation",
         "hermes_command_approvals",
