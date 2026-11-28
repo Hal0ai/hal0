@@ -131,7 +131,9 @@ def _question(path: Path, raw: object) -> Question:
     assert isinstance(raw, dict)
     options: list[Option] = []
     raw_options = raw.get("options", [])
-    for opt in raw_options if isinstance(raw_options, list) else []:
+    if not isinstance(raw_options, list):
+        raise CatalogError(f"{path}: {where} options must be a list")
+    for opt in raw_options:
         if not isinstance(opt, dict) or "value" not in opt:
             raise CatalogError(f"{path}: {where} has an option without a value")
         options.append(

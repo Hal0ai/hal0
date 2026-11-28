@@ -255,7 +255,8 @@ def test_a_choice_question_without_options_is_refused(
     _drop_options(data, qid, how)
     p = tmp_path / "c.json"
     p.write_text(json.dumps(data))
-    with pytest.raises(CatalogError, match=f"question '{qid}' needs at least one option") as err:
+    expected = "options must be a list" if how == "not_a_list" else "needs at least one option"
+    with pytest.raises(CatalogError, match=f"question '{qid}' {expected}") as err:
         load_catalog(p)
     assert str(p) in str(err.value)
     assert "\n" not in str(err.value)
@@ -266,3 +267,37 @@ def test_every_shipped_preset_has_the_same_model_store_path(catalog: Catalog) ->
     paths = {name: preset.get("model_store.path") for name, preset in catalog.presets.items()}
     assert all(isinstance(v, str) and v for v in paths.values()), paths
     assert len(set(paths.values())) == 1, paths
+
+
+def _set_options(catalog_path: Path, tmp_path: Path, qid: str, **change: object) -> Path:
+    data = json.loads(catalog_path.read_text())
+    question = next(q for q in data["questions"] if q["id"] == qid)
+    if "options" in change and change["options"] is _ABSENT:
+        question.pop("options", None)
+    else:
+        question.update(change)
+    p = tmp_path / "c.json"
+    p.write_text(json.dumps(data))
+    return p
+
+
+_ABSENT = object()
+
+
+@pytest.mark.parametrize("bad", ["abc", {"a": 1}, 5, None])
+def test_an_options_value_that_is_not_a_list_is_refused_on_any_question(
+    catalog_path: Path, tmp_path: Path, bad: object
+) -> None:
+    p = _set_options(catalog_path, tmp_path, "model_store", options=bad)
+    with pytest.raises(CatalogError, match="question 'model_store' options must be a list") as err:
+        load_catalog(p)
+    assert str(p) in str(err.value)
+    assert "\n" not in str(err.value)
+
+
+@pytest.mark.parametrize("options", [_ABSENT, []])
+def test_a_non_choice_question_may_have_no_options(
+    catalog_path: Path, tmp_path: Path, options: object
+) -> None:
+    p = _set_options(catalog_path, tmp_path, "model_store", options=options)
+    assert load_catalog(p).questions["model_store"].options == ()

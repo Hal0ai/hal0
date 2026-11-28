@@ -364,3 +364,21 @@ def test_a_mount_whose_name_only_starts_like_another_is_not_under_it() -> None:
     }
     mounts = "a /pool zfs rw 0 0\nb /pool2 zfs rw 0 0\n"
     assert [d.mount for d in local_disks(mounts, _probe(table))] == ["/pool", "/pool2"]
+
+
+def test_the_root_absorbs_a_mount_under_it_with_equal_free_bytes() -> None:
+    table = {
+        "/": _stat(100 * 2**30, 40 * 2**30, fsid=1),
+        "/data": _stat(200 * 2**30, 40 * 2**30, fsid=2),
+    }
+    mounts = "a / ext4 rw 0 0\nb /data ext4 rw 0 0\n"
+    assert [d.mount for d in local_disks(mounts, _probe(table))] == ["/"]
+
+
+def test_the_root_and_a_mount_under_it_with_different_free_bytes_stay_two_rows() -> None:
+    table = {
+        "/": _stat(100 * 2**30, 40 * 2**30, fsid=1),
+        "/data": _stat(200 * 2**30, 50 * 2**30, fsid=2),
+    }
+    mounts = "a / ext4 rw 0 0\nb /data ext4 rw 0 0\n"
+    assert [d.mount for d in local_disks(mounts, _probe(table))] == ["/data", "/"]
