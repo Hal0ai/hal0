@@ -96,7 +96,7 @@ class Fake:
             f = self.dir / f"out{i}"
             f.write_bytes(out if isinstance(out, bytes) else out.encode())
             if out == HANG:
-                lines.append(f'if [[ "$cmd" == *{shlex.quote(needle)}* ]]; then exec sleep 60; fi')
+                lines.append(f'if [[ "$cmd" == *{shlex.quote(needle)}* ]]; then exec sleep 10; fi')
                 continue
             lines.append(
                 f'if [[ "$cmd" == *{shlex.quote(needle)}* ]]; then '

@@ -7,6 +7,7 @@ Everything here drives small bash scripts: no container, no network, no root.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import re
@@ -26,6 +27,34 @@ ANSWERS = REPO / "scripts" / "install-matrix" / "answers"
 PROMPT_SCRIPT = 'read -r -p "Continue? [y/N] " a < /dev/tty\necho "got:$a"\n'
 
 
+def kill_group(proc: subprocess.Popen) -> None:
+    """Kill the whole process group of a test's process (own session); only
+    "no such process" is ignored."""
+    with contextlib.suppress(ProcessLookupError):
+        os.killpg(proc.pid, signal.SIGKILL)
+
+
+def _run_in_own_session(
+    argv: list[str], *, cwd: Path, input: str | None, env: dict[str, str] | None, timeout: int
+) -> subprocess.CompletedProcess[str]:
+    """subprocess.run, but in a new session whose group is killed on every exit path."""
+    proc = subprocess.Popen(
+        argv,
+        cwd=cwd,
+        env=env,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+    )
+    try:
+        out, err = proc.communicate(input=input, timeout=timeout)
+    finally:
+        kill_group(proc)
+    return subprocess.CompletedProcess(argv, proc.returncode, out, err)
+
+
 def drive(
     tmp_path: Path,
     script: str,
@@ -43,7 +72,7 @@ def drive(
     transcript = tmp_path / "transcript.txt"
     result = tmp_path / "result.json"
     cmd = command or ["bash", "script.sh"]
-    proc = subprocess.run(
+    proc = _run_in_own_session(
         [
             sys.executable,
             "-I",
@@ -59,12 +88,9 @@ def drive(
             *cmd,
         ],
         cwd=tmp_path,
-        capture_output=True,
-        text=True,
         input=stdin,
         env={**os.environ, **env} if env else None,
         timeout=wall,
-        check=False,
     )
     data = json.loads(result.read_text()) if result.exists() else {}
     text = transcript.read_text(errors="replace") if transcript.exists() else ""
@@ -116,10 +142,20 @@ def test_total_timeout(tmp_path: Path) -> None:
 
 def test_timeout_kills_whole_process_group(tmp_path: Path) -> None:
     pidfile = tmp_path / "grandchild.pid"
-    script = f"sleep 300 &\necho $! > {pidfile}\nwait\n"
-    proc, _, _ = drive(tmp_path, script, "", extra=["--timeout", "2"])
-    assert proc.returncode == 124
-    pid = int(pidfile.read_text())
+    script = f"sleep 20 &\necho $! > {pidfile}\nwait\n"
+    try:
+        proc, _, _ = drive(tmp_path, script, "", extra=["--timeout", "2"])
+        assert proc.returncode == 124
+        _wait_gone(int(pidfile.read_text()))
+    finally:
+        # The driver puts its child in a session of its own, so the test's own
+        # cleanup reaches the grandchild by pid.
+        if pidfile.exists():
+            with contextlib.suppress(ProcessLookupError, ValueError):
+                os.kill(int(pidfile.read_text()), signal.SIGKILL)
+
+
+def _wait_gone(pid: int) -> None:
     # Reaped by init or by us; either way the signal-0 probe must fail.
     # Zombies of an orphan are collected by init; allow a short settle.
     for _ in range(50):
@@ -292,7 +328,7 @@ def test_child_that_closes_its_terminal_is_not_reported_as_killed(tmp_path: Path
 
 
 def test_result_written_when_driver_is_terminated(tmp_path: Path) -> None:
-    (tmp_path / "script.sh").write_text("echo ready\nsleep 60\n")
+    (tmp_path / "script.sh").write_text("echo ready\nsleep 10\n")
     (tmp_path / "answers.tsv").write_text("")
     drv = subprocess.Popen(
         [
@@ -310,6 +346,7 @@ def test_result_written_when_driver_is_terminated(tmp_path: Path) -> None:
             "script.sh",
         ],
         cwd=tmp_path,
+        start_new_session=True,
     )
     try:
         for _ in range(100):
@@ -322,8 +359,7 @@ def test_result_written_when_driver_is_terminated(tmp_path: Path) -> None:
         drv.send_signal(signal.SIGTERM)
         assert drv.wait(timeout=20) == 128 + signal.SIGTERM
     finally:
-        if drv.poll() is None:
-            drv.kill()
+        kill_group(drv)
     res = json.loads((tmp_path / "result.json").read_text())
     assert res["exit_code"] == 128 + signal.SIGTERM
 

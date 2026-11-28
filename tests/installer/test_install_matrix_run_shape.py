@@ -107,11 +107,11 @@ case "$cmd" in
     if [[ "$n" -le "${FAKE_PGREP_BUSY_READS:-0}" ]]; then echo busy; else echo idle; fi
     exit 0 ;;
   "pct start "*)
-    [[ -z "${FAKE_START_HANGS:-}" ]] || exec sleep 60
+    [[ -z "${FAKE_START_HANGS:-}" ]] || exec sleep 10
     exit 0 ;;
   *"pct destroy "*)
     touch "$FAKE_STATE/destroy-started"
-    [[ -z "${FAKE_DESTROY_HANGS:-}" ]] || exec sleep 60
+    [[ -z "${FAKE_DESTROY_HANGS:-}" ]] || exec sleep 10
     [[ -z "${FAKE_DESTROY_SLEEP:-}" ]] || sleep "$FAKE_DESTROY_SLEEP"
     [[ -z "${FAKE_DESTROY_FAILS:-}" ]] || exit 1
     rm -f "$FAKE_STATE/present"; exit 0 ;;
@@ -197,14 +197,21 @@ class Host:
         return [x for x in self.log.read_text().splitlines() if x]
 
     def run(self, *args: str, script: Path = RUN_SHAPE, **env: str):
-        return subprocess.run(
+        # Own session, so that whatever the code under test leaves running
+        # (a watchdog, a sleep) is killed with its group on every exit path.
+        proc = subprocess.Popen(
             ["bash", str(script), *args],
             env=self.env(**env),
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
-            check=False,
-            timeout=180,
+            start_new_session=True,
         )
+        try:
+            out, err = proc.communicate(timeout=180)
+        finally:
+            kill_group(proc)
+        return subprocess.CompletedProcess(proc.args, proc.returncode, out, err)
 
     def dry(self, shape: str, *args: str, **env: str):
         return self.run(shape, "--dry-run", "--out", str(self.out), *args, **env)
@@ -289,7 +296,7 @@ def _watch_env(**extra):
 def test_watchdog_stops_the_install_when_host_memory_falls(host):
     r = host.run(
         "u2604-cpu-unattended", "--vmid", "172", "--out", str(host.out),
-        **_watch_env(FAKE_MEM_AFTER="5", FAKE_INSTALL_SLEEP="60"),
+        **_watch_env(FAKE_MEM_AFTER="5", FAKE_INSTALL_SLEEP="20"),
     )  # fmt: skip
     assert r.returncode == 1, r.stderr
     assert "host memory fell below 12 GB (5 GB available)" in r.stderr
@@ -398,7 +405,7 @@ def test_a_killed_run_leaves_no_watchdog_and_no_lock_behind(host):
 def test_watchdog_aborts_after_three_unreadable_readings_in_a_row(host):
     r = host.run(
         "u2604-cpu-unattended", "--vmid", "172", "--out", str(host.out),
-        **_watch_env(FAKE_MEM_FAIL_AFTER="1", FAKE_INSTALL_SLEEP="60"),
+        **_watch_env(FAKE_MEM_FAIL_AFTER="1", FAKE_INSTALL_SLEEP="20"),
     )  # fmt: skip
     assert r.returncode == 1, r.stderr
     assert "aborted=host_unreachable" in (host.out / "run.txt").read_text().splitlines()
@@ -741,29 +748,32 @@ def test_dry_run_still_validates_the_source(host):
 def test_cleanup_destroys_on_interrupt(host):
     proc = subprocess.Popen(
         ["bash", str(RUN_SHAPE), "u2604-cpu-unattended", "--vmid", "172", "--out", str(host.out)],
-        env=host.env(FAKE_INSTALL_SLEEP="60"),
+        env=host.env(FAKE_INSTALL_SLEEP="20"),
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
         start_new_session=True,
     )
-    started = host.state / "install-started"
-    deadline = time.monotonic() + 90
-    while not started.exists():
-        assert proc.poll() is None, "run ended before the install started"
-        assert time.monotonic() < deadline, "install never started"
-        time.sleep(0.05)
-    os.killpg(proc.pid, signal.SIGINT)
-    _, err = proc.communicate(timeout=120)
-    assert proc.returncode == 130, err
-    calls = host.calls()
-    install_at = max(i for i, c in enumerate(calls) if "summary-json" in c)
-    destroy_at = [i for i, c in enumerate(calls) if "pct destroy 172" in c]
-    assert destroy_at and destroy_at[0] > install_at
-    assert not (host.state / "present").exists(), "the container must be gone"
-    assert "LEFT BEHIND" not in err
-    result = json.loads((host.out / "result.json").read_text())
-    assert result["install_exit_code"] == 130
+    try:
+        started = host.state / "install-started"
+        deadline = time.monotonic() + 90
+        while not started.exists():
+            assert proc.poll() is None, "run ended before the install started"
+            assert time.monotonic() < deadline, "install never started"
+            time.sleep(0.05)
+        os.killpg(proc.pid, signal.SIGINT)
+        _, err = proc.communicate(timeout=120)
+        assert proc.returncode == 130, err
+        calls = host.calls()
+        install_at = max(i for i, c in enumerate(calls) if "summary-json" in c)
+        destroy_at = [i for i, c in enumerate(calls) if "pct destroy 172" in c]
+        assert destroy_at and destroy_at[0] > install_at
+        assert not (host.state / "present").exists(), "the container must be gone"
+        assert "LEFT BEHIND" not in err
+        result = json.loads((host.out / "result.json").read_text())
+        assert result["install_exit_code"] == 130
+    finally:
+        kill_group(proc)
 
 
 def test_failed_destroy_prints_left_behind(host):
@@ -801,21 +811,24 @@ def test_an_interrupt_during_pct_create_waits_for_it_and_then_cleans_up(host):
         text=True,
         start_new_session=True,
     )
-    deadline = time.monotonic() + 90
-    while not (host.state / "create-started").exists():
-        assert proc.poll() is None and time.monotonic() < deadline
-        time.sleep(0.02)
-    os.killpg(proc.pid, signal.SIGINT)
-    _, err = proc.communicate(timeout=120)
-    assert proc.returncode == 130, err
-    calls = host.calls()
-    created = [i for i, c in enumerate(calls) if "pct create" in c]
-    destroyed = [i for i, c in enumerate(calls) if "pct destroy 172" in c]
-    assert created and destroyed and destroyed[0] > created[0], (
-        "the create ran to its end, then was cleaned up"
-    )
-    assert not (host.state / "present").exists()
-    assert "LEFT BEHIND" not in err
+    try:
+        deadline = time.monotonic() + 90
+        while not (host.state / "create-started").exists():
+            assert proc.poll() is None and time.monotonic() < deadline
+            time.sleep(0.02)
+        os.killpg(proc.pid, signal.SIGINT)
+        _, err = proc.communicate(timeout=120)
+        assert proc.returncode == 130, err
+        calls = host.calls()
+        created = [i for i, c in enumerate(calls) if "pct create" in c]
+        destroyed = [i for i, c in enumerate(calls) if "pct destroy 172" in c]
+        assert created and destroyed and destroyed[0] > created[0], (
+            "the create ran to its end, then was cleaned up"
+        )
+        assert not (host.state / "present").exists()
+        assert "LEFT BEHIND" not in err
+    finally:
+        kill_group(proc)
 
 
 def test_cleanup_waits_until_no_pct_create_runs_before_checking_presence(host):
@@ -866,25 +879,28 @@ def test_a_hung_destroy_ends_in_left_behind_not_a_hang(host):
 def test_a_second_interrupt_during_cleanup_still_reports_left_behind(host):
     proc = subprocess.Popen(
         ["bash", str(RUN_SHAPE), "u2604-cpu-unattended", "--vmid", "172", "--out", str(host.out)],
-        env=host.env(FAKE_INSTALL_SLEEP="60", FAKE_DESTROY_SLEEP="3", FAKE_DESTROY_FAILS="1"),
+        env=host.env(FAKE_INSTALL_SLEEP="20", FAKE_DESTROY_SLEEP="3", FAKE_DESTROY_FAILS="1"),
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
         start_new_session=True,
     )
-    deadline = time.monotonic() + 90
-    while not (host.state / "install-started").exists():
-        assert proc.poll() is None and time.monotonic() < deadline
-        time.sleep(0.05)
-    os.killpg(proc.pid, signal.SIGINT)
-    while not (host.state / "destroy-started").exists():
-        assert proc.poll() is None and time.monotonic() < deadline
-        time.sleep(0.05)
-    os.killpg(proc.pid, signal.SIGINT)
-    os.killpg(proc.pid, signal.SIGTERM)
-    _, err = proc.communicate(timeout=120)
-    assert "LEFT BEHIND: 172" in err, err
-    assert "left_behind=172" in (host.out / "run.txt").read_text()
+    try:
+        deadline = time.monotonic() + 90
+        while not (host.state / "install-started").exists():
+            assert proc.poll() is None and time.monotonic() < deadline
+            time.sleep(0.05)
+        os.killpg(proc.pid, signal.SIGINT)
+        while not (host.state / "destroy-started").exists():
+            assert proc.poll() is None and time.monotonic() < deadline
+            time.sleep(0.05)
+        os.killpg(proc.pid, signal.SIGINT)
+        os.killpg(proc.pid, signal.SIGTERM)
+        _, err = proc.communicate(timeout=120)
+        assert "LEFT BEHIND: 172" in err, err
+        assert "left_behind=172" in (host.out / "run.txt").read_text()
+    finally:
+        kill_group(proc)
 
 
 def test_failed_install_still_writes_result(host):
