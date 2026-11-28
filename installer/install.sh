@@ -5118,11 +5118,21 @@ else
     # `hal0 agent reprovision hermes`: its root prelude records the answer, it
     # re-renders config.yaml from it, and it restarts the agent and gateway.
     # Without an answer nothing runs and the recorded decision stays.
-    if [[ "${_hermes_was_provisioned}" -eq 1 && -f "${AGENT_UNIT_DST}" ]] \
-       && [[ "${HAL0_SKIP_HERMES:-0}" -ne 1 ]]; then
+    # An OFF answer is applied also when this run skips the assistant
+    # (HAL0_SKIP_HERMES=1): the setup screens export both variables when the
+    # assistant is turned off, and an agent installed earlier must not keep a
+    # root-equivalent tool the person turned off. An ON answer is not applied
+    # when the assistant is skipped.
+    if [[ "${_hermes_was_provisioned}" -eq 1 && -f "${AGENT_UNIT_DST}" ]]; then
         _ht_value="${HAL0_HERMES_TERMINAL:-}"
         _ht_value="${_ht_value,,}"
         _ht_value="${_ht_value//[[:space:]]/}"
+        if [[ "${HAL0_SKIP_HERMES:-0}" -eq 1 ]]; then
+            case "${_ht_value}" in
+                0|false|no|off|n) ;;
+                *) _ht_value="" ;;
+            esac
+        fi
         case "${_ht_value}" in
             1|true|yes|on|y|0|false|no|off|n)
                 info "applying the Hermes terminal-tool answer to the installed agent (hal0 agent reprovision hermes)…"
