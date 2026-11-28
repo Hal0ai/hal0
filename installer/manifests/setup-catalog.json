@@ -1,0 +1,58 @@
+{
+  "version": 1,
+  "questions": [
+    {"id": "cpu_only", "answer_key": "hardware.allow_cpu_only", "title": "No usable graphics card was found. Continue without one?", "help": "hal0 will work, but answers will be slow.",
+     "options": [{"value": true, "label": "Yes, continue without one", "help": ""},
+                 {"value": false, "label": "No, stop here", "help": "If this box has a graphics card, fix the passthrough or the driver first."}]},
+    {"id": "setup_type", "answer_key": "install.type", "title": "How do you want to set up hal0?", "help": "Recommended installs what most people use, with models picked for this box. Minimal installs only the model server; it answers nothing until you add a model. Customize lets you choose each part.",
+     "options": [{"value": "recommended", "label": "Recommended", "help": "web chat, an assistant and memory, with models picked for this box"},
+                 {"value": "minimal", "label": "Minimal", "help": "only the model server; it answers nothing until you add a model"},
+                 {"value": "custom", "label": "Customize", "help": "choose what it does, models, storage and network"}]},
+    {"id": "model_store", "answer_key": "model_store.path", "title": "Where should hal0 keep the models it downloads?", "help": "Models are large files. Pick a disk with plenty of free space."},
+    {"id": "flm_store", "answer_key": "model_store.flm_path", "title": "Where should NPU models be kept?", "help": "Leave it as it is unless you want NPU models on another disk."},
+    {"id": "starter_model", "answer_key": "models.starter", "title": "Which chat model should hal0 download?", "help": "Larger models answer better and take longer to download.",
+     "options": [{"value": "auto", "label": "Picked for this box", "help": "hal0 chooses the largest model this box can run"},
+                 {"value": "none", "label": "No chat model for now", "help": "you can add one later from the dashboard"}]},
+    {"id": "image_model", "answer_key": "gen.models", "title": "Which image model should hal0 download?", "help": "The one that suits this box is marked.",
+     "options": [{"value": "recommended", "label": "The recommended set", "help": "the image models that suit this box"}]},
+    {"id": "hf_token", "answer_key": "huggingface.token_env", "title": "Do you have a HuggingFace token? (optional)", "help": "Only some models need an account to download. Leave it blank to skip; you can add one later."},
+    {"id": "hostname", "answer_key": "network.hostname", "title": "What should this box be called on your network?", "help": "You will open the dashboard at this name."},
+    {"id": "port", "answer_key": "network.port", "title": "Which port should the dashboard use?", "help": "Leave it as it is unless something else already uses this port."},
+    {"id": "allowed_origins", "answer_key": "network.allowed_origins", "title": "Other names the dashboard may be opened by", "help": "Add a name here if you reach this box through a proxy or another hostname."},
+    {"id": "terminal_tool", "answer_key": "apps.hermes.terminal_tool", "title": "Let the assistant run commands on this machine?", "help": "If you turn this on, the assistant can run any command as a user that is equivalent to root on this box. A web page or a stored memory could talk it into running something harmful. There is no sandboxed option. Leave it off unless you want that; you can turn it on later with: hal0 agent install hermes --terminal-tool"},
+    {"id": "memory_model", "answer_key": "models.memory", "title": "Which model should memory use?", "help": "Shared uses the chat model. Memory needs a chat model to work.",
+     "options": [{"value": "shared", "label": "Shared with chat", "help": "memory uses the chat model"}]}
+  ],
+  "components": [
+    {"id": "openwebui", "answer_key": "apps.openwebui.enabled", "on": true, "off": false, "download_gb": null, "needs": ["podman"], "label": "Chat in your browser (Open WebUI)", "help": "A chat page that runs on this box and talks to your local models."},
+    {"id": "hermes", "answer_key": "apps.hermes.enabled", "on": true, "off": false, "download_gb": null, "needs": [], "label": "An assistant that carries out tasks (Hermes)", "help": "An agent that uses your local models to plan and do tasks, with a task board in the dashboard."},
+    {"id": "memory", "answer_key": "memory.enabled", "on": true, "off": false, "download_gb": null, "needs": ["memory_python"], "label": "Memory for your assistants (Hindsight)", "help": "Lets assistants remember things between conversations. It needs a chat model to work."},
+    {"id": "images", "answer_key": "gen.mode", "on": "scaffold_and_download", "off": "off", "download_gb": null, "needs": ["podman"], "label": "Make images (ComfyUI)", "help": "Image generation, with a starter model sized for this box."},
+    {"id": "npu", "answer_key": "npu.opt_in", "on": "auto", "off": false, "download_gb": null, "needs": ["npu_device", "flm_build"], "label": "Use the NPU", "help": "Runs small models on the NPU. It is set up only if it passes its check."}
+  ],
+  "reasons": {
+    "memory_python": "needs Python 3.11 to 3.14, which was not found",
+    "podman": "needs podman, which is not running here",
+    "gpu": "needs a usable graphics card",
+    "npu_device": "no NPU was found",
+    "flm_build": "the NPU runtime has no build for this system"
+  },
+  "presets": {
+    "recommended": {
+      "install.type": "recommended", "model_store.path": "/var/lib/hal0/models",
+      "apps.openwebui.enabled": true, "apps.hermes.enabled": true, "apps.hermes.terminal_tool": false,
+      "memory.enabled": true, "gen.mode": "off", "gen.models": [], "npu.opt_in": "auto",
+      "models.brain": "auto", "models.starter": "auto", "models.memory": "shared",
+      "access.admin_key": "generate", "maintenance.weekly_benchmark": false,
+      "huggingface.token_env": "HF_TOKEN"
+    },
+    "minimal": {
+      "install.type": "minimal", "model_store.path": "/var/lib/hal0/models",
+      "apps.openwebui.enabled": false, "apps.hermes.enabled": false, "apps.hermes.terminal_tool": false,
+      "apps.pi.enabled": false, "memory.enabled": false, "gen.mode": "off", "gen.models": [],
+      "npu.opt_in": false, "models.brain": "none", "models.starter": "none",
+      "access.admin_key": "generate", "maintenance.weekly_benchmark": false,
+      "huggingface.token_env": "HF_TOKEN"
+    }
+  }
+}
