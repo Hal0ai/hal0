@@ -1,4 +1,7 @@
-"""The GPU, type, folder and review screens, and the folder path check."""
+"""The GPU, type, folder and review screens, and the folder path check.
+
+The path check looks at the filesystem; everything else reads only the state.
+"""
 
 from __future__ import annotations
 
@@ -8,7 +11,7 @@ import posixpath
 from collections.abc import Sequence
 from dataclasses import replace
 
-from .document import ADMIN_KEY, Document, Override, get
+from .document import ADMIN_KEY, Document, Override, get, preset
 from .facts import Disk, Facts
 from .flow_model import (
     Outcome,
@@ -28,13 +31,16 @@ from .flow_model import (
     key_of,
     make_row,
     maybe_value,
+    model_requirement,
     pick_model,
     record_answer,
+    set_by,
+    short_on_space,
 )
 
 _DOWNLOAD_MBIT = 100
-_DEFAULT_HOST = "hal0.local"
-_DEFAULT_PORT = 8080
+DEFAULT_HOST = "hal0.local"
+DEFAULT_PORT = 8080
 _NPU_JOB = "npu"
 _NO_DOWNLOADS = "nothing yet; models are added after install"
 _GPU_REASONS = {
@@ -68,7 +74,7 @@ def gpu_rows(s: State) -> tuple[Row, ...]:
             ),
         )
     fixed = fixed_override(s, key_of(s, "cpu_only"))
-    note = "" if fixed is None else f"set by {fixed.source}"
+    note = "" if fixed is None else set_by(fixed)
     state = "open" if fixed is None else "fixed"
     return tuple(
         make_row(str(o.value).lower(), o.label, o.help, "choice", o.value, state, note)
@@ -107,14 +113,14 @@ def facts_lines(f: Facts) -> tuple[str, ...]:
     ]
     if f.gpu_outcome != "usable":
         card = [*card[:1], "not usable"] if card else []
-    podman = {True: "running", False: "not running"}.get(f.podman_runs, "")  # type: ignore[arg-type]
     unknown = "not detected"
+    podman = unknown if f.podman_runs is None else ("running" if f.podman_runs else "not running")
     return (
         "This box:",
         f"  Graphics card: {', '.join(card) or unknown}",
         f"  Memory: {unknown if f.ram_gb is None else fmt_gb(f.ram_gb) + ' GB'}",
         f"  NPU: {'found' if f.npu_device else unknown}",
-        f"  Podman: {podman or unknown}",
+        f"  Podman: {podman}",
     )
 
 
@@ -131,7 +137,7 @@ def type_rows(s: State) -> tuple[Row, ...]:
             "choice",
             o.value,
             state,
-            f"set by {fixed.source}" if fixed is not None and o.value == current else "",
+            set_by(fixed) if fixed is not None and o.value == current else "",
         )
         for o in q.options
     )
@@ -150,7 +156,7 @@ def type_enter(s: State) -> State:
 # --------------------------------------------------------- FOLDER screen
 
 
-def _disk_of(path: str, disks: Sequence[Disk]) -> Disk | None:
+def disk_of(path: str, disks: Sequence[Disk]) -> Disk | None:
     owners = [d for d in disks if path == d.mount or path.startswith(d.mount.rstrip("/") + "/")]
     return max(owners, key=lambda d: len(d.mount), default=None)
 
@@ -160,8 +166,8 @@ def _disk_row(
 ) -> Row:
     note = ""
     if fixed is not None:
-        note = f"set by {fixed.source}"
-    elif disk is not None and total is not None and disk.free_gb < total:
+        note = set_by(fixed)
+    elif total is not None and short_on_space(disk, total):
         note = f"less than the {fmt_gb(total)} GB this setup downloads"
     detail = "" if disk is None else f"{fmt_gb(disk.free_gb)} GB free"
     return make_row(id, path, detail, "choice", path, "open" if fixed is None else "fixed", note)
@@ -173,11 +179,19 @@ def folder_rows(s: State) -> tuple[Row, ...]:
     current = get(effective_doc(s), key)
     path = current if isinstance(current, str) else ""
     total = download_total(s)
-    here = _disk_of(path, s.facts.disks) if path else None
+    here = disk_of(path, s.facts.disks) if path else None
     rows = [_disk_row("current", path, here, total, fixed)] if path else []
     if fixed is not None:
         return tuple(rows)
-    others = sorted((d for d in s.facts.disks if d != here), key=lambda d: d.free_gb, reverse=True)
+    shown: list[Disk | None] = [here] if path else []
+    default = get(preset(s.catalog, current_type(s)), key)
+    if isinstance(default, str) and default != path:
+        home = disk_of(default, s.facts.disks)
+        rows.append(_disk_row("preset", default, home, total, None))
+        shown.append(home)
+    others = sorted(
+        (d for d in s.facts.disks if d not in shown), key=lambda d: d.free_gb, reverse=True
+    )
     for d in others:
         rows.append(_disk_row(d.mount, posixpath.join(d.mount, "hal0/models"), d, total, None))
     rows.append(make_row("other", "Type another folder...", path, "text", None))
@@ -272,13 +286,13 @@ def _folder_text(s: State, doc: Document) -> str:
     path = get(doc, key_of(s, "model_store"))
     if not isinstance(path, str):
         return "unchanged"
-    disk = _disk_of(path, s.facts.disks)
+    disk = disk_of(path, s.facts.disks)
     return path if disk is None else f"{path} ({fmt_gb(disk.free_gb)} GB free)"
 
 
 def _access_rows(s: State, doc: Document) -> list[Row]:
-    host = maybe_value(s, doc, "hostname") or _DEFAULT_HOST
-    port = maybe_value(s, doc, "port") or _DEFAULT_PORT
+    host = maybe_value(s, doc, "hostname") or DEFAULT_HOST
+    port = maybe_value(s, doc, "port") or DEFAULT_PORT
     local = maybe_value(s, doc, "bind_host") == "127.0.0.1"
     reach = (
         f"http://127.0.0.1:{port} from this machine only"
@@ -313,9 +327,17 @@ def _warnings(s: State, doc: Document) -> list[str]:
     if s.facts.gpu_outcome != "usable" and get(doc, key_of(s, "cpu_only")) is True:
         out.append("No graphics card will be used. " + s.catalog.questions["cpu_only"].help)
     path = get(doc, key_of(s, "model_store"))
-    disk = _disk_of(path, s.facts.disks) if isinstance(path, str) else None
+    disk = disk_of(path, s.facts.disks) if isinstance(path, str) else None
+    starter = maybe_value(s, doc, "starter_model")
+    picked = next(
+        (r for r in s.catalog.model_ladder if r.role == "starter" and r.model == starter), None
+    )
+    if picked is not None:
+        note = model_requirement(picked, s.facts)[1]
+        if note:
+            out.append(f"{picked.model}: {note}")
     total = download_total(s)
-    if disk is not None and total is not None and disk.free_gb < total:
+    if total is not None and short_on_space(disk, total):
         out.append(f"The model folder has less than the {fmt_gb(total)} GB this setup downloads.")
     return out
 

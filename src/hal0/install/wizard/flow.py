@@ -1,8 +1,9 @@
-"""The setup screens as a state machine. Pure: no input or output.
+"""The setup screens as a state machine. No terminal input or output.
 
 `press` takes a state and a key and returns a new state; `view` describes what
 to draw. Each screen has one small function that builds its rows and one that
-handles Enter, collected in `_SCREENS`, so a new screen is one new entry.
+handles Enter, collected in `_SCREENS`, so a new screen is one new entry. The
+only outside read is the folder check, which looks at the filesystem.
 """
 
 from __future__ import annotations
@@ -34,6 +35,22 @@ from .flow_basic import (
     type_rows,
     validate_folder,
 )
+from .flow_custom import (
+    accept,
+    assistant_rows,
+    commit_field,
+    commit_token,
+    jobs_rows,
+    jobs_space,
+    models_cursor,
+    models_enter,
+    models_question,
+    models_rows,
+    models_title,
+    network_rows,
+    space_field,
+    storage_rows,
+)
 from .flow_model import (
     Outcome,
     Row,
@@ -44,6 +61,7 @@ from .flow_model import (
     fixed_override,
     gpu_consent,
     key_of,
+    row_help,
 )
 
 __all__ = [
@@ -62,8 +80,16 @@ __all__ = [
     "view",
 ]
 
-_HINT = "Up/Down move, Enter choose, b back, q quit, ? help"
-_HINT_FIELD = "Type, Backspace deletes, Enter confirms, Enter on an empty field cancels"
+_HINT_CHOICE = "Up/Down move, Enter choose, b back, ? explain, q quit"
+_HINT_ROWS = "Up/Down move, Space change, Enter go on, b back, ? explain, q quit"
+_HINT_REVIEW = "Enter start the install, b back, s save a copy, q quit"
+_HINT_STOP = "Enter or q to leave"
+_HINT_FIELD = "Enter confirm, Enter on an empty line cancels"
+_HINT_TOKEN = (
+    "Type or paste the token (nothing is shown), Enter confirm, Enter on an empty line skips"
+)
+_CUSTOM = (Screen.JOBS, Screen.MODELS, Screen.STORAGE, Screen.NETWORK, Screen.ASSISTANT)
+_CHOICE_SCREENS = (Screen.GPU, Screen.TYPE, Screen.FOLDER, Screen.MODELS)
 
 
 # ---------------------------------------------------------------- wiring
@@ -75,22 +101,35 @@ class _Spec(NamedTuple):
     rows: Callable[[State], tuple[Row, ...]]
     cursor: Callable[[State], int]
     enter: Callable[[State], State]
-    question: str
+    question: Callable[[State], str]
+    space: Callable[[State], State] = lambda s: s
 
 
 def _no_cursor(s: State) -> int:
     return 0
 
 
+def _gpu_question(s: State) -> str:
+    return "cpu_only" if gpu_consent(s) else ""
+
+
+def _fields_screen(
+    title: str, rows: Callable[[State], tuple[Row, ...]], cursor: Callable[[State], int]
+) -> _Spec:
+    return _Spec(
+        lambda s: title, lambda s: (), rows, cursor, accept, lambda s: "", space_field(rows)
+    )
+
+
 _SCREENS: dict[Screen, _Spec] = {
-    Screen.GPU: _Spec(gpu_title, gpu_intro, gpu_rows, gpu_cursor, gpu_enter, "cpu_only"),
+    Screen.GPU: _Spec(gpu_title, gpu_intro, gpu_rows, gpu_cursor, gpu_enter, _gpu_question),
     Screen.TYPE: _Spec(
         lambda s: s.catalog.questions["setup_type"].title,
         lambda s: facts_lines(s.facts),
         type_rows,
         type_cursor,
         type_enter,
-        "setup_type",
+        lambda s: "setup_type",
     ),
     Screen.FOLDER: _Spec(
         lambda s: s.catalog.questions["model_store"].title,
@@ -98,7 +137,7 @@ _SCREENS: dict[Screen, _Spec] = {
         folder_rows,
         _no_cursor,
         folder_enter,
-        "model_store",
+        lambda s: "model_store",
     ),
     Screen.REVIEW: _Spec(
         lambda s: "Ready to install",
@@ -106,17 +145,35 @@ _SCREENS: dict[Screen, _Spec] = {
         review_rows,
         _no_cursor,
         review_enter,
-        "",
+        lambda s: "",
     ),
+    Screen.JOBS: _Spec(
+        lambda s: "What this box does",
+        lambda s: (),
+        jobs_rows,
+        _no_cursor,
+        accept,
+        lambda s: "",
+        jobs_space,
+    ),
+    Screen.MODELS: _Spec(
+        models_title, lambda s: (), models_rows, models_cursor, models_enter, models_question
+    ),
+    Screen.STORAGE: _fields_screen("Storage", storage_rows, _no_cursor),
+    Screen.NETWORK: _fields_screen("Network and access", network_rows, _no_cursor),
+    Screen.ASSISTANT: _fields_screen("Assistant and memory", assistant_rows, _no_cursor),
 }
-_FIELDS: dict[str, Callable[[State, str], State]] = {"folder": commit_folder, "save": commit_save}
+_FIELDS: dict[str, Callable[[State, str], State]] = {
+    "folder": commit_folder,
+    "save": commit_save,
+    "token": commit_token,
+}
 
 
 def sequence(install_type: str, facts: Facts) -> tuple[Screen, ...]:
     """The screens for an install type, in order."""
-    # Customize has no screens of its own yet: it goes straight to the review.
     body = (
-        (Screen.TYPE, Screen.REVIEW)
+        (Screen.TYPE, *_CUSTOM, Screen.REVIEW)
         if install_type == "custom"
         else (Screen.TYPE, Screen.FOLDER, Screen.REVIEW)
     )
@@ -132,7 +189,7 @@ def _screens(s: State) -> tuple[Screen, ...]:
 
 
 def _enter(s: State, screen: Screen) -> State:
-    moved = replace(s, screen=screen, editing=None, field="", error=None)
+    moved = replace(s, screen=screen, editing=None, field="", error=None, step=0)
     return replace(moved, cursor=_SCREENS[screen].cursor(moved))
 
 
@@ -163,9 +220,9 @@ def start(
 def _edit(s: State, key: str) -> State:
     text = s.editing or ""
     if key == "ENTER":
-        if not text:
+        if not text and s.field != "token":
             return replace(s, editing=None, field="", error=None)
-        return _FIELDS[s.field](s, text)
+        return _FIELDS.get(s.field, commit_field)(s, text)
     if key == "BACKSPACE":
         return replace(s, editing=text[:-1], error=None)
     if key == "SPACE":
@@ -199,35 +256,63 @@ def press(state: State, key: str) -> State:
         return _back(s)
     if key == "s" and s.screen is Screen.REVIEW:
         return replace(s, editing="", field="save")
+    if key == "SPACE":
+        return _SCREENS[s.screen].space(s)
     if key in ("UP", "DOWN"):
-        last = len(_SCREENS[s.screen].rows(s)) - 1
+        rows = _SCREENS[s.screen].rows(s)
+        if all(r.kind == "choice" and r.state == "fixed" for r in rows):
+            return s
+        last = len(rows) - 1
         return replace(s, cursor=min(last, max(0, s.cursor + (1 if key == "DOWN" else -1))))
     if key == "ENTER":
         return _settle(_SCREENS[s.screen].enter(s))
     return s
 
 
+def _position(state: State) -> str:
+    screens = tuple(x for x in _screens(state) if x is not Screen.GPU)
+    if state.screen is Screen.GPU:
+        return ""
+    custom = tuple(x for x in screens if x in _CUSTOM)
+    if custom and state.screen is Screen.REVIEW:
+        return "Review"
+    if custom and state.screen in custom:
+        return f"Customize {custom.index(state.screen) + 1} of {len(custom)}"
+    return f"{screens.index(state.screen) + 1} of {3 if custom else len(screens)}"
+
+
+def _hint(state: State) -> str:
+    if state.editing is not None:
+        return _HINT_TOKEN if state.field == "token" else _HINT_FIELD
+    if state.screen is Screen.REVIEW:
+        return _HINT_REVIEW
+    if state.screen is Screen.GPU and not gpu_consent(state):
+        return _HINT_STOP
+    hint = _HINT_CHOICE if state.screen in _CHOICE_SCREENS else _HINT_ROWS
+    return hint.replace("b back, ", "") if state.screen is _screens(state)[0] else hint
+
+
 def view(state: State) -> View:
     """What to draw for this state."""
     spec = _SCREENS[state.screen]
     intro = spec.intro(state)
-    question = state.catalog.questions.get(spec.question)
-    if state.show_help and question is not None and question.help:
-        intro = (*intro, question.help)
-    screens = tuple(x for x in _screens(state) if x is not Screen.GPU)
-    position = (
-        "" if state.screen is Screen.GPU else f"{screens.index(state.screen) + 1} of {len(screens)}"
-    )
+    rows = spec.rows(state)
+    if state.show_help:
+        row = rows[state.cursor] if state.cursor < len(rows) else None
+        text = row_help(state, row, spec.question(state))
+        if text:
+            intro = (*intro, text)
+    secret_field = state.editing is not None and state.field == "token"
     return View(
         state.screen,
         spec.title(state),
-        position,
+        _position(state),
         intro,
-        spec.rows(state),
+        rows,
         state.cursor,
-        state.editing,
+        "" if secret_field else state.editing,
         state.error,
-        _HINT_FIELD if state.editing is not None else _HINT,
+        _hint(state),
     )
 
 

@@ -173,7 +173,7 @@ def test_a_fixed_type_row_is_kept_and_enter_goes_on(catalog: Catalog, usable_fac
     over = [Override("install.type", "minimal", "--bare")]
     s = start(catalog, usable_facts, over=over)
     assert view(s).rows[view(s).cursor].value == "minimal"
-    assert press(s, "ENTER") is not s
+    assert view(press(s, "ENTER")).screen is Screen.FOLDER
     assert "install.type" not in chosen(press(s, "ENTER"))
 
 
@@ -307,3 +307,34 @@ def test_a_space_typed_into_a_folder_field_is_kept(catalog: Catalog, two_disk_fa
     s = run(s, *"/mnt/my", "SPACE", *"models", "ENTER")
     assert view(s).screen is Screen.REVIEW
     assert chosen(s)["model_store.path"] == "/mnt/my models"
+
+
+def test_up_and_down_stay_on_a_fixed_value(catalog: Catalog, usable_facts: Facts) -> None:
+    over = [Override("install.type", "minimal", "--bare")]
+    s = start(catalog, usable_facts, over=over)
+    assert view(run(s, "DOWN", "DOWN")).cursor == view(s).cursor
+    assert view(run(s, "UP")).cursor == view(s).cursor
+
+
+def test_hints_are_per_screen(catalog: Catalog, usable_facts: Facts, stop_facts: Facts) -> None:
+    s = start(catalog, usable_facts)
+    assert view(s).hint == "Up/Down move, Enter choose, ? explain, q quit"
+    assert view(press(s, "ENTER")).hint == "Up/Down move, Enter choose, b back, ? explain, q quit"
+    review = run(s, "ENTER", "ENTER")
+    assert view(review).hint == "Enter start the install, b back, s save a copy, q quit"
+    assert view(press(review, "s")).hint == "Enter confirm, Enter on an empty line cancels"
+    assert view(start(catalog, stop_facts)).hint == "Enter or q to leave"
+
+
+def test_help_on_the_gpu_stop_screen_offers_nothing(catalog: Catalog, stop_facts: Facts) -> None:
+    s = start(catalog, stop_facts)
+    assert view(press(s, "?")).intro == view(s).intro
+
+
+def test_the_preset_folder_stays_in_the_list_after_picking_another_disk(
+    catalog: Catalog, two_disk_facts: Facts
+) -> None:
+    s = run(start(catalog, two_disk_facts), "ENTER", "DOWN", "ENTER", "b")
+    values = [r.value for r in view(s).rows]
+    assert values[0] == "/data/hal0/models"
+    assert "/var/lib/hal0/models" in values

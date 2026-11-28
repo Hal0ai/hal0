@@ -1,14 +1,15 @@
-"""State, views and the values every setup screen shares. Pure: no input or output."""
+"""State, views and the values every setup screen shares. Reads nothing outside the state."""
 
 from __future__ import annotations
 
+import dataclasses
 from dataclasses import dataclass, replace
 from enum import StrEnum
 from typing import NamedTuple
 
 from .catalog import Catalog, Component, ModelRow
 from .document import Document, Override, effective, get
-from .facts import Facts, satisfied
+from .facts import Disk, Facts, satisfied
 
 
 class Screen(StrEnum):
@@ -64,13 +65,14 @@ class State:
     answers: dict[str, object]
     screen: Screen
     cursor: int = 0
-    editing: str | None = None
+    editing: str | None = dataclasses.field(default=None, repr=False)
     field: str = ""
     error: str | None = None
     show_help: bool = False
     status: Outcome = Outcome.RUNNING
-    token: str | None = None
+    token: str | None = dataclasses.field(default=None, repr=False)
     proceed: bool = False
+    step: int = 0
 
 
 SIZED_MODEL = "a chat model sized for this box"
@@ -90,6 +92,16 @@ def make_row(
 
 def fmt_gb(value: float) -> str:
     return f"{value:.0f}" if float(value).is_integer() else f"{value:.1f}"
+
+
+def set_by(fixed: Override) -> str:
+    """The note on a row whose key a flag or variable sets."""
+    return f"set by {fixed.source}"
+
+
+def short_on_space(disk: Disk | None, total: float | None) -> bool:
+    """Whether a disk is known to have less free space than the download."""
+    return disk is not None and total is not None and disk.free_gb < total
 
 
 # ---------------------------------------------------------------- values
@@ -126,6 +138,19 @@ def record_answer(s: State, key: str, value: object) -> State:
     if fixed_override(s, key) is not None:
         return s
     return replace(s, answers={**s.answers, key: value})
+
+
+def row_help(s: State, row: Row | None, question: str) -> str:
+    """The help of a highlighted job or field, else the help of the screen's question."""
+    if row is not None and row.kind in ("check", "text"):
+        q = s.catalog.questions.get(row.id)
+        if q is not None:
+            return q.help
+        c = next((c for c in s.catalog.components if c.id == row.id), None)
+        if c is not None:
+            return c.help
+    q = s.catalog.questions.get(question)
+    return "" if q is None else q.help
 
 
 def current_type(s: State) -> str:
@@ -166,6 +191,24 @@ def pick_model(s: State, doc: Document) -> Pick | None:
     if named is None:
         return Pick(str(starter), None, False)
     return Pick(named.label, named.download_gb, False)
+
+
+def model_requirement(row: ModelRow, facts: Facts) -> tuple[str, str]:
+    """Whether a model row can be picked here (`open` or `unavailable`) and why not."""
+    checks = (
+        ("GPU memory", row.min_gpu_pool_gb, facts.gpu_pool_gb),
+        ("memory", row.min_ram_gb, facts.ram_gb),
+    )
+    unchecked = ""
+    for what, need, have in checks:
+        if need is None:
+            continue
+        text = f"needs {fmt_gb(need)} GB of {what}"
+        if have is None:
+            unchecked = unchecked or f"{text}; could not be checked on this box"
+        elif have < need:
+            return "unavailable", f"{text}; this box has {fmt_gb(have)}"
+    return "open", unchecked
 
 
 def jobs_wanted(s: State, doc: Document) -> list[Component]:

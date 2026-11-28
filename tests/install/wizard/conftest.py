@@ -85,3 +85,28 @@ def stop_facts() -> Facts:
 @pytest.fixture
 def no_python_facts(usable_facts: Facts) -> Facts:
     return replace(usable_facts, memory_python=False)
+
+
+@pytest.fixture
+def npu_facts(usable_facts: Facts) -> Facts:
+    return replace(usable_facts, npu_device=True, npu_flm_build=True)
+
+
+@pytest.fixture
+def lxc_unprivileged_no_npu_facts(usable_facts: Facts) -> Facts:
+    return replace(usable_facts, container="lxc-unprivileged", npu_device=False)
+
+
+@pytest.fixture
+def small_pool_facts(usable_facts: Facts) -> Facts:
+    return replace(usable_facts, gpu_pool_gb=8.0)
+
+
+@pytest.fixture
+def big_pool_facts(usable_facts: Facts) -> Facts:
+    return replace(usable_facts, gpu_pool_gb=96.0)
+
+
+@pytest.fixture
+def unknown_pool_facts(usable_facts: Facts) -> Facts:
+    return replace(usable_facts, gpu_pool_gb=None)
