@@ -197,6 +197,7 @@ class Box:
             f"UNIT_DIR={self.unit_dir}\nVENV_DIR={venv}\n"
             "BENCH_STATE_DIR=/var/lib/hal0-bench\nPY=python3\n"
             f"HAL0_BIN={self.bin / 'hal0'}\nAGENT_UNIT_DST={self.agent_unit}\n"
+            f"source {REPO / 'installer' / 'lib' / 'facts.sh'}\n"
         )
         script = prelude + HELPERS + body.replace(VENV, str(self.venv))
         env = {
@@ -208,8 +209,10 @@ class Box:
             "VENV": str(self.venv),
             "HERMES_STUB": str(self.bin / "hermes"),
             "NORMALISE_RC": str(normalise_rc),
+            "HAL0_FACTS_AGENTS_DIR": str(self.tmp / "agents"),
         }
         env.pop("HAL0_SKIP_HERMES", None)
+        env.pop("HAL0_HERMES_STOP", None)
         return subprocess.run(
             ["bash", "-euo", "pipefail", "-c", script],
             env=env,
