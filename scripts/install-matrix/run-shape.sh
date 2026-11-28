@@ -23,7 +23,11 @@
 # shellcheck disable=SC2329  # trap handlers, background jobs and the dry-run ssh shadow
 set -euo pipefail
 umask 077
-exec 7>&2 # the run's own stderr, for messages written from a trap while a call has redirected fd 2
+# The run's own stdout and stderr, saved now. A trap (the watchdog's abort, a
+# signal, the EXIT cleanup) can fire while a call has redirected fd 1 or 2 for
+# itself (collect.err, /dev/null, post.txt); it restores these first, so that what
+# cleanup says, LEFT BEHIND above all, always reaches the person running this.
+exec 6>&1 7>&2
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "${HERE}/../.." && pwd)"
@@ -388,7 +392,7 @@ snap_tree() {
 watchdog() {
   local parent="$1" me="$BASHPID" n bad=0 reason="" detail="" c i e
   local -a seen=()
-  exec 8>&- >/dev/null
+  exec 6>&- 8>&- >/dev/null
   while :; do
     for ((i = 0; i < WATCH_EVERY; i++)); do
       sleep 1
@@ -396,7 +400,7 @@ watchdog() {
         for e in ${seen[@]+"${seen[@]}"}; do
           [[ "$(stat_field "${e%%:*}" 19)" != "${e#*:}" ]] || kill_tree "${e%%:*}"
         done
-        log "the run that started this watchdog is gone; container ${VMID} may still exist: $(destroy_hint)" >&7
+        log "the run that started this watchdog is gone; container ${VMID} may still exist: $(destroy_hint)" 2>&7
         exit 0
       fi
       mapfile -t seen < <(snap_tree "$parent" "$me")
@@ -451,15 +455,17 @@ load_verdict() {
 }
 
 on_watchdog() {
+  exec 1>&6 2>&7
   trap '' USR1
   load_verdict || { ABORT_REASON="host_memory_low"; ABORT_DETAIL="the host check failed"; }
-  log "aborting: ${ABORT_DETAIL}" >&7
+  log "aborting: ${ABORT_DETAIL}"
   exit 1
 }
 
 # ── cleanup: runs once, on EXIT and (via on_signal) on INT, TERM and HUP ─────
 cleanup() {
   local rc=$? state="absent" foreign=0
+  exec 1>&6 2>&7
   trap '' INT TERM HUP USR1
   trap - EXIT
   set +e +u
@@ -531,6 +537,7 @@ cleanup() {
 }
 
 on_signal() {
+  exec 1>&6 2>&7
   # A second signal must not cut the cleanup short: ignore them from here on.
   trap '' INT TERM HUP USR1
   INTERRUPTED="$1"

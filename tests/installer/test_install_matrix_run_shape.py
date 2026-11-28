@@ -56,6 +56,8 @@ case "$cmd" in
     if [[ -n "${FAKE_MEM_FAIL_AFTER:-}" && "$n" -gt "$FAKE_MEM_FAIL_AFTER" ]]; then exit 255; fi
     [[ "${FAKE_MEM_FAIL_ON:-0}" != "$n" ]] || exit 255
     mem="${FAKE_MEM:-100}"
+    # FAKE_SUM_SLEEP: memory is low from the moment the summary pull starts.
+    [[ -z "${FAKE_SUM_SLEEP:-}" || ! -e "$FAKE_STATE/sum-started" ]] || mem=5
     if [[ -n "${FAKE_MEM_AFTER:-}" && "$n" -gt 1 ]]; then
       mem="$FAKE_MEM_AFTER"
       [[ -e "$FAKE_STATE/low-read-at" ]] || date +%s.%N > "$FAKE_STATE/low-read-at"
@@ -99,7 +101,13 @@ case "$cmd" in
     # The description this run asked for, as `pct config` would show it.
     d="${cmd#*--description }"; d="${d%% --*}"; d="${d//\\/}"
     [[ "$cmd" == *"--description "* ]] && printf '%s' "$d" > "$FAKE_STATE/description"
-    touch "$FAKE_STATE/present"; exit 0 ;;
+    # FAKE_DESC_ODD: the description reads back in a form the harness does not
+    # know (its second line is the bare nonce). FAKE_CREATE_RC: the create made
+    # the guest but its ssh call returned this status.
+    [[ -z "${FAKE_DESC_ODD:-}" ]] || printf 'hal0-matrix run\n%s' "${d##* }" > "$FAKE_STATE/description"
+    touch "$FAKE_STATE/present"
+    [[ -z "${FAKE_CREATE_RC:-}" ]] || exit "$FAKE_CREATE_RC"
+    exit 0 ;;
   *"pgrep -f"*)
     # FAKE_PGREP_BUSY_READS=N: the first N reads say a pct create is running.
     n=$(cat "$FAKE_STATE/pgrep-reads" 2>/dev/null || echo 0); n=$((n + 1))
@@ -138,6 +146,8 @@ case "$plain" in
     echo "the install log"; exit 0 ;;
   *"cat /tmp/hal0-install-report-1.txt"*) echo "the failure report"; exit 0 ;;
   *"cat /root/hal0-summary.json"*)
+    touch "$FAKE_STATE/sum-started"
+    [[ -z "${FAKE_SUM_SLEEP:-}" ]] || exec sleep "$FAKE_SUM_SLEEP"
     echo '{"hal0_version": "9.9.9", "elapsed_seconds": 7, "step_durations_seconds": {"Pre-flight checks": 2}, "warnings": 0, "errors": 0}'
     exit 0 ;;
   *"hal0 uninstall"*) exit 0 ;;
@@ -334,6 +344,64 @@ def test_a_low_reading_stops_the_host_call_in_progress_at_once(host):
     )
     assert json.loads((host.out / "result.json").read_text())["aborted"] == "host_memory_low"
     assert not (host.state / "present").exists()
+
+
+def _run_within(host, seconds, *args, **env):
+    """run-shape.sh in its own session, killed by group in a finally; returns
+    (status, stdout, stderr)."""
+    proc = subprocess.Popen(
+        ["bash", str(RUN_SHAPE), *args],
+        env=host.env(**env),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+    )
+    try:
+        out, err = proc.communicate(timeout=seconds)
+    finally:
+        kill_group(proc)
+    return proc.returncode, out, err
+
+
+def _assert_cleanup_reached_the_runs_stderr(host, rc, out, err):
+    assert rc == 1, err
+    assert "aborting: host memory fell below 12 GB (5 GB available)" in err
+    assert "LEFT BEHIND: 172 (destroy it with: ssh testpve pct destroy 172 --force --purge)" in err
+    line = "container 172 exists; if this run dies, destroy it with: ssh testpve pct destroy 172"
+    assert err.count(line) >= 2, "once after the create, once at the start of cleanup"
+    note = (host.out / "run.txt").read_text().splitlines()
+    assert "left_behind=172" in note
+    assert "aborted=host_memory_low" in note
+    ce = host.out / "collect.err"
+    text = ce.read_text(errors="replace") if ce.exists() else ""
+    assert "LEFT BEHIND" not in text and "aborting:" not in text, "cleanup wrote into collect.err"
+    assert out == "", "cleanup's messages stay off stdout, which carries only the result path"
+
+
+def test_an_abort_during_the_probe_reports_left_behind_on_the_runs_stderr(host):
+    """M1: the probe call redirects stderr to collect.err. Cleanup, started by
+    the abort while that call runs, must still write to the run's own stderr."""
+    rc, out, err = _run_within(
+        host, 60, "u2604-cpu-unattended", "--vmid", "172", "--out", str(host.out),
+        **_watch_env(
+            HAL0_MATRIX_WATCH_SECONDS="2", FAKE_MEM_AFTER="5", FAKE_PROBE_SLEEP="8",
+            FAKE_DESTROY_FAILS="1",
+        ),
+    )  # fmt: skip
+    _assert_cleanup_reached_the_runs_stderr(host, rc, out, err)
+
+
+def test_an_abort_during_a_pull_reports_left_behind_on_the_runs_stderr(host):
+    """M1: the pulls redirect stderr to /dev/null; the abort's messages and
+    LEFT BEHIND must not go there."""
+    rc, out, err = _run_within(
+        host, 60, "u2604-cpu-unattended", "--vmid", "172", "--out", str(host.out),
+        **_watch_env(
+            HAL0_MATRIX_WATCH_SECONDS="2", FAKE_SUM_SLEEP="8", FAKE_DESTROY_FAILS="1",
+        ),
+    )  # fmt: skip
+    _assert_cleanup_reached_the_runs_stderr(host, rc, out, err)
 
 
 @pytest.mark.parametrize(
