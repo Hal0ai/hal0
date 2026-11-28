@@ -38,7 +38,14 @@ from hal0.system.seam import hal0_service_home, running_hal0_bin
 if TYPE_CHECKING:
     from pathlib import Path
 
-app = typer.Typer(help="Manage bundled agents (Phase 8 — Hermes-Agent).")
+app = typer.Typer(
+    help=(
+        "Manage bundled agents (Phase 8 — Hermes-Agent). "
+        "If the assistant was stopped from the setup screens, start it again by turning it on "
+        "there, or with `systemctl enable --now hal0-agent@hermes` "
+        "(and `hermes-gateway` if you use the messaging bridge)."
+    )
+)
 console = Console()
 
 # Approvals lives as a sub-sub-app so ``hal0 agent approvals list``
