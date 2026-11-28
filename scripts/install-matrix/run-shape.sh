@@ -840,8 +840,11 @@ create_rcfile="$(mktemp "${ART}/create-rc.XXXXXX")"
 (
   trap '' INT TERM HUP
   rc=0
+  # What pct create prints on its standard output (unpacking, host key
+  # fingerprints) goes to create.log in the run folder: this script's standard
+  # output carries the path of result.json and nothing else.
   ct_create "$VMID" "$VOLID" "$SHAPE_UNPRIVILEGED" "$SHAPE_CORES" "$SHAPE_MEMORY_MB" "$SHAPE_DISK_GB" \
-    ${DEVS[@]+"${DEVS[@]}"} || rc=$?
+    ${DEVS[@]+"${DEVS[@]}"} >"${ART}/create.log" || rc=$?
   printf '%s' "$rc" >"$create_rcfile"
 ) &
 create_pid=$!
@@ -865,7 +868,7 @@ if [[ "$create_rc" != "0" ]]; then
   else
     create_detail="pct create failed (exit ${create_rc})"
   fi
-  end_run create_failed "$create_detail" "could not create container ${VMID}"
+  end_run create_failed "$create_detail" "could not create container ${VMID}; pct's output is in ${ART}/create.log"
 fi
 announce_container
 [[ "$DRY_RUN" == "1" ]] || start_watchdog

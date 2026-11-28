@@ -104,6 +104,9 @@ case "$cmd" in
     [[ ! -s "$FAKE_STATE/description" ]] || desc_line
     exit 0 ;;
   "pct create "*)
+    # What a real pct create prints on its standard output (the unpacking, the
+    # host key fingerprints); FAKE_CREATE_NOISE stands for it.
+    [[ -z "${FAKE_CREATE_NOISE:-}" ]] || printf '%s\n' "$FAKE_CREATE_NOISE"
     [[ -z "${FAKE_CREATE_FAILS:-}" ]] || exit 1
     touch "$FAKE_STATE/create-started"
     [[ -z "${FAKE_CREATE_SLEEP:-}" ]] || sleep "$FAKE_CREATE_SLEEP"
@@ -493,6 +496,37 @@ def test_a_run_that_copied_the_collector_in_still_collects_after_a_failed_instal
     )
     assert "collection skipped" not in r.stderr
     assert any("collect.sh\\ post" in c for c in host.calls())
+
+
+NOISE = "extracting archive 'template.tar.zst'\nCreating SSH host key 'ssh_host_ed25519_key'"
+
+
+def test_standard_output_carries_only_the_result_path_and_the_create_output_is_kept(host):
+    r = host.run(
+        "u2604-cpu-unattended", "--vmid", "172", "--out", str(host.out), FAKE_CREATE_NOISE=NOISE
+    )
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.splitlines() == [str(host.out / "result.json")]
+    log = (host.out / "create.log").read_text()
+    assert "extracting archive" in log and "Creating SSH host key" in log
+    assert "extracting archive" not in r.stderr
+
+
+def test_a_failed_create_says_where_its_output_is(host):
+    r = host.run(
+        "u2604-cpu-unattended", "--vmid", "172", "--out", str(host.out),
+        FAKE_CREATE_NOISE=NOISE, FAKE_CREATE_FAILS="1",
+    )  # fmt: skip
+    assert r.returncode == 1
+    assert r.stdout == ""
+    assert f"could not create container 172; pct's output is in {host.out}/create.log" in r.stderr
+    assert "extracting archive" in (host.out / "create.log").read_text()
+
+
+def test_the_dry_run_creates_no_create_log(host):
+    r = host.dry("u2604-cpu-unattended")
+    assert r.returncode == 0, r.stderr
+    assert not host.out.exists()
 
 
 def test_the_tree_push_and_unpack_failures_record_their_reasons(host, tmp_path):
