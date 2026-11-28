@@ -238,6 +238,7 @@ preflight_gpu() {{ echo gpu >> "$LOG"; return 0; }}
 hal0_facts_gather() {{ echo gather >> "$LOG"; }}
 hal0_facts_write() {{ echo write >> "$LOG"; }}
 resolve_main_python() {{ echo "resolve autoinstall=${{HAL0_PY_AUTOINSTALL:-}}" >> "$LOG"; echo python3.12; }}
+python3.12() {{ :; }}  # the function under test accepts a name only if `command -v` finds it; a function does, so the box's own interpreters do not matter
 hal0_collect_answers() {{ echo seam >> "$LOG"; }}
 hal0_wizard_present() {{ return 1; }}
 hal0_answers_python() {{ return 1; }}
