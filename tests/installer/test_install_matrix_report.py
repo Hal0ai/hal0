@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
+
+import pytest
 
 REPO = Path(__file__).resolve().parents[2]
 REPORT = REPO / "scripts" / "install-matrix" / "report.py"
@@ -222,6 +225,89 @@ def test_a_result_over_the_cap_is_skipped_with_one_line_on_stderr(tmp_path):
     assert proc.returncode == 0
     assert len(table_rows(proc.stdout)) == 1
     assert proc.stderr.count("\n") == 1 and "big" in proc.stderr
+
+
+# --- F7: what a guest wrote never reaches the terminal or the Markdown raw ---
+
+# OSC 52 (a clipboard write), a bare CR, a CSI introducer (C1), a Markdown link, HTML,
+# emphasis, a code span, a table pipe, a right-to-left override.
+HOSTILE = (
+    "\x1b]52;c;ZXZpbA==\x07hi\rEVIL \x9b31m [click](http://evil.example) <img src=x onerror=1> "
+    "*bold* _it_ `code` a|b ‮txt\x7f"
+)
+
+
+def _is_clean(out: str) -> None:
+    assert not [c for c in out if (ord(c) < 0x20 and c != "\n") or 0x7F <= ord(c) <= 0x9F]
+    assert "‮" not in out
+    assert not re.search(r"(?<!\\)<img", out), "no HTML"
+    assert not re.search(r"(?<!\\)\]\(", out), "no link"
+    assert not re.search(r"(?<!\\)`", out), "no code span"
+    assert not re.search(r"(?<!\\)\*", out), "no emphasis"
+    # every * _ [ ] < > | that the guest sent is escaped, so none stands bare
+    # (the report's own table pipes and separators are the only bare pipes)
+    assert not re.search(r"(?<!\\)<", out)
+    assert not re.search(r"(?<!\\)\[", out)
+
+
+def _out(tmp_path, **over):
+    put(tmp_path, "x", make_result("u2604-gpu", "2026-11-28T11:00:00Z", **over))
+    proc = run(tmp_path)
+    assert proc.returncode == 0, proc.stderr
+    return proc.stdout
+
+
+def test_the_reviewers_probe_p4_is_neutralised(tmp_path):
+    out = _out(tmp_path, hal0_version=HOSTILE)
+    _is_clean(out)
+    assert "ZXZpbA" in out or "hi" in out  # the text itself is kept, only made harmless
+
+
+@pytest.mark.parametrize(
+    "field",
+    ["source", "last_step", "started_at", "install_exit_code", "slot_count", "questions_asked"],
+)
+def test_every_plain_field_is_neutralised(tmp_path, field):
+    out = _out(tmp_path, **{"install_exit_code": 1, field: HOSTILE})
+    _is_clean(out)
+
+
+def test_step_names_failed_units_and_models_are_neutralised(tmp_path):
+    out = _out(
+        tmp_path,
+        install_exit_code=1,
+        step_durations_seconds={HOSTILE: 9, "Doctor": 3},
+        failed_units=[HOSTILE],
+        chat={"ok": True, "first_token_seconds": 1.5, "model": HOSTILE},
+        last_step=HOSTILE,
+    )
+    _is_clean(out)
+
+
+def test_abort_reason_and_detail_are_neutralised(tmp_path):
+    out = _out(tmp_path, aborted=HOSTILE, abort_detail=HOSTILE)
+    _is_clean(out)
+    assert "aborted:" in out
+
+
+def test_values_that_are_not_strings_are_neutralised_too(tmp_path):
+    out = _out(
+        tmp_path, hal0_version={"a": HOSTILE}, source=[HOSTILE], slot_count={"x": "<img src=x>"}
+    )
+    _is_clean(out)
+
+
+def test_a_value_is_cut_to_80_characters(tmp_path):
+    out = _out(tmp_path, hal0_version="a" * 500, source="[" * 500)
+    longest = max(len(m) for m in re.findall(r"a+", out))
+    assert longest <= 80
+    cell = out.split("|")[2]  # source / version
+    assert all(len(part) <= 80 + 1 for part in cell.split(" ") if part)
+
+
+def test_ordinary_values_are_unchanged(tmp_path):
+    out = _out(tmp_path, hal0_version="1.8.2", source="stable")
+    assert "stable 1.8.2" in out
 
 
 def test_a_result_that_is_a_fifo_is_skipped_not_waited_for(tmp_path):

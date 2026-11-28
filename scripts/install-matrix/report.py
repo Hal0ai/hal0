@@ -20,6 +20,7 @@ import argparse
 import importlib.util
 import json
 import sys
+import unicodedata
 from pathlib import Path
 
 SCHEMA = "hal0.install-matrix.v1"
@@ -83,8 +84,37 @@ def is_num(value: object) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool)
 
 
+MAX_VALUE_CHARS = 80
+_ESCAPED = set("\\`*_[]<>|")
+
+
 def d(value: object) -> str:
-    return "-" if value is None or value == "" else str(value).replace("|", "/").replace("\n", " ")
+    """The one way a value from a result file is printed.
+
+    A guest wrote the result, so before anything reaches a terminal or a pasted
+    Markdown report: control characters (below 0x20, 0x7f-0x9f), format and
+    line-separator characters (bidi overrides, zero-width) are removed, each
+    character that means something to Markdown or HTML (backslash ` * _ [ ] < >
+    |; an underscore inside a word excepted) is backslash-escaped,
+    and the value is cut so that at most MAX_VALUE_CHARS characters remain.
+    """
+    if value is None or value == "":
+        return "-"
+    out: list[str] = []
+    size = 0
+    kept = [ch for ch in str(value) if unicodedata.category(ch) not in ("Cc", "Cf", "Zl", "Zp")]
+    for i, ch in enumerate(kept):
+        # An underscore between two letters or digits cannot start emphasis,
+        # so identifiers like host_memory_low stay readable.
+        inside_word = (
+            ch == "_" and 0 < i < len(kept) - 1 and kept[i - 1].isalnum() and kept[i + 1].isalnum()
+        )
+        piece = "\\" + ch if ch in _ESCAPED and not inside_word else ch
+        if size + len(piece) > MAX_VALUE_CHARS:
+            break
+        out.append(piece)
+        size += len(piece)
+    return "".join(out) or "-"
 
 
 def secs(value: object) -> str:
@@ -111,7 +141,7 @@ def slowest(durations: object) -> str:
     if not timed:
         return "-"
     name, value = max(timed, key=lambda kv: kv[1])
-    return f"{name} {secs(value)}s"
+    return f"{d(name)} {secs(value)}s"
 
 
 def sub(res: dict, key: str) -> dict:
@@ -187,7 +217,7 @@ def render(results: list[dict]) -> str:
         first = units[0] if isinstance(units, list) and units else None
         why = why_failed(res)
         lines.append(
-            f"- {d(res.get('shape'))} ({started(res) or '-'}): {why}; last step: {d(res.get('last_step'))}; "
+            f"- {d(res.get('shape'))} ({d(started(res))}): {why}; last step: {d(res.get('last_step'))}; "
             f"first failed unit: {d(first)}"
         )
     return "\n".join(lines)
