@@ -411,6 +411,24 @@ fi
 # now asserts the two agree).
 UI_STEP_TOTAL=15
 
+# Recovery lines for a failure in the "Python environment" step. Names only
+# interpreters this box has: the old fixed "HAL0_PYTHON=python3.12" pointed at
+# a binary Ubuntu 26.04 does not ship (#3959).
+python_env_recovery_hint() {
+    local found="" c
+    for c in python3.14 python3.13 python3.12; do
+        command -v "${c}" >/dev/null 2>&1 && found="${found}${found:+, }${c}"
+    done
+    warn "Recovery: scroll up to the pip output for the real error."
+    if [[ -n "${found}" ]]; then
+        warn "         To use another interpreter, retry with HAL0_PYTHON=<name> sudo bash install.sh"
+        warn "         (Python 3.12 or newer on this box: ${found})"
+    else
+        warn "         No python3.12 or newer is on PATH. Install one, then retry with"
+        warn "         HAL0_PYTHON=<name> sudo bash install.sh"
+    fi
+}
+
 # _hal0_report_path IS assigned below, inside this same single-quoted trap
 # body — shellcheck's SC2154 is a known false positive for vars set-and-used
 # inside a `trap '...'` string.
@@ -428,8 +446,7 @@ trap 'err "install failed at line ${LINENO} during: ${CURRENT_STEP:-pre-init}"
             warn "         HAL0_PORT=<other> to bind a different API port; OpenWebUI"
             warn "         :3001 is hardcoded in the systemd unit." ;;
         "Python environment")
-            warn "Recovery: scroll up to the pip output for the real error."
-            warn "         Retry with HAL0_PYTHON=python3.12 sudo bash install.sh" ;;
+            python_env_recovery_hint ;;
         "Service start")
             warn "Recovery: journalctl -u hal0-api -n 60" ;;
         "Hardware probe")
@@ -1316,7 +1333,33 @@ fi
 
 ui_step "Python environment" "~30-90s"
 
-if [[ ! -d "${VENV_DIR}" ]]; then
+# An existing venv is reused only while it still works with the interpreter
+# this run selected (#3959). An OS release upgrade replaces the system python
+# underneath it: bin/python then resolves to the new version while every
+# package, pip included, still sits under the old lib/pythonX.Y, so the reused
+# venv died at the first pip call. Same check the Hindsight venv has had.
+# Echoes why the venv cannot be reused; empty means it can.
+main_venv_stale_reason() {
+    local want have
+    want="$("${PY}" -I -c 'import sys;print("%d.%d"%sys.version_info[:2])' 2>/dev/null || true)"
+    have="$("${VENV_DIR}/bin/python" -I -c 'import sys;print("%d.%d"%sys.version_info[:2])' 2>/dev/null || true)"
+    if [[ -z "${have}" ]]; then
+        echo "its interpreter no longer runs"
+    elif [[ -n "${want}" && "${have}" != "${want}" ]]; then
+        echo "it runs Python ${have} and this install uses Python ${want}"
+    elif ! "${VENV_DIR}/bin/python" -I -c 'import pip' >/dev/null 2>&1; then
+        echo "its packages were built for a Python that is gone (pip does not import on Python ${have})"
+    fi
+}
+
+if [[ -d "${VENV_DIR}" ]]; then
+    _venv_stale="$(main_venv_stale_reason)"
+    if [[ -n "${_venv_stale}" ]]; then
+        warn "rebuilding the venv at ${VENV_DIR}: ${_venv_stale}"
+        "${PY}" -I -m venv --clear "${VENV_DIR}"
+        info "rebuilt venv at ${VENV_DIR}"
+    fi
+else
     "${PY}" -I -m venv "${VENV_DIR}"
     info "created venv at ${VENV_DIR}"
 fi
