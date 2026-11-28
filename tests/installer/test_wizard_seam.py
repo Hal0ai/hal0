@@ -985,6 +985,49 @@ def test_an_interrupt_before_the_wizard_handles_it_is_a_quiet_130(
         assert _records(tmp_path) == [], "the wizard must not start after an interrupt"
 
 
+DIES_ALONE = """
+import os, signal, sys
+# Ctrl-C reaches the whole group, but the kernel hands it out one process at a
+# time. Here the child gets it and dies while bash has not seen it yet, the
+# widest form of that window.
+signal.signal(signal.SIGINT, signal.SIG_DFL)
+os.kill(os.getpid(), signal.SIGINT)
+signal.pause()
+"""
+
+
+@pytest.mark.parametrize("stage", ["wizard", "reader"])
+def test_a_child_that_dies_of_the_interrupt_before_bash_sees_it_is_a_quiet_130(
+    tmp_path: Path, stub: dict[str, str], stage: str
+) -> None:
+    dies = tmp_path / "dies_alone.py"
+    dies.write_text(DIES_ALONE, encoding="utf-8")
+    env = {"PATH": os.environ["PATH"], "HAL0_PLAIN": "1", **stub, "STUB_DOC": DOC}
+    pre = ""
+    if stage == "wizard":
+        env["HAL0_WIZARD_ENTRY"] = str(dies)
+    else:
+        given = tmp_path / "given.json"
+        given.write_text(DOC, encoding="utf-8")
+        env["HAL0_ANSWERS_FILE"] = str(given)
+        pre = f'_HAL0_ANSWERS_READER="{dies}"'
+    proc = _run_group(
+        ["bash", "-c", _seam_script(tmp_path, pre)],
+        timeout=30,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env=env,
+        cwd=tmp_path,
+    )
+    assert proc.returncode == 130, (proc.returncode, proc.stdout, proc.stderr)
+    assert "PAST THE SEAM" not in proc.stdout
+    log = (tmp_path / "report.log").read_text() if (tmp_path / "report.log").exists() else ""
+    assert log == "", log
+    assert list((tmp_path / "prefix" / "run" / "hal0-install").iterdir()) == []
+    assert _records(tmp_path) == [], "the wizard must not start after an interrupt"
+
+
 BLOCKED_ON_FIFO = """
 import os, sys
 with open(sys.argv[2], "w") as fh:

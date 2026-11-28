@@ -514,19 +514,34 @@ _hal0_answers_check() {
 # accepted copy, else 1 with the reason on standard error.
 _hal0_given_answers_copy() {
     local dest="${1}" given="${HAL0_ANSWERS_FILE:-}" rc=0
-    if ! _hal0_answers_check "${given}"; then
+    # A child that died of the interrupt reports 130. The INT trap of
+    # hal0_run_wizard may not have run yet (the signal reaches the children and
+    # bash one after the other), so that status is the interrupt itself and is
+    # passed up as it is; it is never "the document was not accepted".
+    _hal0_answers_check "${given}" || rc=$?
+    if [[ "${rc}" -eq 130 ]]; then
+        rm -f -- "${dest}"
+        return 130
+    elif [[ "${rc}" -ne 0 ]]; then
         echo "Stopped: the answers document was not accepted." >&2
         return 1
     fi
     "${PY}" -I -c "${_HAL0_SAVED_COPY_PY}" given "${given}" "${dest}" \
         </dev/null >/dev/null 2>&1 || rc=$?
-    if [[ "${rc}" -ne 0 ]]; then
+    if [[ "${rc}" -eq 130 ]]; then
+        rm -f -- "${dest}"
+        return 130
+    elif [[ "${rc}" -ne 0 ]]; then
         rm -f -- "${dest}"
         echo "error: the answers document changed or went away while it was being read" >&2
         echo "Stopped: the answers document was not accepted." >&2
         return 1
     fi
-    if ! _hal0_answers_check "${dest}"; then
+    _hal0_answers_check "${dest}" || rc=$?
+    if [[ "${rc}" -eq 130 ]]; then
+        rm -f -- "${dest}"
+        return 130
+    elif [[ "${rc}" -ne 0 ]]; then
         rm -f -- "${dest}"
         echo "Stopped: the answers document was not accepted." >&2
         return 1
@@ -708,7 +723,7 @@ _hal0_wizard_call() {
     # A document the person gave is checked by the reader before anything else,
     # and the wizard reads only a checked copy of it.
     if [[ -n "${HAL0_ANSWERS_FILE:-}" ]]; then
-        _hal0_given_answers_copy "${given_copy}" || return 1
+        _hal0_given_answers_copy "${given_copy}" || return $?
     fi
     cmd=("${PY}" -I "${_HAL0_WIZARD_ENTRY_PATH}"
         --catalog "${_HAL0_WIZARD_CATALOG_PATH}"
@@ -827,8 +842,12 @@ _hal0_wizard_call() {
     # applied, so a document's answer that replaces it is said out loud.
     local inherited_terminal="${HAL0_HERMES_TERMINAL:-}"
     inherited_terminal="${inherited_terminal//[^A-Za-z0-9]/?}"
-    if ! hal0_apply_answers "${out}" "${origin}" "${screens}"; then
+    local apply_rc=0
+    hal0_apply_answers "${out}" "${origin}" "${screens}" || apply_rc=$?
+    if [[ "${apply_rc}" -ne 0 ]]; then
         unset _HAL0_WIZARD_HF_TOKEN
+        # 130: the reader died of the interrupt; see _hal0_given_answers_copy
+        [[ "${apply_rc}" -eq 130 ]] && return 130
         return 1
     fi
     if [[ -n "${inherited_terminal}" && "${inherited_terminal}" != "${HAL0_HERMES_TERMINAL:-}" ]]; then
