@@ -18,12 +18,17 @@
 # Test seams (read only here): HAL0_FACTS_SYS_ROOT (prefix for /sys),
 #          HAL0_FACTS_VAR_DIR (default /var/lib/hal0), HAL0_FACTS_FHS_ROOT
 #          (directory holding the `current` link; default ${HAL0_PREFIX:-/usr/lib/hal0}).
+#          In --dev mode the installer keeps its tree under a prefix and has no
+#          `current` link, so the CALLER MUST SET BOTH HAL0_FACTS_VAR_DIR and
+#          HAL0_FACTS_FHS_ROOT there; the defaults look at the real system.
 
-# Print VALUE as a JSON string literal. Control characters are dropped, then
-# backslash and double quote are escaped.
+# Print VALUE as a JSON string literal. Only printable ASCII survives (every
+# byte outside 040-176 is dropped, so the output is always valid UTF-8), then
+# backslash and double quote are escaped. The callers pass identifiers and
+# version strings, so nothing legitimate is lost.
 hal0_json_string() {
     local v
-    v="$(printf '%s' "${1-}" | LC_ALL=C tr -d '\000-\037\177')"
+    v="$(printf '%s' "${1-}" | LC_ALL=C tr -cd '\040-\176')"
     v="${v//\\/\\\\}"
     v="${v//\"/\\\"}"
     printf '"%s"' "${v}"
@@ -150,9 +155,23 @@ _hal0_facts_str_or_null() {
 
 # Write the version 1 facts file from FACT_*, atomically, mode 0644.
 hal0_facts_write() {
-    local path="$1" dir tmp
+    local path="${1-}" dir tmp
+    if [[ -z "${path}" ]]; then
+        printf 'hal0_facts_write: no path given\n' >&2
+        return 1
+    fi
     dir="$(dirname "${path}")"
-    if [[ ! -d "${dir}" ]]; then
+    if [[ -L "${dir}" ]]; then
+        printf 'hal0_facts_write: %s is a symlink; refusing to write through it\n' "${dir}" >&2
+        return 1
+    fi
+    if [[ -d "${dir}" ]]; then
+        if [[ ! -O "${dir}" ]]; then
+            printf 'hal0_facts_write: %s is not owned by this user; refusing\n' "${dir}" >&2
+            return 1
+        fi
+        chmod 0755 "${dir}" || return 1
+    else
         mkdir -p "${dir}" 2>/dev/null && chmod 0755 "${dir}" || return 1
     fi
     tmp="$(mktemp "${dir}/.facts.XXXXXX")" || return 1

@@ -191,16 +191,40 @@ hal0_json_string $'26.\\n04 "x"\\\\y\\t\\x01'
     assert json.loads(proc.stdout) == '26.04 "x"\\y'
 
 
+def test_json_string_drops_non_ascii_bytes_in_the_file(tmp_path: Path) -> None:
+    stubs = (
+        "_os_release_field() { case \"$1\" in VERSION_ID) printf 'a\\xffb\\xe2\\n\"q\\\\' ;; "
+        "*) return 1 ;; esac; }"
+    )
+    proc, out = _run(tmp_path, stubs=stubs)
+    assert "write_rc=0" in proc.stdout, proc.stdout + proc.stderr
+    raw = out.read_bytes()
+    assert b"\xff" not in raw and b"\xe2" not in raw
+    doc = json.loads(raw.decode("utf-8"))
+    assert "\xff" not in doc["distro"]["release"]
+    assert doc["distro"]["release"] == 'ab"q\\'
+
+
 def test_writer_needs_no_python(tmp_path: Path) -> None:
     bindir = tmp_path / "bin"
     bindir.mkdir()
-    for tool in ("bash", "mktemp", "chmod", "mv", "tr", "mkdir", "dirname", "rm", "cat", "head"):
+    for tool in ("bash", "mktemp", "chmod", "mv", "tr", "mkdir", "dirname", "rm", "cat", "head", "sort"):
         found = shutil.which(tool)
         assert found
         (bindir / tool).symlink_to(found)
     proc, out = _run(tmp_path, path=str(bindir))
     assert "write_rc=0" in proc.stdout, proc.stdout + proc.stderr
-    assert json.loads(out.read_text())["version"] == 1
+    assert proc.stderr == ""
+    assert json.loads(out.read_text()) == {
+        "version": 1,
+        "distro": {"id": "ubuntu", "release": "26.04", "package_manager": "apt-get"},
+        "container": "none",
+        "podman": {"present": True, "runs": True},
+        "gpu": {"outcome": "usable", "reason": None, "vendor": None, "pool_gb": None},
+        "npu": {"device": True, "memlock_ok": True, "flm_build": True},
+        "install": {"state": "fresh", "version": None},
+        "memory_python": True,
+    }
 
 
 def test_write_is_atomic_and_0644(tmp_path: Path) -> None:
@@ -234,3 +258,49 @@ def test_gather_installs_nothing(tmp_path: Path) -> None:
     assert "write_rc=0" in proc.stdout, proc.stdout + proc.stderr
     assert not log.exists(), log.read_text()
     assert json.loads(out.read_text())["podman"] == {"present": True, "runs": True}
+
+
+def test_memlock_not_unlimited_is_false(tmp_path: Path) -> None:
+    assert _facts(tmp_path, stubs="ulimit() { echo 64; }")["npu"]["memlock_ok"] is False
+
+
+def test_missing_npu_sysfs_entry_is_stale_device(tmp_path: Path) -> None:
+    facts = _facts(tmp_path, env={"HAL0_NPU_SYS_ACCEL": str(tmp_path / "gone")})
+    assert facts["npu"]["device"] is False
+
+
+def test_fhs_root_defaults_to_prefix(tmp_path: Path) -> None:
+    prefix = tmp_path / "prefix"
+    target = prefix / "hal0-2.0.0"
+    target.mkdir(parents=True)
+    (target / "VERSION").write_text("2.0.0\n")
+    (prefix / "current").symlink_to(target)
+    facts = _facts(tmp_path, env={"HAL0_FACTS_FHS_ROOT": "", "HAL0_PREFIX": str(prefix)})
+    assert facts["install"] == {"state": "upgrade", "version": "2.0.0"}
+
+
+def test_write_without_path_fails_under_set_u(tmp_path: Path) -> None:
+    script = f'set -u\nsource "{FACTS_SH}"\nhal0_facts_write\necho "rc=$?"'
+    proc = subprocess.run(["bash", "-c", script], capture_output=True, text=True, check=False)
+    assert "rc=1" in proc.stdout
+    assert "no path" in proc.stderr
+
+
+def test_write_refuses_symlinked_directory(tmp_path: Path) -> None:
+    real = tmp_path / "real"
+    real.mkdir()
+    link = tmp_path / "run"
+    link.symlink_to(real)
+    script = f'source "{FACTS_SH}"\nhal0_facts_write "{link}/facts.json"\necho "rc=$?"'
+    proc = subprocess.run(["bash", "-c", script], capture_output=True, text=True, check=False)
+    assert "rc=1" in proc.stdout
+    assert not (real / "facts.json").exists()
+
+
+def test_write_sets_existing_own_directory_to_0755(tmp_path: Path) -> None:
+    d = tmp_path / "run"
+    d.mkdir()
+    d.chmod(0o700)
+    proc, out = _run(tmp_path)
+    assert "write_rc=0" in proc.stdout
+    assert stat.S_IMODE(d.stat().st_mode) == 0o755
