@@ -3923,10 +3923,20 @@ smoke_memory_engine_version() {
     # (a staleness signal only; behavior gates on /version `features`, never
     # the version string). Fail-soft like the rest, skipped when the engine
     # was skipped or never installed.
-    [[ "${HAL0_SKIP_HINDSIGHT:-0}" -eq 1 ]] && return 0
+    # Return status:
+    #   0 passed
+    #   1 failed (unreachable, or not the pinned version)
+    #   2 skipped: memory was turned off for this run (HAL0_SKIP_HINDSIGHT=1
+    #     from --no-memory, --minimal, the environment or the picker)
+    #   3 not installed: memory was wanted but there is no unit file, so the
+    #     engine install did not complete (this includes the no-usable-Python
+    #     case, where HINDSIGHT_UNAVAILABLE_REASON is set)
+    # Callers must not read 2 or 3 as a pass. When the reason is set but a unit
+    # file exists, a healthy engine from an earlier install survives: probe it.
+    [[ "${HAL0_SKIP_HINDSIGHT:-0}" -eq 1 && -z "${HINDSIGHT_UNAVAILABLE_REASON:-}" ]] && return 2
     # Overridable unit path so the probe is drivable through fakes in
     # tests/installer/test_install_smoke_probes.py.
-    [[ -f "${HINDSIGHT_UNIT_DST:-/etc/systemd/system/hindsight-api.service}" ]] || return 0
+    [[ -f "${HINDSIGHT_UNIT_DST:-/etc/systemd/system/hindsight-api.service}" ]] || return 3
     local resp
     resp="$(curl -fsS -m 10 "http://127.0.0.1:9177/version" 2>/dev/null)" || return 1
     printf '%s' "${resp}" | "${PY}" -I -c 'import json, sys
@@ -3983,8 +3993,20 @@ run_post_install_smoke() {
         warn "'${HAL0_BIN} update --check' FAILED — the update path is broken and the next release will not install"
         warn "  re-run '${HAL0_BIN} update --check' to see why (daemon reachability / manifest fetch / cosign verify)"
     fi
-    if smoke_memory_engine_version; then
+    local _me_rc=0
+    smoke_memory_engine_version || _me_rc=$?
+    if [[ "${_me_rc}" -eq 0 ]]; then
         info "memory-engine version probe ok (hindsight-api ${HINDSIGHT_PIN} on :9177)"
+    elif [[ "${_me_rc}" -eq 2 ]]; then
+        info "memory-engine check skipped — memory was turned off for this run"
+    elif [[ "${_me_rc}" -eq 3 ]]; then
+        SMOKE_FAILED+=("memory-engine-version")
+        if [[ -n "${HINDSIGHT_UNAVAILABLE_REASON:-}" ]]; then
+            warn "memory-engine check FAILED — the memory engine is not installed (${HINDSIGHT_UNAVAILABLE_REASON})"
+        else
+            warn "memory-engine check FAILED — the memory engine is not installed (its install did not complete)"
+        fi
+        warn "  set HAL0_HINDSIGHT_PYTHON=/path/to/python3.X (3.11-3.14) and re-run the installer, or set HAL0_SKIP_HINDSIGHT=1 to leave memory out; see the warnings above for the cause"
     else
         SMOKE_FAILED+=("memory-engine-version")
         warn "memory-engine version probe FAILED — :9177/version does not report the pinned ${HINDSIGHT_PIN}"
