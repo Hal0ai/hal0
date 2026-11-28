@@ -410,8 +410,11 @@ ui_box() {
 # Every terminal write is guarded and the function always returns 0, so it can
 # never fail an install running under `set -e` and an ERR trap.
 ui_closing_screen() {
-    local _tty="/dev/tty"
-    if [[ "${EUID}" -ne 0 ]]; then
+    # The real user id, asked of the system: EUID can be set through the
+    # environment and must not decide this. No answer counts as root.
+    local _tty="/dev/tty" _uid=""
+    _uid="$(id -u 2>/dev/null)" || _uid=""
+    if [[ -n "${_uid}" && "${_uid}" != "0" ]]; then
         _tty="${UI_TTY_OUT:-/dev/tty}"
     fi
     local LC_ALL=C  # character ranges below mean ASCII, whatever the locale

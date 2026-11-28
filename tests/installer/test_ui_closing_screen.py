@@ -307,11 +307,76 @@ def test_shown_is_said_only_when_the_write_worked(
     assert KEY not in r.stdout + r.stderr
 
 
-def test_root_never_takes_the_terminal_path_from_the_environment() -> None:
-    # Root cannot be exercised from a test run as a normal user, so pin the text:
-    # an EUID guard must come before the path is used for the first time.
+def _closing_as(tmp_path: Path, uid_stub: str, env: dict[str, str]) -> tuple[Run, Path]:
+    """Run ui_closing_screen with a minted key, `id` replaced by ``uid_stub``, and no terminal."""
+    api_env = tmp_path / "api.env"
+    api_env.write_text(f"HAL0_ADMIN_KEY={KEY}\n", encoding="utf-8")
+    out = tmp_path / "chosen-by-the-environment"
+    script = tmp_path / "as.sh"
+    script.write_text(
+        "\n".join(
+            [
+                "set -euo pipefail",
+                "trap 'echo ERR-TRAP >&2' ERR",
+                f"source {shlex.quote(str(UI_SH))}",
+                uid_stub,
+                f"API_ENV={shlex.quote(str(api_env))}",
+                "_HAL0_ADMIN_KEY_MINTED=1",
+                "DEV_MODE=0; NO_START=0; IS_UPGRADE=0",
+                "declare -A COMPONENT_STATES=([openwebui]=skipped)",
+                f"export UI_TTY_OUT={shlex.quote(str(out))}",
+                "ui_closing_screen",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    # A new session has no controlling terminal, so /dev/tty cannot be opened.
+    proc = subprocess.run(
+        ["bash", str(script)],
+        capture_output=True,
+        text=True,
+        check=False,
+        stdin=subprocess.DEVNULL,
+        start_new_session=True,
+        env={"PATH": "/usr/bin:/bin", **env},
+    )
+    return Run(proc.returncode, proc.stdout, proc.stderr, str(out)), out
+
+
+@pytest.mark.parametrize(
+    ("uid_stub", "env"),
+    [
+        ("id() { echo 0; }", {}),
+        ("id() { echo 0; }", {"EUID": "1000"}),
+        ("id() { return 1; }", {}),
+        ("id() { :; }", {}),
+    ],
+    ids=["root", "root-with-EUID-set-in-the-environment", "id-fails", "id-prints-nothing"],
+)
+def test_root_never_takes_the_terminal_path_from_the_environment(
+    tmp_path: Path, uid_stub: str, env: dict[str, str]
+) -> None:
+    r, out = _closing_as(tmp_path, uid_stub, env)
+    assert r.returncode == 0, r.stderr
+    assert "ERR-TRAP" not in r.stderr
+    assert not out.exists(), "root wrote the key to a path the environment chose"
+    assert KEY not in r.stdout + r.stderr
+    assert "It is stored in" in r.stdout and "(root only)" in r.stdout
+
+
+def test_another_user_may_point_the_terminal_at_a_file(tmp_path: Path) -> None:
+    r, out = _closing_as(tmp_path, "id() { echo 1000; }", {})
+    assert r.returncode == 0, r.stderr
+    assert KEY in out.read_text(encoding="utf-8")
+    assert KEY not in r.stdout + r.stderr
+
+
+def test_the_root_check_does_not_read_a_variable() -> None:
     body = function_body("ui_closing_screen")
-    guard = body.index("EUID")
-    assert guard < body.index('exec {_fd}>>"${_tty}"')
-    assert guard < body.index("UI_TTY_OUT:-", guard) < body.index('exec {_fd}>>"${_tty}"')
-    assert '_tty="/dev/tty"' in body[:guard]
+    assert "EUID" not in strip_comments(body)
+    assert '"$(id -u 2>/dev/null)"' in body
+
+
+def strip_comments(text: str) -> str:
+    return "\n".join(line for line in text.splitlines() if not line.lstrip().startswith("#"))
