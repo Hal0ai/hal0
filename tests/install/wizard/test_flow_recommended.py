@@ -23,6 +23,7 @@ from hal0.install.wizard.flow import (
     validate_folder,
     view,
 )
+from hal0.install.wizard.render import render, strip_ansi
 
 
 def run(state: State, *keys: str) -> State:
@@ -187,7 +188,7 @@ def test_review_states_admin_key_terminal_tool_and_address(
 ) -> None:
     rows = {r.id: r for r in view(run(start(catalog, usable_facts), "ENTER", "ENTER")).rows}
     assert rows["admin_key"].detail == "created; shown once when the install ends"
-    assert rows["terminal_tool"].detail == "off"
+    assert (rows["terminal_tool"].label, rows["terminal_tool"].detail) == ("Terminal tool", "off")
     assert rows["reachable"].detail == "http://hal0.local:8080 from this network"
     assert rows["downloads"].detail == "nothing yet; models are added after install"
     assert "total" not in rows
@@ -688,3 +689,54 @@ def test_a_disk_whose_folder_the_installer_would_refuse_is_not_offered(
     values = [r.value for r in v.rows]
     assert "/srv/pool/hal0/models" in values
     assert not any("My Disk" in str(x) or "/var/lib/pool" in str(x) for x in values)
+
+
+_TERMINAL_ON = "on: the assistant can run commands on this machine"
+_TERMINAL_FIXED = [Override("apps.hermes.terminal_tool", True, "HAL0_HERMES_TERMINAL")]
+
+
+def _terminal_rows(rows: tuple[Row, ...]) -> list[Row]:
+    return [r for r in rows if r.label == "Terminal tool"]
+
+
+def test_the_recommended_review_says_the_terminal_tool_is_off(
+    catalog: Catalog, usable_facts: Facts
+) -> None:
+    (row,) = _terminal_rows(_review(catalog, usable_facts))
+    assert row.detail == "off"
+
+
+def test_the_minimal_review_has_no_terminal_tool_row(catalog: Catalog, usable_facts: Facts) -> None:
+    over = [Override("install.type", "minimal", "--bare")]
+    rows = view(run(start(catalog, usable_facts, over=over), "ENTER", "ENTER")).rows
+    assert _terminal_rows(rows) == []
+    assert all(r.id != "terminal_tool" for r in rows)
+
+
+def test_a_terminal_tool_fixed_on_shows_on_in_the_recommended_review(
+    catalog: Catalog, usable_facts: Facts
+) -> None:
+    s = run(start(catalog, usable_facts, over=_TERMINAL_FIXED), "ENTER", "ENTER")
+    (row,) = _terminal_rows(view(s).rows)
+    assert row.detail == _TERMINAL_ON
+
+
+def test_a_terminal_tool_fixed_on_does_not_show_when_the_assistant_is_off(
+    catalog: Catalog, usable_facts: Facts
+) -> None:
+    over = [*_TERMINAL_FIXED, Override("apps.hermes.enabled", False, "--no-hermes")]
+    s = run(start(catalog, usable_facts, over=over), "ENTER", "ENTER")
+    assert _terminal_rows(view(s).rows) == []
+
+
+def test_the_recommended_review_fits_a_terminal_of_80_by_24(
+    catalog: Catalog, usable_facts: Facts
+) -> None:
+    facts = Facts(**{**usable_facts.__dict__, "npu_device": True, "npu_flm_build": True})
+    for f, over in ((usable_facts, []), (facts, _TERMINAL_FIXED)):
+        review = view(run(start(catalog, f, over=over), "ENTER", "ENTER"))
+        assert review.screen is Screen.REVIEW
+        for plain in (False, True):
+            lines = render(review, width=80, plain=plain, color=False)
+            assert len(lines) <= 24, (plain, len(lines))
+            assert any("Terminal tool" in strip_ansi(x) for x in lines)

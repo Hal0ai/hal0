@@ -44,6 +44,8 @@ from .paths import check_copy, check_store_text, validate_folder
 
 _DOWNLOAD_MBIT = 100
 _NPU_JOB = "npu"
+_ASSISTANT_JOB = "hermes"
+_TERMINAL_ON = "on: the assistant can run commands on this machine"
 _NO_DOWNLOADS = "nothing yet; models are added after install"
 _NO_CHAT_DOWNLOAD = "no chat model to download"
 _GPU_REASONS = {
@@ -313,16 +315,14 @@ def _access_rows(s: State, doc: Document) -> list[Row]:
     port = maybe_value(s, doc, "port") or DEFAULT_PORT
     reach = f"http://{host}:{port} from this network"
     admin = {"generate": "created; shown once when the install ends", "none": "not created"}
-    terminal = (
-        "ON: the assistant can run commands as a root-equivalent user"
-        if maybe_value(s, doc, "terminal_tool") is True
-        else "off"
-    )
-    return [
+    rows = [
         make_row("reachable", "Reachable at", reach),
         make_row("admin_key", "Admin key", admin.get(str(get(doc, ADMIN_KEY)), "unchanged")),
-        make_row("terminal_tool", "Assistant commands", terminal),
     ]
+    if any(c.id == _ASSISTANT_JOB for c in jobs_on(s, doc)):
+        on = maybe_value(s, doc, "terminal_tool") is True
+        rows.append(make_row("terminal_tool", "Terminal tool", _TERMINAL_ON if on else "off"))
+    return rows
 
 
 def _skipped(s: State, doc: Document) -> list[str]:

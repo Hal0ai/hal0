@@ -342,7 +342,10 @@ def test_terminal_tool_defaults_off_and_review_prints_it_when_on(
     assert catalog.questions["terminal_tool"].help in " ".join(view(press(s, "?")).intro)
     on = run(s, "SPACE", "ENTER")
     review = next(r for r in view(on).rows if r.id == "terminal_tool")
-    assert review.detail == "ON: the assistant can run commands as a root-equivalent user"
+    assert (review.label, review.detail) == (
+        "Terminal tool",
+        "on: the assistant can run commands on this machine",
+    )
 
 
 def test_the_terminal_tool_row_is_unavailable_when_the_assistant_is_off(
@@ -491,8 +494,7 @@ def test_turning_the_assistant_off_drops_the_terminal_tool_answer(
     off = run(on, "b", "b", "b", "b", "DOWN", "SPACE", *["ENTER"] * 5)
     assert view(off).screen is Screen.REVIEW
     assert "apps.hermes.terminal_tool" not in chosen(off)
-    rows = {r.id: r for r in view(off).rows}
-    assert rows["terminal_tool"].detail == "off"
+    assert all(r.id != "terminal_tool" for r in view(off).rows)
 
 
 def test_the_empty_ladder_hint_does_not_offer_a_choice(

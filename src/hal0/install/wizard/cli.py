@@ -47,6 +47,8 @@ VERSION_TEXT = "hal0 setup wizard 1"
 _CPU_CONSENT_LINE = "set HAL0_ALLOW_CPU_ONLY=1 to continue without a GPU"
 _NO_TOKEN_PLACE = "no place to keep the token; add it later"
 _FOLDER_EXISTS = "--chosen-folder-out must name a path that does not exist"
+_SHOWN_EXISTS = "--screens-shown-out must name a path that does not exist"
+_SHOWN_TEXT = "shown\n"
 _FOLDER_NOT_RECORDED = "could not record the chosen folder"
 _ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
 
@@ -72,6 +74,11 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--secret-out", type=Path, help="where to keep a typed token")
     parser.add_argument(
         "--chosen-folder-out", type=Path, help="where to record a model folder chosen on screen"
+    )
+    parser.add_argument(
+        "--screens-shown-out",
+        type=Path,
+        help="write a one-line file when the screens were shown and confirmed (for the installer)",
     )
     parser.add_argument("--tty", default="/dev/tty", help="the terminal device to use")
     parser.add_argument("--hal0-version", default="unknown", help="the version being installed")
@@ -265,6 +272,7 @@ def _finish(
     out: Path,
     secret_out: Path | None,
     folder_out: Path | None = None,
+    shown_out: Path | None = None,
 ) -> int:
     status = flow.outcome(state)
     if status is Outcome.QUIT:
@@ -272,6 +280,10 @@ def _finish(
     if status is Outcome.STOPPED:
         return EXIT_STOPPED
     doc = _document(inp, flow.chosen(state))
+    if shown_out is not None:
+        # First of all the files: a failure here (a DocumentError, exit 2) leaves the
+        # answers, token and folder files unwritten.
+        write_private_text(_SHOWN_TEXT, shown_out)
     write_document(doc, out)
     _refresh_copy(state, doc)
     token = flow.secret(state)
@@ -283,16 +295,23 @@ def _finish(
     return EXIT_OK
 
 
+def _require_absent(path: Path | None, message: str) -> None:
+    """Refuse a path that exists, is a symlink (even a dangling one) or cannot be checked."""
+    if path is None:
+        return
+    try:
+        os.lstat(path)
+    except FileNotFoundError:
+        pass
+    except OSError:
+        raise _Usage(message) from None
+    else:
+        raise _Usage(message)
+
+
 def _run(args: argparse.Namespace, environ: Mapping[str, str]) -> int:
-    if args.chosen_folder_out is not None:
-        try:
-            os.lstat(args.chosen_folder_out)
-        except FileNotFoundError:
-            pass
-        except OSError:
-            raise _Usage(_FOLDER_EXISTS) from None
-        else:
-            raise _Usage(_FOLDER_EXISTS)
+    _require_absent(args.chosen_folder_out, _FOLDER_EXISTS)
+    _require_absent(args.screens_shown_out, _SHOWN_EXISTS)
     if args.catalog is None or args.out is None:
         raise _Usage("--catalog and --out are required")
     inp = _read_inputs(args, environ)
@@ -306,7 +325,14 @@ def _run(args: argparse.Namespace, environ: Mapping[str, str]) -> int:
     if not quiet and can_open(args.tty):
         state = run_screens(inp, args.tty, environ, lambda chosen: _document(inp, chosen))
         if state is not None:
-            return _finish(inp, state, args.out, args.secret_out, args.chosen_folder_out)
+            return _finish(
+                inp,
+                state,
+                args.out,
+                args.secret_out,
+                args.chosen_folder_out,
+                args.screens_shown_out,
+            )
     return _run_headless(inp, args.out)
 
 

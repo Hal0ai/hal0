@@ -1964,3 +1964,175 @@ def test_a_path_that_cannot_be_checked_is_refused_like_an_existing_one(
         "--chosen-folder-out", blocker / "folder",
     )  # fmt: skip
     assert r.returncode == 2 and r.stderr == NOT_THERE + "\n" and not out.exists()
+
+
+# ------------------------------------------- the screens-shown marker
+
+SHOWN_EXISTS = "hal0 setup: --screens-shown-out must name a path that does not exist"
+
+
+def test_confirmed_screens_write_the_marker_before_the_document(
+    catalog_path: Path,
+    tmp_path: Path,
+    pty_pair: tuple[int, str],
+    spawn: Callable[..., subprocess.Popen[str]],
+) -> None:
+    out, shown = tmp_path / "a.json", tmp_path / "shown"
+    code = _screens_run(
+        spawn,
+        pty_pair,
+        [ENTER * 3],
+        "--catalog",
+        catalog_path,
+        "--out",
+        out,
+        "--screens-shown-out",
+        shown,
+    )
+    assert code == 0 and out.exists()
+    assert shown.read_bytes() == b"shown\n"
+    assert stat.S_IMODE(shown.stat().st_mode) == 0o600
+
+
+def test_customize_that_is_confirmed_writes_the_marker_too(
+    catalog_path: Path,
+    tmp_path: Path,
+    pty_pair: tuple[int, str],
+    spawn: Callable[..., subprocess.Popen[str]],
+) -> None:
+    out, shown = tmp_path / "a.json", tmp_path / "shown"
+    code = _screens_run(
+        spawn,
+        pty_pair,
+        [*CUSTOM_KEYS, ENTER * 8],
+        "--catalog",
+        catalog_path,
+        "--out",
+        out,
+        "--screens-shown-out",
+        shown,
+    )
+    assert code == 0 and json.loads(out.read_text())["install"]["type"] == "custom"
+    assert shown.read_bytes() == b"shown\n"
+
+
+def test_a_run_without_screens_writes_no_marker(
+    catalog_path: Path,
+    tmp_path: Path,
+    pty_pair: tuple[int, str],
+    upgrade_facts_path: Path,
+    saved_path: Path,
+) -> None:
+    given = _write_json(tmp_path / "given.json", {})
+    base = ["--catalog", catalog_path, "--screens-shown-out"]
+    cases: list[tuple[list[object], dict[str, str], str | None]] = [
+        (["--headless"], {}, pty_pair[1]),
+        ([], {"HAL0_NONINTERACTIVE": "1"}, pty_pair[1]),
+        (["--answers", given], {}, pty_pair[1]),
+        ([], {}, str(tmp_path / "absent-terminal")),
+        (["--facts", upgrade_facts_path, "--saved", saved_path], {}, pty_pair[1]),
+    ]
+    for number, (extra, env, tty) in enumerate(cases):
+        shown = tmp_path / f"shown{number}"
+        out = tmp_path / f"a{number}.json"
+        r = wizard(*base, shown, "--out", out, *extra, env=env, tty=tty)
+        assert r.returncode == 0, (number, r.stderr)
+        assert out.exists() and not shown.exists(), number
+    assert read_all(pty_pair[0]) == b""
+
+
+@pytest.mark.parametrize(
+    ("keys", "code"),
+    [
+        ([b"q"], 10),
+        ([ENTER, ENTER, b"q"], 10),
+        ([ENTER, ENTER, b"\x03"], 130),
+    ],
+    ids=["quit-first-screen", "quit-review", "interrupt-review"],
+)
+def test_quit_and_interrupt_write_no_marker(
+    keys: list[bytes],
+    code: int,
+    catalog_path: Path,
+    tmp_path: Path,
+    pty_pair: tuple[int, str],
+    spawn: Callable[..., subprocess.Popen[str]],
+) -> None:
+    out, shown = tmp_path / "a.json", tmp_path / "shown"
+    got = _screens_run(
+        spawn, pty_pair, keys, "--catalog", catalog_path, "--out", out,
+        "--screens-shown-out", shown,
+    )  # fmt: skip
+    assert got == code
+    assert not out.exists() and not shown.exists()
+
+
+def _existing(kind: str, tmp_path: Path) -> Path:
+    path = tmp_path / "shown"
+    if kind == "file":
+        path.write_text("mine")
+    elif kind == "directory":
+        path.mkdir()
+    elif kind == "symlink":
+        (tmp_path / "target").write_text("mine")
+        path.symlink_to(tmp_path / "target")
+    else:
+        path.symlink_to(tmp_path / "nowhere")
+    return path
+
+
+@pytest.mark.parametrize("kind", ["file", "directory", "symlink", "dangling"])
+def test_a_marker_path_that_exists_is_a_usage_error(
+    kind: str, catalog_path: Path, tmp_path: Path
+) -> None:
+    shown = _existing(kind, tmp_path)
+    before = (shown.is_symlink(), shown.is_dir(), os.readlink(shown) if shown.is_symlink() else "")
+    out = tmp_path / "a.json"
+    r = wizard("--catalog", catalog_path, "--out", out, "--headless", "--screens-shown-out", shown)
+    assert r.returncode == 2 and r.stderr == SHOWN_EXISTS + "\n" and r.stdout == ""
+    assert not out.exists()
+    assert before == (
+        shown.is_symlink(),
+        shown.is_dir(),
+        os.readlink(shown) if shown.is_symlink() else "",
+    )
+    if kind == "file":
+        assert shown.read_text() == "mine"
+    if kind == "symlink":
+        assert (tmp_path / "target").read_text() == "mine"
+    if kind == "dangling":
+        assert not (tmp_path / "nowhere").exists()
+
+
+def test_a_marker_that_cannot_be_written_stops_the_run_with_no_files(
+    catalog_path: Path,
+    tmp_path: Path,
+    pty_pair: tuple[int, str],
+    spawn: Callable[..., subprocess.Popen[str]],
+) -> None:
+    master, slave = pty_pair
+    out, secret, folder = tmp_path / "a.json", tmp_path / "token", tmp_path / "folder"
+    p = spawn(
+        "--catalog", catalog_path, "--out", out, "--tty", slave,
+        "--secret-out", secret, "--chosen-folder-out", folder,
+        "--screens-shown-out", tmp_path / "missing" / "shown",
+        capture=True,
+    )  # fmt: skip
+    wait_for_output(master)
+    os.write(master, ENTER * 3)
+    code, _ = wait_exit(p, master)
+    assert p.stdout is not None and p.stderr is not None
+    stdout, stderr = p.stdout.read(), p.stderr.read()
+    assert code == 2  # the code an unwritable --out gives too
+    assert stdout == ""
+    assert len(stderr.strip().splitlines()) == 1 and stderr.startswith("hal0 setup: ")
+    assert not out.exists() and not secret.exists() and not folder.exists()
+
+
+def test_the_help_lists_the_marker_option() -> None:
+    r = wizard("--help")
+    assert r.returncode == 0
+    assert "--screens-shown-out" in r.stdout
+    assert "write a one-line file when the screens were shown and confirmed" in " ".join(
+        r.stdout.split()
+    )
