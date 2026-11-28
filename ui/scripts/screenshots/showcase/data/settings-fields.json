@@ -1,0 +1,2731 @@
+{
+ "fields": [
+  {
+   "apply_class": "manual-restart",
+   "constraints": {
+    "ge": 1
+   },
+   "current": 6,
+   "default": 6,
+   "description": "Config schema version.  hal0 config migrate bumps this when applying versioned transforms.  See PLAN.md \u00a75 Tier 3.",
+   "enum": null,
+   "group": "meta",
+   "label": "Schema version",
+   "live_target": null,
+   "path": "meta.schema_version",
+   "secret": false,
+   "services": [],
+   "type": "number"
+  },
+  {
+   "apply_class": "immediate",
+   "constraints": {
+    "ge": 0
+   },
+   "current": 0,
+   "default": 0,
+   "description": "Maximum number of slots that may exist (creation gate; 0 = unlimited). Counts every slot TOML including the seeded ones (utility, rerank, tts, img, npu, \u2026), so values below the current slot count block new-slot creation. Applies to the next slot creation \u2014 no restart needed.",
+   "enum": null,
+   "group": "slots",
+   "label": "Max slots",
+   "live_target": null,
+   "path": "slots.max_slots",
+   "secret": false,
+   "services": [],
+   "type": "number"
+  },
+  {
+   "apply_class": "immediate",
+   "constraints": {
+    "ge": 1024,
+    "le": 65535
+   },
+   "current": 8081,
+   "default": 8081,
+   "description": "First port in the auto-allocation pool for new slots.",
+   "enum": null,
+   "group": "slots",
+   "label": "Port range start",
+   "live_target": null,
+   "path": "slots.port_range_start",
+   "secret": false,
+   "services": [],
+   "type": "number"
+  },
+  {
+   "apply_class": "immediate",
+   "constraints": {
+    "ge": 1024,
+    "le": 65535
+   },
+   "current": 8099,
+   "default": 8099,
+   "description": "Last port in the auto-allocation pool (inclusive). The default stops below 8188 so new slots never claim ComfyUI's port; the allocator also skips any port already used by an existing slot TOML. Applies to the next slot creation \u2014 no restart needed.",
+   "enum": null,
+   "group": "slots",
+   "label": "Port range end",
+   "live_target": null,
+   "path": "slots.port_range_end",
+   "secret": false,
+   "services": [],
+   "type": "number"
+  },
+  {
+   "apply_class": "service-restart",
+   "constraints": {
+    "ge": 0
+   },
+   "current": 300,
+   "default": 300,
+   "description": "Default idle-TTL (seconds) for hard eviction, applied per slot when the slot's own TOML has no idle_timeout_s override. 0 disables IDLE-TTL eviction for slots using this default \u2014 pressure eviction and pre-load eviction are separate paths, exempted by `pinned`, not by this value. The ComfyUI img-group slot is never unloaded by idle, pressure or pre-load eviction.",
+   "enum": null,
+   "group": "slots",
+   "label": "Idle timeout s",
+   "live_target": null,
+   "path": "slots.idle_timeout_s",
+   "secret": false,
+   "services": [
+    "hal0-api"
+   ],
+   "type": "number"
+  },
+  {
+   "apply_class": "service-restart",
+   "constraints": {
+    "ge": 0
+   },
+   "current": 8192,
+   "default": 8192,
+   "description": "Host free-RAM floor (MiB) for pressure-driven eviction (#903, spec 2026-08-02). When host MemAvailable drops below this value, every non-pinned resident slot is a candidate, evicted in priority order (lowest `priority` first, least-recently-used as the tie-break within a tier) until free RAM is back above the floor. 0 disables pressure eviction. `pinned` is the only per-slot exemption \u2014 `idle_timeout_s = 0` on a slot does not exempt it from this path. The ComfyUI img-group slot is never a candidate.",
+   "enum": null,
+   "group": "slots",
+   "label": "Evict pressure mb",
+   "live_target": null,
+   "path": "slots.evict_pressure_mb",
+   "secret": false,
+   "services": [
+    "hal0-api"
+   ],
+   "type": "number"
+  },
+  {
+   "apply_class": "service-restart",
+   "constraints": {},
+   "current": true,
+   "default": true,
+   "description": "Free memory SYNCHRONOUSLY before a load starts, when the incoming model's estimated footprint plus preload_evict_headroom_mb would not fit in projected free memory. Evicts non-pinned resident slots (never the ComfyUI img-group slot) in priority order (lowest `priority` first, least-recently-used as the tie-break within a tier) \u2014 the same eligibility evict_pressure_mb uses \u2014 until it fits, or fails the load with a clear error if it still doesn't fit after evicting everything eligible. Set to false to rely solely on the reactive pressure sweeper (#903), which only reacts after the fact on a timer.",
+   "enum": null,
+   "group": "slots",
+   "label": "Preload evict enabled",
+   "live_target": null,
+   "path": "slots.preload_evict_enabled",
+   "secret": false,
+   "services": [
+    "hal0-api"
+   ],
+   "type": "boolean"
+  },
+  {
+   "apply_class": "service-restart",
+   "constraints": {
+    "ge": 0
+   },
+   "current": 1024,
+   "default": 1024,
+   "description": "Extra free-RAM slack (MiB) required on top of a model's estimated footprint before pre-load eviction (preload_evict_enabled) considers a load safe to start. Absorbs error in the coarse file-size + KV-cache footprint estimate and runtime/container overhead the estimate doesn't capture.",
+   "enum": null,
+   "group": "slots",
+   "label": "Preload evict headroom mb",
+   "live_target": null,
+   "path": "slots.preload_evict_headroom_mb",
+   "secret": false,
+   "services": [
+    "hal0-api"
+   ],
+   "type": "number"
+  },
+  {
+   "apply_class": "service-restart",
+   "constraints": {},
+   "current": "refuse",
+   "default": "refuse",
+   "description": "Policy when an NPU slot (device=npu, the `flm` recipe) would load alongside a GPU slot (vulkan/rocm/hip) that is up or loading, or vice versa, while the Proxmox host's AMD GPU fabric clock is not held at its top DPM level (hal0.slots.fabric_clock_guard; ROCm/TheRock#8709 \u2014 a fclk DPM change mid-flight can hang the box or corrupt NPU results on Strix Halo). `refuse` (default) blocks the load with the host-side fix in the error; `warn` logs and stores the warning on the slot like the GTT-leak check but still loads; `off` skips the check entirely. An unreadable fabric-clock state (expected inside hal0's own container \u2014 the sysfs write is host-only, but the read should still work) always warns, never refuses. Overridable per-process with HAL0_FABRIC_CLOCK_GUARD.",
+   "enum": null,
+   "group": "slots",
+   "label": "Fabric clock guard",
+   "live_target": null,
+   "path": "slots.fabric_clock_guard",
+   "secret": false,
+   "services": [
+    "hal0-api"
+   ],
+   "type": "string"
+  },
+  {
+   "apply_class": "service-restart",
+   "constraints": {},
+   "current": true,
+   "default": true,
+   "description": "Let hal0 repair a MISSING netavark DNAT rule on its own (#3724): when a running slot fails /health because its published port has no DNAT rule reaching the container, or a slot start leaves another running container's port without one, run `podman network reload --all` (rebuilds every running container's rules, restarts nothing) at most once per 10 minutes box-wide, then re-probe. Stale rules are never auto-repaired. Set to false to only report (error_reason port_dnat_missing) and leave the repair to `hal0 doctor ports --fix`.",
+   "enum": null,
+   "group": "slots",
+   "label": "Port dnat auto repair",
+   "live_target": null,
+   "path": "slots.port_dnat_auto_repair",
+   "secret": false,
+   "services": [
+    "hal0-api"
+   ],
+   "type": "boolean"
+  },
+  {
+   "apply_class": "service-restart",
+   "constraints": {},
+   "current": "127.0.0.1",
+   "default": "127.0.0.1",
+   "description": "Host address slot containers publish their port on (``--publish=<host>:<port>:<port>``). Default ``127.0.0.1`` keeps slot ports loopback-only, reachable solely through hal0-api/Traefik \u2014 the safe default. Set to ``0.0.0.0`` to bind every slot on all interfaces so raw slot ports are reachable directly over the LAN (e.g. ``http://<host>.local:<port>``); this EXPOSES inference endpoints on your network, bypassing the API/reverse-proxy front door. A specific interface IP (e.g. ``192.0.2.10``) binds just that address. Applies on the next slot (re)start. Host-networked slots (``network_mode=host``) ignore this \u2014 port publishing is a no-op there.",
+   "enum": null,
+   "group": "slots",
+   "label": "Publish host",
+   "live_target": null,
+   "path": "slots.publish_host",
+   "secret": false,
+   "services": [
+    "slots"
+   ],
+   "type": "string"
+  },
+  {
+   "apply_class": "service-restart",
+   "constraints": {},
+   "current": "",
+   "default": "",
+   "description": "Box-default podman network mode for slot containers (``Network=<mode>`` in the generated Quadlet). Empty (the default) means bridge networking with a loopback ``PublishPort`` \u2014 the safe default that keeps raw slot ports off the LAN behind hal0-api. Set to ``host`` on netns-limited substrates (unprivileged podman-in-LXC, where bridge netns teardown races leave slots unloadable) so every slot renders ``Network=host``. This is DEPLOY-TIME configuration for the box's substrate, not a runtime probe \u2014 the renderer never sniffs podman/LXC itself. SECURITY NOTE: host networking shares the container's loopback with hal0-api, so a host-net slot can reach 127.0.0.1 services on the CT (e.g. hal0-api itself); the compensating fence is that the slot process is force-bound to 127.0.0.1 (not 0.0.0.0) and every hal0-api route is auth-gated \u2014 the raw unauthenticated slot port is never LAN-reachable. This shared-loopback reach is the accepted residual (see docs/rework/podman-unprivileged-findings.md). A slot whose provider REQUIRES host net (ComfyUI) already forces it regardless of this default. Applies on the next slot (re)start.",
+   "enum": null,
+   "group": "slots",
+   "label": "Network mode",
+   "live_target": null,
+   "path": "slots.network_mode",
+   "secret": false,
+   "services": [
+    "slots"
+   ],
+   "type": "string"
+  },
+  {
+   "apply_class": "service-restart",
+   "constraints": {},
+   "current": {},
+   "default": {},
+   "description": "Per-runner-family operator default-image overrides (runner-image-catalogue v2). Keys are hal0.runners.RUNNER_IMAGES family keys (standard, cpu, cuda, halogen, flm, kokoro, moonshine, qwen3tts, comfyui); values are full image refs (e.g. 'ghcr.io/hal0ai/hal0-runner-standard:<tag>'). A family listed here launches that ref instead of the release-baked default wherever no per-slot image_pin applies (hal0.providers.container._resolve_image_ref). CLEAR SEMANTICS: the settings PUT deep-merge has no key-delete idiom, so sending an explicit null value for a family removes the override (the validator drops null-valued keys); an empty string is rejected. Applies on the next slot (re)start.",
+   "enum": null,
+   "group": "slots",
+   "label": "Default images",
+   "live_target": null,
+   "path": "slots.default_images",
+   "secret": false,
+   "services": [
+    "slots"
+   ],
+   "type": "map"
+  },
+  {
+   "apply_class": "service-restart",
+   "constraints": {
+    "gt": 0.0
+   },
+   "current": 8.0,
+   "default": 8.0,
+   "description": "Cold-cache prefetch timeout (PLAN.md \u00a75 Tier 2).",
+   "enum": null,
+   "group": "dispatcher",
+   "label": "Prefetch timeout s",
+   "live_target": null,
+   "path": "dispatcher.prefetch_timeout_s",
+   "secret": false,
+   "services": [
+    "hal0-api"
+   ],
+   "type": "number"
+  },
+  {
+   "apply_class": "service-restart",
+   "constraints": {
+    "ge": 30.0,
+    "le": 600.0
+   },
+   "current": 300.0,
+   "default": 300.0,
+   "description": "Non-streaming upstream read timeout in seconds. Large consolidation/extraction prompts can exceed 60s on slow slots. Streaming requests disable this per-request while the stall guard is active so the guard owns the body bound; it still bounds the wait for response headers on those requests, since the guard's own clocks only start once headers arrive. With both stall-guard bounds set to 0 it applies per body read as the transport backstop. Range 30-600.",
+   "enum": null,
+   "group": "dispatcher",
+   "label": "Direct read timeout s",
+   "live_target": null,
+   "path": "dispatcher.direct_read_timeout_s",
+   "secret": false,
+   "services": [
+    "hal0-api"
+   ],
+   "type": "number"
+  },
+  {
+   "apply_class": "service-restart",
+   "constraints": {
+    "ge": 0.0,
+    "le": 86400.0
+   },
+   "current": 900.0,
+   "default": 900.0,
+   "description": "Stall guard: max wall-clock duration of a relayed upstream stream before hal0 cuts it off and emits a terminal diagnostic chunk. Without this a chatty never-terminating upstream is relayed forever \u2014 each chunk resets the transport read timer (#1893). Note this is wall clock: a healthy long generation on slow hardware that outlives the budget is also cut. 0 disables the bound.",
+   "enum": null,
+   "group": "dispatcher",
+   "label": "Stream total timeout s",
+   "live_target": null,
+   "path": "dispatcher.stream_total_timeout_s",
+   "secret": false,
+   "services": [
+    "hal0-api"
+   ],
+   "type": "number"
+  },
+  {
+   "apply_class": "service-restart",
+   "constraints": {
+    "ge": 0.0,
+    "le": 86400.0
+   },
+   "current": 300.0,
+   "default": 300.0,
+   "description": "Stall guard: max gap between two chunks of a relayed upstream stream before hal0 cuts it off. Must stay above the slowest expected prompt-processing silence on a cold CPU slot. 0 disables the bound.",
+   "enum": null,
+   "group": "dispatcher",
+   "label": "Stream idle timeout s",
+   "live_target": null,
+   "path": "dispatcher.stream_idle_timeout_s",
+   "secret": false,
+   "services": [
+    "hal0-api"
+   ],
+   "type": "number"
+  },
+  {
+   "apply_class": "service-restart",
+   "constraints": {
+    "ge": 1
+   },
+   "current": 4,
+   "default": 4,
+   "description": "Max concurrent upstream parallel prefetches.",
+   "enum": null,
+   "group": "dispatcher",
+   "label": "Prefetch parallel cap",
+   "live_target": null,
+   "path": "dispatcher.prefetch_parallel_cap",
+   "secret": false,
+   "services": [
+    "hal0-api"
+   ],
+   "type": "number"
+  },
+  {
+   "apply_class": "service-restart",
+   "constraints": {
+    "ge": 1.0,
+    "le": 86400.0
+   },
+   "current": 1800.0,
+   "default": 1800.0,
+   "description": "Max seconds a request may wait in a slot's admission queue (hal0.dispatcher.admission; only applies to slots with max_inflight set) before the dispatcher gives up and returns 503 with Retry-After, rather than forwarding. The read-timeout clock for the forward itself starts only after admission, so this bound is independent of [dispatcher].direct_read_timeout_s.",
+   "enum": null,
+   "group": "dispatcher",
+   "label": "Admission wait timeout s",
+   "live_target": null,
+   "path": "dispatcher.admission_wait_timeout_s",
+   "secret": false,
+   "services": [
+    "hal0-api"
+   ],
+   "type": "number"
+  },
+  {
+   "apply_class": "immediate",
+   "constraints": {},
+   "current": false,
+   "default": false,
+   "description": "Opt-in anonymous telemetry.  Off by default.  See PLAN.md \u00a714.",
+   "enum": null,
+   "group": "telemetry",
+   "label": "Enabled",
+   "live_target": null,
+   "path": "telemetry.enabled",
+   "secret": false,
+   "services": [],
+   "type": "boolean"
+  },
+  {
+   "apply_class": "immediate",
+   "constraints": {},
+   "current": "stable",
+   "default": "stable",
+   "description": "Update channel: 'stable' | 'preview' | 'nightly'.",
+   "enum": [
+    "stable",
+    "preview",
+    "nightly"
+   ],
+   "group": "telemetry",
+   "label": "Channel",
+   "live_target": null,
+   "path": "telemetry.channel",
+   "secret": false,
+   "services": [],
+   "type": "enum"
+  },
+  {
+   "apply_class": "service-restart",
+   "constraints": {},
+   "current": true,
+   "default": true,
+   "description": "At every hal0-api start, restart slots whose running container uses a different runner image than the one a fresh render would pick (a stale image keeps serving the build a release replaced). Slots with a request in flight, or whose activity cannot be read (no metrics endpoint, e.g. image/speech runtimes), are skipped. Argv-only drift is never restarted. Consumed once at startup, so a change needs a hal0-api restart.",
+   "enum": null,
+   "group": "updates",
+   "label": "Auto restart image drift",
+   "live_target": null,
+   "path": "updates.auto_restart_image_drift",
+   "secret": false,
+   "services": [
+    "hal0-api"
+   ],
+   "type": "boolean"
+  },
+  {
+   "apply_class": "service-restart",
+   "constraints": {},
+   "current": [
+    "/var/lib/hal0/models"
+   ],
+   "default": [
+    "/var/lib/hal0/models"
+   ],
+   "description": "Filesystem roots scanned for downloaded model files. Each must be an absolute path; non-existent paths are skipped at scan time. Default tracks HAL0_HOME for dev installs.",
+   "enum": null,
+   "group": "models",
+   "label": "Roots",
+   "live_target": null,
+   "path": "models.roots",
+   "secret": false,
+   "services": [
+    "hal0-api"
+   ],
+   "type": "string[]"
+  },
+  {
+   "apply_class": "immediate",
+   "constraints": {},
+   "current": true,
+   "default": true,
+   "description": "Run the discovery scan during app startup.",
+   "enum": null,
+   "group": "models",
+   "label": "Auto scan on start",
+   "live_target": null,
+   "path": "models.auto_scan_on_start",
+   "secret": false,
+   "services": [],
+   "type": "boolean"
+  },
+  {
+   "apply_class": "service-restart",
+   "constraints": {},
+   "current": [
+    ".gguf",
+    ".safetensors",
+    ".hgn"
+   ],
+   "default": [
+    ".gguf",
+    ".safetensors",
+    ".hgn"
+   ],
+   "description": "Filename suffixes treated as candidate model files (lowercase, includes the dot).",
+   "enum": null,
+   "group": "models",
+   "label": "File extensions",
+   "live_target": null,
+   "path": "models.file_extensions",
+   "secret": false,
+   "services": [
+    "hal0-api"
+   ],
+   "type": "string[]"
+  },
+  {
+   "apply_class": "service-restart",
+   "constraints": {},
+   "current": "/var/lib/hal0/models",
+   "default": "/var/lib/hal0/models",
+   "description": "DEPRECATED \u2014 superseded by ``[models].store``. Retained so PR #313 installs round-trip without a manual edit. When ``store`` is set the pull engine ignores this field; clearing ``store`` falls back to ``pull_root`` so an operator who hand-edited their TOML pre-store still works. Will be removed in a future release.",
+   "enum": null,
+   "group": "models",
+   "label": "Pull root",
+   "live_target": null,
+   "path": "models.pull_root",
+   "secret": false,
+   "services": [
+    "slots"
+   ],
+   "type": "string"
+  },
+  {
+   "apply_class": "service-restart",
+   "constraints": {},
+   "current": "",
+   "default": "",
+   "description": "Single source of truth for where hal0 reads + writes model files. When set (absolute path, e.g. ``/mnt/ai-models``), the pull engine writes here AND slot containers bind-mount the path identical-path with an SELinux relabel (observed on the next slot restart; see ``paths.model_store_root``). ``HAL0_MODEL_STORE`` env overrides it. Empty falls back to ``pull_root`` for PR-#313 compatibility, which itself defaults to ``paths.models_dir()``; note the mount default stays ``/mnt/ai-models`` (not ``pull_root``) so existing deployments are unaffected until ``store`` is set.",
+   "enum": null,
+   "group": "models",
+   "label": "Store",
+   "live_target": null,
+   "path": "models.store",
+   "secret": false,
+   "services": [
+    "slots"
+   ],
+   "type": "string"
+  },
+  {
+   "apply_class": "service-restart",
+   "constraints": {},
+   "current": "",
+   "default": "",
+   "description": "Where FLM (NPU backend) model weights live. The NPU slot container bind-mounts this directory over FLM's hardcoded ~/.config/flm/models cache, and the host ``flm`` probe/pull bookkeeping points at it. Empty falls back to the HAL0_FLM_MODELS_DIR env var, then to FLM's default cache under the hal0 HOME (/var/lib/hal0/.config/flm/models). Set an absolute path (e.g. /mnt/ai-models/flm/models) to keep NPU weights off the root filesystem; hal0 creates the directory (container-uid-writable) at slot-spec build time and the generated unit orders after the backing mount, so a reboot with a late or missing mount no longer kills the slot with podman exit 125.",
+   "enum": null,
+   "group": "models",
+   "label": "FLM store",
+   "live_target": null,
+   "path": "models.flm_store",
+   "secret": false,
+   "services": [
+    "slots"
+   ],
+   "type": "string"
+  },
+  {
+   "apply_class": "service-restart",
+   "constraints": {},
+   "current": true,
+   "default": true,
+   "description": "Whether the memory subsystem (Hindsight engine, /mcp/memory, /api/memory/*, the dashboard's Agent -> Memory tab) is built at startup. Replaces the old HAL0_MEMORY_ENABLED env var \u2014 toggle via 'hal0 memory enable' / 'hal0 memory disable'. Consumed once at create_app(), so a change needs a hal0-api restart.",
+   "enum": null,
+   "group": "memory",
+   "label": "Enabled",
+   "live_target": null,
+   "path": "memory.enabled",
+   "secret": false,
+   "services": [
+    "hal0-api"
+   ],
+   "type": "boolean"
+  },
+  {
+   "apply_class": "immediate",
+   "constraints": {},
+   "current": false,
+   "default": false,
+   "description": "Reporting gate for the graph-extraction status surface. Hindsight builds its graph natively, so this flag is informational on that engine; vector recall is unaffected either way.",
+   "enum": null,
+   "group": "memory.graph",
+   "label": "Enabled",
+   "live_target": null,
+   "path": "memory.graph.enabled",
+   "secret": false,
+   "services": [],
+   "type": "boolean"
+  },
+  {
+   "apply_class": "immediate",
+   "constraints": {},
+   "current": "memory",
+   "default": "memory",
+   "description": "The local llm slot Hindsight uses for graph extraction / consolidation / reflect while extraction_model is unset. hindsight-api calls the fixed id hal0/memory; hal0's /v1 resolves it to this slot per call, falling back to agent when memory has no bound model (ADR-0053), so a change needs no engine restart. Validated against the live enabled-llm-slot set by the API at set-time.",
+   "enum": null,
+   "group": "memory.graph",
+   "label": "Extraction slot",
+   "live_target": null,
+   "path": "memory.graph.extraction_slot",
+   "secret": false,
+   "services": [],
+   "type": "string"
+  },
+  {
+   "apply_class": "immediate",
+   "constraints": {},
+   "current": null,
+   "default": null,
+   "description": "Optional upstream model the memory engine runs on instead of the local extraction_slot (#2919): an id hal0's own /v1 already routes to a configured upstream, e.g. 'MiniMax-M2.5' or 'minimax/minimax-m3'. hindsight-api always calls the fixed virtual id hal0/memory; hal0 resolves that to this model when set, else to hal0/<extraction_slot>, so switching needs no engine restart. Validated against the live upstream catalogs by the API at set-time. Never a hal0/<slot> id \u2014 a local slot belongs in extraction_slot.",
+   "enum": null,
+   "group": "memory.graph",
+   "label": "Extraction model",
+   "live_target": null,
+   "path": "memory.graph.extraction_model",
+   "secret": false,
+   "services": [],
+   "type": "string"
+  },
+  {
+   "apply_class": "immediate",
+   "constraints": {
+    "ge": 30,
+    "le": 3600
+   },
+   "current": 300,
+   "default": 300,
+   "description": "Timeout (seconds) for the Hindsight daemon's LLM calls \u2014 extraction, consolidation, and reflect. Covers cold slot starts and long reflects. Propagated to hindsight-api as HINDSIGHT_API_LLM_TIMEOUT via the same systemd drop-in as the extraction slot; the daemon restarts to pick it up. It also sets the retain wall limit (HINDSIGHT_API_RETAIN_WALL_TIMEOUT, which hal0 derives, see extraction_llm_retries): the wall limit is always above llm_timeout_s x (extraction_llm_retries + 1). Hindsight sends these calls non-streaming through hal0's /v1, so hal0 also uses this value as the read timeout for hal0/memory requests when it is longer than [dispatcher].direct_read_timeout_s; a shorter value never lowers that setting.",
+   "enum": null,
+   "group": "memory.graph",
+   "label": "Llm timeout s",
+   "live_target": null,
+   "path": "memory.graph.llm_timeout_s",
+   "secret": false,
+   "services": [],
+   "type": "number"
+  },
+  {
+   "apply_class": "immediate",
+   "constraints": {
+    "ge": 1,
+    "le": 8
+   },
+   "current": 1,
+   "default": 1,
+   "description": "How many LLM calls Hindsight may have in flight at once against the extraction target (HINDSIGHT_API_LLM_MAX_CONCURRENT and HINDSIGHT_API_RETAIN_LLM_MAX_CONCURRENT). This also bounds consolidation, reflect and mental-model refresh. 1 serialises them; raise it only for a slot that genuinely serves parallel requests. hal0 holds the rendered value to the extraction slot's --parallel (calls beyond it queue inside llama-server and time out), keeps this setting as you wrote it, and warns on save and in graph status when it clamps. Applied via the hindsight-api drop-in; the daemon restarts to pick it up.",
+   "enum": null,
+   "group": "memory.graph",
+   "label": "Extraction max concurrent",
+   "live_target": null,
+   "path": "memory.graph.extraction_max_concurrent",
+   "secret": false,
+   "services": [],
+   "type": "number"
+  },
+  {
+   "apply_class": "immediate",
+   "constraints": {
+    "ge": 3072,
+    "le": 32768
+   },
+   "current": 16384,
+   "default": 16384,
+   "description": "Completion-token cap per extraction call (HINDSIGHT_API_RETAIN_MAX_COMPLETION_TOKENS). Bounds how long one call can run. Hindsight refuses every retain into a bank whose retain chunk size is not strictly below this cap: the engine default chunk is 3000 (which the 3072 floor clears), but the Hindsight coding-agent plugin sets 12000 on its bank strategies, hence the 16384 default. A larger cap lengthens each call on a small slot, so keep llm_timeout_s above the time one call takes. Applied via the hindsight-api drop-in; the daemon restarts to pick it up.",
+   "enum": null,
+   "group": "memory.graph",
+   "label": "Extraction max tokens",
+   "live_target": null,
+   "path": "memory.graph.extraction_max_tokens",
+   "secret": false,
+   "services": [],
+   "type": "number"
+  },
+  {
+   "apply_class": "immediate",
+   "constraints": {
+    "ge": 0,
+    "le": 5
+   },
+   "current": 1,
+   "default": 1,
+   "description": "Retries of a single extraction LLM call inside one retain attempt (HINDSIGHT_API_RETAIN_LLM_MAX_RETRIES). Each retry can wait the full LLM timeout. Together with llm_timeout_s it fixes the retain wall limit hal0 writes as HINDSIGHT_API_RETAIN_WALL_TIMEOUT: Hindsight cancels a retain that runs past it and marks it failed without retrying. With per_call = llm_timeout_s x (extraction_llm_retries + 1), the limit is max(min(max(3600, 3 x per_call), 14400), per_call + llm_timeout_s) seconds: three worst-case calls, never below Hindsight's own 3600 s, capped at 4 h so one document cannot hold the single extraction lane longer (only a per-call budget already past the cap raises it), and always strictly above one call so a call is never cut mid-flight. Defaults give 3600 s. Applied via the hindsight-api drop-in; the daemon restarts to pick it up.",
+   "enum": null,
+   "group": "memory.graph",
+   "label": "Extraction llm retries",
+   "live_target": null,
+   "path": "memory.graph.extraction_llm_retries",
+   "secret": false,
+   "services": [],
+   "type": "number"
+  },
+  {
+   "apply_class": "immediate",
+   "constraints": {
+    "ge": 0,
+    "le": 10
+   },
+   "current": 2,
+   "default": 2,
+   "description": "How many times a failed queued memory task is requeued before it is marked failed (HINDSIGHT_API_WORKER_MAX_RETRIES) and shows under 'Retry failed' on the Memory page. Bounds the total time one document can occupy the slot. This is Hindsight's worker-wide setting: it applies to every queued operation (retain, consolidation, mental-model refresh), not only extraction. Applied via the hindsight-api drop-in; the daemon restarts to pick it up.",
+   "enum": null,
+   "group": "memory.graph",
+   "label": "Extraction task retries",
+   "live_target": null,
+   "path": "memory.graph.extraction_task_retries",
+   "secret": false,
+   "services": [],
+   "type": "number"
+  },
+  {
+   "apply_class": "immediate",
+   "constraints": {
+    "ge": 10,
+    "le": 3600
+   },
+   "current": 120,
+   "default": 120,
+   "description": "Seconds a failed queued memory task waits before it is requeued (HINDSIGHT_API_WORKER_TASK_RETRY_BACKOFF_SECONDS), so a retry does not land on a slot that is still busy with the attempt that just timed out. Worker-wide like extraction_task_retries: every queued operation shares it. Applied via the hindsight-api drop-in; the daemon restarts to pick it up.",
+   "enum": null,
+   "group": "memory.graph",
+   "label": "Extraction retry backoff s",
+   "live_target": null,
+   "path": "memory.graph.extraction_retry_backoff_s",
+   "secret": false,
+   "services": [],
+   "type": "number"
+  },
+  {
+   "apply_class": "immediate",
+   "constraints": {
+    "ge": 3,
+    "le": 32
+   },
+   "current": 4,
+   "default": 4,
+   "description": "How many queued memory tasks (retain, consolidation, mental-model refresh) the engine runs at once (HINDSIGHT_API_WORKER_MAX_SLOTS). Independent of extraction_max_concurrent, which caps LLM calls: each running task also holds its chunks, embeddings and graph writes in memory. Hindsight's own default of 10 took the engine to several GiB resident and into the OOM killer on an 11 GiB box, so hal0 renders 4. Part of these slots is reserved per task type (retain_reserved_slots, consolidation_reserved_slots, refresh_reserved_slots); the rest is one shared pool any task may use, and the reservations must leave at least one slot in it. The floor is 3. Worker-wide like extraction_task_retries. Applied via the hindsight-api drop-in; the daemon restarts to pick it up.",
+   "enum": null,
+   "group": "memory.graph",
+   "label": "Extraction worker slots",
+   "live_target": null,
+   "path": "memory.graph.extraction_worker_slots",
+   "secret": false,
+   "services": [],
+   "type": "number"
+  },
+  {
+   "apply_class": "immediate",
+   "constraints": {
+    "ge": 0,
+    "le": 31
+   },
+   "current": 1,
+   "default": 1,
+   "description": "Worker slots only retains may use (HINDSIGHT_API_WORKER_RETAIN_RESERVED_SLOTS), so new memories are stored even while page refreshes or consolidation hold every shared slot. A floor, not a cap: retains also use free shared slots. When hal0.toml does not set it and extraction_worker_slots has no room for it (3 slots with consolidation's 2), it is 0 instead of 1. Applied via the hindsight-api drop-in; the daemon restarts to pick it up.",
+   "enum": null,
+   "group": "memory.graph",
+   "label": "Retain reserved slots",
+   "live_target": null,
+   "path": "memory.graph.retain_reserved_slots",
+   "secret": false,
+   "services": [],
+   "type": "number"
+  },
+  {
+   "apply_class": "immediate",
+   "constraints": {
+    "ge": 0,
+    "le": 31
+   },
+   "current": 2,
+   "default": 2,
+   "description": "Worker slots only consolidation may use (HINDSIGHT_API_WORKER_CONSOLIDATION_RESERVED_SLOTS). 2 is Hindsight's own default. A floor, not a cap. Applied via the hindsight-api drop-in; the daemon restarts to pick it up.",
+   "enum": null,
+   "group": "memory.graph",
+   "label": "Consolidation reserved slots",
+   "live_target": null,
+   "path": "memory.graph.consolidation_reserved_slots",
+   "secret": false,
+   "services": [],
+   "type": "number"
+  },
+  {
+   "apply_class": "immediate",
+   "constraints": {
+    "ge": 0,
+    "le": 31
+   },
+   "current": 0,
+   "default": 0,
+   "description": "Worker slots only knowledge-page (mental model) refreshes may use (HINDSIGHT_API_WORKER_REFRESH_MENTAL_MODEL_RESERVED_SLOTS). 0, Hindsight's own default, leaves refreshes to the shared pool. A floor, not a cap. Applied via the hindsight-api drop-in; the daemon restarts to pick it up.",
+   "enum": null,
+   "group": "memory.graph",
+   "label": "Refresh reserved slots",
+   "live_target": null,
+   "path": "memory.graph.refresh_reserved_slots",
+   "secret": false,
+   "services": [],
+   "type": "number"
+  },
+  {
+   "apply_class": "immediate",
+   "constraints": {},
+   "current": true,
+   "default": true,
+   "description": "Enable shared-memory chat priority.",
+   "enum": null,
+   "group": "memory.priority",
+   "label": "Enabled",
+   "live_target": null,
+   "path": "memory.priority.enabled",
+   "secret": false,
+   "services": [],
+   "type": "boolean"
+  },
+  {
+   "apply_class": "immediate",
+   "constraints": {
+    "ge": 0
+   },
+   "current": 30,
+   "default": 30,
+   "description": "Quiet time after chat, in seconds.",
+   "enum": null,
+   "group": "memory.priority",
+   "label": "Quiet gap s",
+   "live_target": null,
+   "path": "memory.priority.quiet_gap_s",
+   "secret": false,
+   "services": [],
+   "type": "number"
+  },
+  {
+   "apply_class": "immediate",
+   "constraints": {
+    "ge": 0
+   },
+   "current": 300,
+   "default": 300,
+   "description": "Starvation admission threshold, in seconds.",
+   "enum": null,
+   "group": "memory.priority",
+   "label": "Max defer s",
+   "live_target": null,
+   "path": "memory.priority.max_defer_s",
+   "secret": false,
+   "services": [],
+   "type": "number"
+  },
+  {
+   "apply_class": "service-restart",
+   "constraints": {},
+   "current": true,
+   "default": true,
+   "description": "Run the fallback reranker when recall results carry no engine score (an engine without ``scores.final``). It is skipped with no network call while the ``rerank`` slot serves no model.",
+   "enum": null,
+   "group": "memory.embedding",
+   "label": "Rerank fallback",
+   "live_target": null,
+   "path": "memory.embedding.rerank_fallback",
+   "secret": false,
+   "services": [
+    "hal0-api"
+   ],
+   "type": "boolean"
+  },
+  {
+   "apply_class": "service-restart",
+   "constraints": {},
+   "current": "http://127.0.0.1:8080",
+   "default": "http://127.0.0.1:8080",
+   "description": "Base URL of the OpenAI-compatible gateway the memory reranker calls (``POST {url}/v1/rerankings``). Defaults to hal0-api itself, whose dispatcher routes to the rerank slot.",
+   "enum": null,
+   "group": "memory.embedding",
+   "label": "Rerank gateway URL",
+   "live_target": null,
+   "path": "memory.embedding.rerank_gateway_url",
+   "secret": false,
+   "services": [
+    "hal0-api"
+   ],
+   "type": "string"
+  },
+  {
+   "apply_class": "service-restart",
+   "constraints": {},
+   "current": "",
+   "default": "",
+   "description": "Rerank model id sent to the gateway. Empty (the default) sends the model the ``rerank`` slot is bound to. Set it only to override that; it must resolve to a model the slot serves.",
+   "enum": null,
+   "group": "memory.embedding",
+   "label": "Rerank model",
+   "live_target": null,
+   "path": "memory.embedding.rerank_model",
+   "secret": false,
+   "services": [
+    "hal0-api"
+   ],
+   "type": "string"
+  },
+  {
+   "apply_class": "service-restart",
+   "constraints": {
+    "ge": 0.05,
+    "le": 10.0
+   },
+   "current": 1.0,
+   "default": 1.0,
+   "description": "TCP connect timeout for the rerank HTTP call. Kept short so a wedged rerank slot can't stall memory_search; the read budget is the larger of the two knobs.",
+   "enum": null,
+   "group": "memory.embedding",
+   "label": "Rerank connect timeout s",
+   "live_target": null,
+   "path": "memory.embedding.rerank_connect_timeout_s",
+   "secret": false,
+   "services": [
+    "hal0-api"
+   ],
+   "type": "number"
+  },
+  {
+   "apply_class": "service-restart",
+   "constraints": {
+    "ge": 0.05,
+    "le": 60.0
+   },
+   "current": 8.0,
+   "default": 8.0,
+   "description": "Read budget for the rerank slot. Default raised from the previous shared 2.0s scalar because GPU rerank under concurrent load (CPU oversubscription stalls responses) regularly breaches a tight total budget, which silently falls through to vector ordering. Failures still fall through \u2014 this just stops spurious timeouts under healthy-but-loaded conditions.",
+   "enum": null,
+   "group": "memory.embedding",
+   "label": "Rerank read timeout s",
+   "live_target": null,
+   "path": "memory.embedding.rerank_read_timeout_s",
+   "secret": false,
+   "services": [
+    "hal0-api"
+   ],
+   "type": "number"
+  },
+  {
+   "apply_class": "manual-restart",
+   "constraints": {},
+   "current": "local",
+   "default": "local",
+   "description": "HINDSIGHT_API_EMBEDDINGS_PROVIDER \u2014 'local' runs in-process on CPU.",
+   "enum": null,
+   "group": "memory.models",
+   "label": "Embeddings provider",
+   "live_target": null,
+   "note": "saved; takes effect only through an embedder switch",
+   "path": "memory.models.embeddings_provider",
+   "secret": false,
+   "services": [],
+   "type": "string"
+  },
+  {
+   "apply_class": "manual-restart",
+   "constraints": {},
+   "current": "hindsight-ai/hs-embed-1",
+   "default": "hindsight-ai/hs-embed-1",
+   "description": "HINDSIGHT_API_EMBEDDINGS_LOCAL_MODEL.",
+   "enum": null,
+   "group": "memory.models",
+   "label": "Embeddings model",
+   "live_target": null,
+   "note": "saved; takes effect only through an embedder switch",
+   "path": "memory.models.embeddings_model",
+   "secret": false,
+   "services": [],
+   "type": "string"
+  },
+  {
+   "apply_class": "immediate",
+   "constraints": {},
+   "current": "local",
+   "default": "local",
+   "description": "HINDSIGHT_API_RERANKER_PROVIDER \u2014 'local' runs in-process on CPU.",
+   "enum": null,
+   "group": "memory.models",
+   "label": "Reranker provider",
+   "live_target": null,
+   "path": "memory.models.reranker_provider",
+   "secret": false,
+   "services": [],
+   "type": "string"
+  },
+  {
+   "apply_class": "immediate",
+   "constraints": {},
+   "current": "hindsight-ai/hs-rerank-1",
+   "default": "hindsight-ai/hs-rerank-1",
+   "description": "HINDSIGHT_API_RERANKER_LOCAL_MODEL.",
+   "enum": null,
+   "group": "memory.models",
+   "label": "Reranker model",
+   "live_target": null,
+   "path": "memory.models.reranker_model",
+   "secret": false,
+   "services": [],
+   "type": "string"
+  },
+  {
+   "apply_class": "immediate",
+   "constraints": {},
+   "current": true,
+   "default": true,
+   "description": "HINDSIGHT_API_RERANKER_LOCAL_BUCKET_BATCHING.",
+   "enum": null,
+   "group": "memory.models",
+   "label": "Reranker bucket batching",
+   "live_target": null,
+   "path": "memory.models.reranker_bucket_batching",
+   "secret": false,
+   "services": [],
+   "type": "boolean"
+  },
+  {
+   "apply_class": "immediate",
+   "constraints": {
+    "ge": 1,
+    "le": 10000
+   },
+   "current": 60,
+   "default": 60,
+   "description": "HINDSIGHT_API_RERANKER_MAX_CANDIDATES \u2014 how many recall candidates the reranker scores. The engine default is 300, which costs 30-40 s per recall on the CPU cross-encoder; 60 keeps recall under a second.",
+   "enum": null,
+   "group": "memory.models",
+   "label": "Reranker max candidates",
+   "live_target": null,
+   "path": "memory.models.reranker_max_candidates",
+   "secret": false,
+   "services": [],
+   "type": "number"
+  },
+  {
+   "apply_class": "immediate",
+   "constraints": {
+    "ge": 1,
+    "le": 10000
+   },
+   "current": null,
+   "default": null,
+   "description": "HINDSIGHT_API_RERANKER_MAX_CANDIDATES_LOW \u2014 cap for low-budget recalls. Unset uses reranker_max_candidates.",
+   "enum": null,
+   "group": "memory.models",
+   "label": "Reranker max candidates low",
+   "live_target": null,
+   "path": "memory.models.reranker_max_candidates_low",
+   "secret": false,
+   "services": [],
+   "type": "number"
+  },
+  {
+   "apply_class": "immediate",
+   "constraints": {
+    "ge": 1,
+    "le": 10000
+   },
+   "current": null,
+   "default": null,
+   "description": "HINDSIGHT_API_RERANKER_MAX_CANDIDATES_MID \u2014 mid-budget cap.",
+   "enum": null,
+   "group": "memory.models",
+   "label": "Reranker max candidates mid",
+   "live_target": null,
+   "path": "memory.models.reranker_max_candidates_mid",
+   "secret": false,
+   "services": [],
+   "type": "number"
+  },
+  {
+   "apply_class": "immediate",
+   "constraints": {
+    "ge": 1,
+    "le": 10000
+   },
+   "current": null,
+   "default": null,
+   "description": "HINDSIGHT_API_RERANKER_MAX_CANDIDATES_HIGH \u2014 high-budget cap.",
+   "enum": null,
+   "group": "memory.models",
+   "label": "Reranker max candidates high",
+   "live_target": null,
+   "path": "memory.models.reranker_max_candidates_high",
+   "secret": false,
+   "services": [],
+   "type": "number"
+  },
+  {
+   "apply_class": "immediate",
+   "constraints": {
+    "ge": 1,
+    "le": 64
+   },
+   "current": null,
+   "default": null,
+   "description": "HINDSIGHT_API_RERANKER_LOCAL_MAX_CONCURRENT \u2014 concurrent local rerank calls (engine default 4). 'local' provider only.",
+   "enum": null,
+   "group": "memory.models",
+   "label": "Reranker local max concurrent",
+   "live_target": null,
+   "path": "memory.models.reranker_local_max_concurrent",
+   "secret": false,
+   "services": [],
+   "type": "number"
+  },
+  {
+   "apply_class": "immediate",
+   "constraints": {
+    "ge": 1,
+    "le": 1024
+   },
+   "current": null,
+   "default": null,
+   "description": "HINDSIGHT_API_RERANKER_LOCAL_BATCH_SIZE \u2014 pairs per predict() call (engine default 32). 'local' provider only.",
+   "enum": null,
+   "group": "memory.models",
+   "label": "Reranker local batch size",
+   "live_target": null,
+   "path": "memory.models.reranker_local_batch_size",
+   "secret": false,
+   "services": [],
+   "type": "number"
+  },
+  {
+   "apply_class": "immediate",
+   "constraints": {
+    "ge": 0,
+    "le": 3600
+   },
+   "current": null,
+   "default": null,
+   "description": "HINDSIGHT_API_RERANKER_LOCAL_TIMEOUT \u2014 ceiling for one recall's local rerank, seconds (engine default 300; 0 disables). 'local' provider only.",
+   "enum": null,
+   "group": "memory.models",
+   "label": "Reranker local timeout s",
+   "live_target": null,
+   "path": "memory.models.reranker_local_timeout_s",
+   "secret": false,
+   "services": [],
+   "type": "number"
+  },
+  {
+   "apply_class": "immediate",
+   "constraints": {},
+   "current": null,
+   "default": null,
+   "description": "Remote reranker endpoint. 'litellm': the base the engine POSTs {base}/rerank to in the Cohere wire format \u2014 http://127.0.0.1:8080/v1 is hal0's own rerank slot. 'tei': the text-embeddings-inference server URL. Required for both, ignored for 'local' and 'rrf'. No credentials in the URL.",
+   "enum": null,
+   "group": "memory.models",
+   "label": "Reranker base URL",
+   "live_target": null,
+   "path": "memory.models.reranker_base_url",
+   "secret": false,
+   "services": [],
+   "type": "string"
+  },
+  {
+   "apply_class": "immediate",
+   "constraints": {},
+   "current": null,
+   "default": null,
+   "description": "HINDSIGHT_API_RERANKER_LITELLM_MODEL \u2014 the model id sent in each rerank request. Required for 'litellm'; for hal0's own endpoint, a model the rerank slot serves.",
+   "enum": null,
+   "group": "memory.models",
+   "label": "Reranker api model",
+   "live_target": null,
+   "path": "memory.models.reranker_api_model",
+   "secret": false,
+   "services": [],
+   "type": "string"
+  },
+  {
+   "apply_class": "immediate",
+   "constraints": {
+    "ge": 1,
+    "le": 600
+   },
+   "current": null,
+   "default": null,
+   "description": "Remote reranker HTTP timeout, seconds: HINDSIGHT_API_RERANKER_LITELLM_TIMEOUT (engine default 60) or HINDSIGHT_API_RERANKER_TEI_HTTP_TIMEOUT (engine default 30).",
+   "enum": null,
+   "group": "memory.models",
+   "label": "Reranker timeout s",
+   "live_target": null,
+   "path": "memory.models.reranker_timeout_s",
+   "secret": false,
+   "services": [],
+   "type": "number"
+  },
+  {
+   "apply_class": "immediate",
+   "constraints": {},
+   "current": true,
+   "default": true,
+   "description": "Whether the decision model lane is enabled at all.",
+   "enum": null,
+   "group": "memory.decision",
+   "label": "Enabled",
+   "live_target": null,
+   "path": "memory.decision.enabled",
+   "secret": false,
+   "services": [],
+   "type": "boolean"
+  },
+  {
+   "apply_class": "immediate",
+   "constraints": {},
+   "current": "off",
+   "default": "off",
+   "description": "'off' (the default: the engine uses its LLM lane for decision-gated operations), 'local' (the hal0-hs-decide service that `hal0 memory decision install` builds), or 'hindsight-cloud' (hosted decision model).",
+   "enum": null,
+   "group": "memory.decision",
+   "label": "Provider",
+   "live_target": null,
+   "path": "memory.decision.provider",
+   "secret": false,
+   "services": [],
+   "type": "string"
+  },
+  {
+   "apply_class": "immediate",
+   "constraints": {},
+   "current": "hs-decide-1-flash",
+   "default": "hs-decide-1-flash",
+   "description": "HINDSIGHT_API_DECISION_MODEL_MODEL.",
+   "enum": null,
+   "group": "memory.decision",
+   "label": "Model",
+   "live_target": null,
+   "path": "memory.decision.model",
+   "secret": false,
+   "services": [],
+   "type": "string"
+  },
+  {
+   "apply_class": "immediate",
+   "constraints": {
+    "ge": 1,
+    "le": 64
+   },
+   "current": 8,
+   "default": 8,
+   "description": "CPU thread count for the local hal0-hs-decide server.",
+   "enum": null,
+   "group": "memory.decision",
+   "label": "Threads",
+   "live_target": null,
+   "path": "memory.decision.threads",
+   "secret": false,
+   "services": [],
+   "type": "number"
+  },
+  {
+   "apply_class": "immediate",
+   "constraints": {
+    "ge": 1,
+    "le": 64
+   },
+   "current": 4,
+   "default": 4,
+   "description": "HINDSIGHT_API_DECISION_MODEL_MAX_CONCURRENT.",
+   "enum": null,
+   "group": "memory.decision",
+   "label": "Max concurrent",
+   "live_target": null,
+   "path": "memory.decision.max_concurrent",
+   "secret": false,
+   "services": [],
+   "type": "number"
+  },
+  {
+   "apply_class": "immediate",
+   "constraints": {
+    "ge": 256,
+    "le": 32768
+   },
+   "current": 4096,
+   "default": 4096,
+   "description": "HINDSIGHT_API_DECISION_MODEL_MAX_REQUEST_TOKENS \u2014 CPU latency budget cap; measured ~25s @ 8.5k tokens on shared CPU.",
+   "enum": null,
+   "group": "memory.decision",
+   "label": "Max request tokens",
+   "live_target": null,
+   "path": "memory.decision.max_request_tokens",
+   "secret": false,
+   "services": [],
+   "type": "number"
+  },
+  {
+   "apply_class": "immediate",
+   "constraints": {
+    "ge": 5,
+    "le": 600
+   },
+   "current": 60,
+   "default": 60,
+   "description": "HTTP timeout (seconds) for decision-model calls.",
+   "enum": null,
+   "group": "memory.decision",
+   "label": "Timeout s",
+   "live_target": null,
+   "path": "memory.decision.timeout_s",
+   "secret": false,
+   "services": [],
+   "type": "number"
+  },
+  {
+   "apply_class": "immediate",
+   "constraints": {
+    "ge": 1,
+    "le": 65535
+   },
+   "current": 9178,
+   "default": 9178,
+   "description": "Port the local hal0-hs-decide service binds.",
+   "enum": null,
+   "group": "memory.decision",
+   "label": "Port",
+   "live_target": null,
+   "path": "memory.decision.port",
+   "secret": false,
+   "services": [],
+   "type": "number"
+  },
+  {
+   "apply_class": "immediate",
+   "constraints": {},
+   "current": null,
+   "default": null,
+   "description": "Override for where hal0 proxies POST /v1/systemone. Unset means http://127.0.0.1:<port> (the local hal0-hs-decide service).",
+   "enum": null,
+   "group": "memory.decision",
+   "label": "Base URL",
+   "live_target": null,
+   "path": "memory.decision.base_url",
+   "secret": false,
+   "services": [],
+   "type": "string"
+  },
+  {
+   "apply_class": "immediate",
+   "constraints": {
+    "ge": 1,
+    "le": 32
+   },
+   "current": null,
+   "default": null,
+   "description": "HINDSIGHT_API_LLM_MAX_CONCURRENT \u2014 the GLOBAL cap across every hindsight-api LLM call (retain, consolidation, reflect, mental-model-refresh together), independent of any per-op cap. Unset follows [memory.graph].extraction_max_concurrent (as held to the extraction slot's --parallel), so the one setting the dashboard edits drives the whole engine, and the consolidation lane then takes one fewer so retain and page refresh always have a permit. An explicit value is still held to that same ceiling.",
+   "enum": null,
+   "group": "memory.lanes",
+   "label": "Llm max concurrent",
+   "live_target": null,
+   "path": "memory.lanes.llm_max_concurrent",
+   "secret": false,
+   "services": [],
+   "type": "number"
+  },
+  {
+   "apply_class": "immediate",
+   "constraints": {
+    "ge": 30,
+    "le": 3600
+   },
+   "current": 600,
+   "default": 600,
+   "description": "HINDSIGHT_API_LLM_TIMEOUT.",
+   "enum": null,
+   "group": "memory.lanes",
+   "label": "Timeout s",
+   "live_target": null,
+   "path": "memory.lanes.timeout_s",
+   "secret": false,
+   "services": [],
+   "type": "number"
+  },
+  {
+   "apply_class": "immediate",
+   "constraints": {},
+   "current": "none",
+   "default": "none",
+   "description": "HINDSIGHT_API_LLM_REASONING_EFFORT.",
+   "enum": null,
+   "group": "memory.lanes",
+   "label": "Reasoning effort",
+   "live_target": null,
+   "path": "memory.lanes.reasoning_effort",
+   "secret": false,
+   "services": [],
+   "type": "string"
+  },
+  {
+   "apply_class": "immediate",
+   "constraints": {},
+   "current": false,
+   "default": false,
+   "description": "HINDSIGHT_API_LLM_STRICT_SCHEMA.",
+   "enum": null,
+   "group": "memory.lanes",
+   "label": "Strict schema",
+   "live_target": null,
+   "path": "memory.lanes.strict_schema",
+   "secret": false,
+   "services": [],
+   "type": "boolean"
+  },
+  {
+   "apply_class": "immediate",
+   "constraints": {
+    "ge": 1,
+    "le": 32
+   },
+   "current": null,
+   "default": null,
+   "description": "HINDSIGHT_API_{OP}_LLM_MAX_CONCURRENT. Unset falls back to [memory.lanes].llm_max_concurrent (itself defaulting to [memory.graph].extraction_max_concurrent; consolidation takes one fewer).",
+   "enum": null,
+   "group": "memory.lanes.retain",
+   "label": "Max concurrent",
+   "live_target": null,
+   "path": "memory.lanes.retain.max_concurrent",
+   "secret": false,
+   "services": [],
+   "type": "number"
+  },
+  {
+   "apply_class": "immediate",
+   "constraints": {},
+   "current": null,
+   "default": null,
+   "description": "Optional per-op hal0 virtual model override (e.g. 'hal0/utility' for a burst lane) instead of the shared 'hal0/memory' alias.",
+   "enum": null,
+   "group": "memory.lanes.retain",
+   "label": "Virtual model",
+   "live_target": null,
+   "path": "memory.lanes.retain.virtual_model",
+   "secret": false,
+   "services": [],
+   "type": "string"
+  },
+  {
+   "apply_class": "immediate",
+   "constraints": {
+    "ge": 30,
+    "le": 3600
+   },
+   "current": null,
+   "default": null,
+   "description": "Per-op LLM timeout override.",
+   "enum": null,
+   "group": "memory.lanes.retain",
+   "label": "Timeout s",
+   "live_target": null,
+   "path": "memory.lanes.retain.timeout_s",
+   "secret": false,
+   "services": [],
+   "type": "number"
+  },
+  {
+   "apply_class": "immediate",
+   "constraints": {},
+   "current": null,
+   "default": null,
+   "description": "Per-op HINDSIGHT_API_{OP}_LLM_REASONING_EFFORT override.",
+   "enum": null,
+   "group": "memory.lanes.retain",
+   "label": "Reasoning effort",
+   "live_target": null,
+   "path": "memory.lanes.retain.reasoning_effort",
+   "secret": false,
+   "services": [],
+   "type": "string"
+  },
+  {
+   "apply_class": "immediate",
+   "constraints": {},
+   "current": null,
+   "default": null,
+   "description": "Per-op HINDSIGHT_API_{OP}_LLM_STRICT_SCHEMA override.",
+   "enum": null,
+   "group": "memory.lanes.retain",
+   "label": "Strict schema",
+   "live_target": null,
+   "path": "memory.lanes.retain.strict_schema",
+   "secret": false,
+   "services": [],
+   "type": "boolean"
+  },
+  {
+   "apply_class": "immediate",
+   "constraints": {
+    "ge": 0,
+    "le": 131072
+   },
+   "current": null,
+   "default": null,
+   "description": "Hard cap on one LLM call's output tokens (#3596): HINDSIGHT_API_CONSOLIDATION_MAX_COMPLETION_TOKENS for consolidation, HINDSIGHT_API_REFLECT_MAX_COMPLETION_TOKENS for reflect (which also bounds mental-model refresh, a reflect call). Unset means 8192 for consolidation and reflect; 0 leaves the engine uncapped. Valid only on consolidation and reflect; retain is capped by [memory.graph].extraction_max_tokens, and Hindsight has no separate mental-model-refresh cap.",
+   "enum": null,
+   "group": "memory.lanes.retain",
+   "label": "Max completion tokens",
+   "live_target": null,
+   "path": "memory.lanes.retain.max_completion_tokens",
+   "secret": false,
+   "services": [],
+   "type": "number"
+  },
+  {
+   "apply_class": "immediate",
+   "constraints": {
+    "ge": 1,
+    "le": 32
+   },
+   "current": null,
+   "default": null,
+   "description": "HINDSIGHT_API_{OP}_LLM_MAX_CONCURRENT. Unset falls back to [memory.lanes].llm_max_concurrent (itself defaulting to [memory.graph].extraction_max_concurrent; consolidation takes one fewer).",
+   "enum": null,
+   "group": "memory.lanes.consolidation",
+   "label": "Max concurrent",
+   "live_target": null,
+   "path": "memory.lanes.consolidation.max_concurrent",
+   "secret": false,
+   "services": [],
+   "type": "number"
+  },
+  {
+   "apply_class": "immediate",
+   "constraints": {},
+   "current": null,
+   "default": null,
+   "description": "Optional per-op hal0 virtual model override (e.g. 'hal0/utility' for a burst lane) instead of the shared 'hal0/memory' alias.",
+   "enum": null,
+   "group": "memory.lanes.consolidation",
+   "label": "Virtual model",
+   "live_target": null,
+   "path": "memory.lanes.consolidation.virtual_model",
+   "secret": false,
+   "services": [],
+   "type": "string"
+  },
+  {
+   "apply_class": "immediate",
+   "constraints": {
+    "ge": 30,
+    "le": 3600
+   },
+   "current": null,
+   "default": null,
+   "description": "Per-op LLM timeout override.",
+   "enum": null,
+   "group": "memory.lanes.consolidation",
+   "label": "Timeout s",
+   "live_target": null,
+   "path": "memory.lanes.consolidation.timeout_s",
+   "secret": false,
+   "services": [],
+   "type": "number"
+  },
+  {
+   "apply_class": "manual-restart",
+   "constraints": {},
+   "current": null,
+   "default": null,
+   "description": "Per-op HINDSIGHT_API_{OP}_LLM_REASONING_EFFORT override.",
+   "enum": null,
+   "group": "memory.lanes.consolidation",
+   "label": "Reasoning effort",
+   "live_target": null,
+   "path": "memory.lanes.consolidation.reasoning_effort",
+   "secret": false,
+   "services": [],
+   "type": "string"
+  },
+  {
+   "apply_class": "immediate",
+   "constraints": {},
+   "current": null,
+   "default": null,
+   "description": "Per-op HINDSIGHT_API_{OP}_LLM_STRICT_SCHEMA override.",
+   "enum": null,
+   "group": "memory.lanes.consolidation",
+   "label": "Strict schema",
+   "live_target": null,
+   "path": "memory.lanes.consolidation.strict_schema",
+   "secret": false,
+   "services": [],
+   "type": "boolean"
+  },
+  {
+   "apply_class": "immediate",
+   "constraints": {
+    "ge": 0,
+    "le": 131072
+   },
+   "current": null,
+   "default": null,
+   "description": "Hard cap on one LLM call's output tokens (#3596): HINDSIGHT_API_CONSOLIDATION_MAX_COMPLETION_TOKENS for consolidation, HINDSIGHT_API_REFLECT_MAX_COMPLETION_TOKENS for reflect (which also bounds mental-model refresh, a reflect call). Unset means 8192 for consolidation and reflect; 0 leaves the engine uncapped. Valid only on consolidation and reflect; retain is capped by [memory.graph].extraction_max_tokens, and Hindsight has no separate mental-model-refresh cap.",
+   "enum": null,
+   "group": "memory.lanes.consolidation",
+   "label": "Max completion tokens",
+   "live_target": null,
+   "path": "memory.lanes.consolidation.max_completion_tokens",
+   "secret": false,
+   "services": [],
+   "type": "number"
+  },
+  {
+   "apply_class": "immediate",
+   "constraints": {
+    "ge": 1,
+    "le": 32
+   },
+   "current": null,
+   "default": null,
+   "description": "HINDSIGHT_API_CONSOLIDATION_LLM_BATCH_SIZE (#3762): memories consolidated per LLM call (1 = no batching). The engine's own default is 8, which can overflow the 8192-token output cap hal0 renders; a batch that overflows is split and retried, and what still fails is counted as failed. Unset means hal0's default, 4 (DEFAULT_CONSOLIDATION_BATCH_SIZE), resolved when the drop-in is rendered so a save never pins it.",
+   "enum": null,
+   "group": "memory.lanes.consolidation",
+   "label": "Batch size",
+   "live_target": null,
+   "path": "memory.lanes.consolidation.batch_size",
+   "secret": false,
+   "services": [],
+   "type": "number"
+  },
+  {
+   "apply_class": "immediate",
+   "constraints": {
+    "ge": 1,
+    "le": 32
+   },
+   "current": null,
+   "default": null,
+   "description": "HINDSIGHT_API_{OP}_LLM_MAX_CONCURRENT. Unset falls back to [memory.lanes].llm_max_concurrent (itself defaulting to [memory.graph].extraction_max_concurrent; consolidation takes one fewer).",
+   "enum": null,
+   "group": "memory.lanes.reflect",
+   "label": "Max concurrent",
+   "live_target": null,
+   "path": "memory.lanes.reflect.max_concurrent",
+   "secret": false,
+   "services": [],
+   "type": "number"
+  },
+  {
+   "apply_class": "immediate",
+   "constraints": {},
+   "current": null,
+   "default": null,
+   "description": "Optional per-op hal0 virtual model override (e.g. 'hal0/utility' for a burst lane) instead of the shared 'hal0/memory' alias.",
+   "enum": null,
+   "group": "memory.lanes.reflect",
+   "label": "Virtual model",
+   "live_target": null,
+   "path": "memory.lanes.reflect.virtual_model",
+   "secret": false,
+   "services": [],
+   "type": "string"
+  },
+  {
+   "apply_class": "immediate",
+   "constraints": {
+    "ge": 30,
+    "le": 3600
+   },
+   "current": null,
+   "default": null,
+   "description": "Per-op LLM timeout override.",
+   "enum": null,
+   "group": "memory.lanes.reflect",
+   "label": "Timeout s",
+   "live_target": null,
+   "path": "memory.lanes.reflect.timeout_s",
+   "secret": false,
+   "services": [],
+   "type": "number"
+  },
+  {
+   "apply_class": "immediate",
+   "constraints": {},
+   "current": null,
+   "default": null,
+   "description": "Per-op HINDSIGHT_API_{OP}_LLM_REASONING_EFFORT override.",
+   "enum": null,
+   "group": "memory.lanes.reflect",
+   "label": "Reasoning effort",
+   "live_target": null,
+   "path": "memory.lanes.reflect.reasoning_effort",
+   "secret": false,
+   "services": [],
+   "type": "string"
+  },
+  {
+   "apply_class": "immediate",
+   "constraints": {},
+   "current": null,
+   "default": null,
+   "description": "Per-op HINDSIGHT_API_{OP}_LLM_STRICT_SCHEMA override.",
+   "enum": null,
+   "group": "memory.lanes.reflect",
+   "label": "Strict schema",
+   "live_target": null,
+   "path": "memory.lanes.reflect.strict_schema",
+   "secret": false,
+   "services": [],
+   "type": "boolean"
+  },
+  {
+   "apply_class": "immediate",
+   "constraints": {
+    "ge": 0,
+    "le": 131072
+   },
+   "current": null,
+   "default": null,
+   "description": "Hard cap on one LLM call's output tokens (#3596): HINDSIGHT_API_CONSOLIDATION_MAX_COMPLETION_TOKENS for consolidation, HINDSIGHT_API_REFLECT_MAX_COMPLETION_TOKENS for reflect (which also bounds mental-model refresh, a reflect call). Unset means 8192 for consolidation and reflect; 0 leaves the engine uncapped. Valid only on consolidation and reflect; retain is capped by [memory.graph].extraction_max_tokens, and Hindsight has no separate mental-model-refresh cap.",
+   "enum": null,
+   "group": "memory.lanes.reflect",
+   "label": "Max completion tokens",
+   "live_target": null,
+   "path": "memory.lanes.reflect.max_completion_tokens",
+   "secret": false,
+   "services": [],
+   "type": "number"
+  },
+  {
+   "apply_class": "immediate",
+   "constraints": {
+    "ge": 60,
+    "le": 86400
+   },
+   "current": null,
+   "default": null,
+   "description": "HINDSIGHT_API_REFLECT_WALL_TIMEOUT (#3759): seconds the engine gives one reflect, and one knowledge-page refresh (a reflect call), from start to finish. For a reflect the clock includes time spent waiting for an LLM permit. For a refresh it stops while a call waits for one (hindsight-api 1.2.3; one wait can add at most this many seconds), so a refresh queued behind consolidation and retain is no longer cancelled for the queue. The engine's own default is 300. Unset means hal0's default, 1800 (DEFAULT_REFLECT_WALL_TIMEOUT_S), resolved when the drop-in is rendered so a save never pins it. Keep it above [memory.graph].llm_timeout_s: a wall clock shorter than one LLM call's timeout cannot let a slow call finish.",
+   "enum": null,
+   "group": "memory.lanes.reflect",
+   "label": "Wall timeout s",
+   "live_target": null,
+   "path": "memory.lanes.reflect.wall_timeout_s",
+   "secret": false,
+   "services": [],
+   "type": "number"
+  },
+  {
+   "apply_class": "manual-restart",
+   "constraints": {
+    "ge": 1,
+    "le": 32
+   },
+   "current": null,
+   "default": null,
+   "description": "HINDSIGHT_API_{OP}_LLM_MAX_CONCURRENT. Unset falls back to [memory.lanes].llm_max_concurrent (itself defaulting to [memory.graph].extraction_max_concurrent; consolidation takes one fewer).",
+   "enum": null,
+   "group": "memory.lanes.mental_model_refresh",
+   "label": "Max concurrent",
+   "live_target": null,
+   "path": "memory.lanes.mental_model_refresh.max_concurrent",
+   "secret": false,
+   "services": [],
+   "type": "number"
+  },
+  {
+   "apply_class": "manual-restart",
+   "constraints": {},
+   "current": null,
+   "default": null,
+   "description": "Optional per-op hal0 virtual model override (e.g. 'hal0/utility' for a burst lane) instead of the shared 'hal0/memory' alias.",
+   "enum": null,
+   "group": "memory.lanes.mental_model_refresh",
+   "label": "Virtual model",
+   "live_target": null,
+   "path": "memory.lanes.mental_model_refresh.virtual_model",
+   "secret": false,
+   "services": [],
+   "type": "string"
+  },
+  {
+   "apply_class": "manual-restart",
+   "constraints": {
+    "ge": 30,
+    "le": 3600
+   },
+   "current": null,
+   "default": null,
+   "description": "Per-op LLM timeout override.",
+   "enum": null,
+   "group": "memory.lanes.mental_model_refresh",
+   "label": "Timeout s",
+   "live_target": null,
+   "path": "memory.lanes.mental_model_refresh.timeout_s",
+   "secret": false,
+   "services": [],
+   "type": "number"
+  },
+  {
+   "apply_class": "manual-restart",
+   "constraints": {},
+   "current": null,
+   "default": null,
+   "description": "Per-op HINDSIGHT_API_{OP}_LLM_REASONING_EFFORT override.",
+   "enum": null,
+   "group": "memory.lanes.mental_model_refresh",
+   "label": "Reasoning effort",
+   "live_target": null,
+   "path": "memory.lanes.mental_model_refresh.reasoning_effort",
+   "secret": false,
+   "services": [],
+   "type": "string"
+  },
+  {
+   "apply_class": "manual-restart",
+   "constraints": {},
+   "current": null,
+   "default": null,
+   "description": "Per-op HINDSIGHT_API_{OP}_LLM_STRICT_SCHEMA override.",
+   "enum": null,
+   "group": "memory.lanes.mental_model_refresh",
+   "label": "Strict schema",
+   "live_target": null,
+   "path": "memory.lanes.mental_model_refresh.strict_schema",
+   "secret": false,
+   "services": [],
+   "type": "boolean"
+  },
+  {
+   "apply_class": "manual-restart",
+   "constraints": {
+    "ge": 0,
+    "le": 131072
+   },
+   "current": null,
+   "default": null,
+   "description": "Hard cap on one LLM call's output tokens (#3596): HINDSIGHT_API_CONSOLIDATION_MAX_COMPLETION_TOKENS for consolidation, HINDSIGHT_API_REFLECT_MAX_COMPLETION_TOKENS for reflect (which also bounds mental-model refresh, a reflect call). Unset means 8192 for consolidation and reflect; 0 leaves the engine uncapped. Valid only on consolidation and reflect; retain is capped by [memory.graph].extraction_max_tokens, and Hindsight has no separate mental-model-refresh cap.",
+   "enum": null,
+   "group": "memory.lanes.mental_model_refresh",
+   "label": "Max completion tokens",
+   "live_target": null,
+   "path": "memory.lanes.mental_model_refresh.max_completion_tokens",
+   "secret": false,
+   "services": [],
+   "type": "number"
+  },
+  {
+   "apply_class": "immediate",
+   "constraints": {},
+   "current": false,
+   "default": false,
+   "description": "Install/run the Hindsight Control Plane service.",
+   "enum": null,
+   "group": "memory.console",
+   "label": "Enabled",
+   "live_target": null,
+   "path": "memory.console.enabled",
+   "secret": false,
+   "services": [],
+   "type": "boolean"
+  },
+  {
+   "apply_class": "immediate",
+   "constraints": {
+    "ge": 1,
+    "le": 65535
+   },
+   "current": 9999,
+   "default": 9999,
+   "description": "Port the Hindsight Control Plane binds; changing it moves the console link.",
+   "enum": null,
+   "group": "memory.console",
+   "label": "Port",
+   "live_target": null,
+   "path": "memory.console.port",
+   "secret": false,
+   "services": [],
+   "type": "number"
+  },
+  {
+   "apply_class": "immediate",
+   "constraints": {},
+   "current": "127.0.0.1",
+   "default": "127.0.0.1",
+   "description": "Bind address \u2014 kept loopback by default; proxy through hal0-api.",
+   "enum": null,
+   "group": "memory.console",
+   "label": "Bind",
+   "live_target": null,
+   "path": "memory.console.bind",
+   "secret": false,
+   "services": [],
+   "type": "string"
+  },
+  {
+   "apply_class": "service-restart",
+   "constraints": {},
+   "current": {},
+   "default": {},
+   "description": "Other spellings of a project: a name on the left is tagged as the project on the right (for example a repository's directory name that differs from the project's name). Applied before the deny list. An alias may not point at a denied name or back at a name that leads to it. An entry whose two sides are the same name once normalised does nothing and is ignored.",
+   "enum": null,
+   "group": "memory.projects",
+   "label": "Aliases",
+   "live_target": null,
+   "path": "memory.projects.aliases",
+   "secret": false,
+   "services": [
+    "hal0-api"
+   ],
+   "type": "map"
+  },
+  {
+   "apply_class": "service-restart",
+   "constraints": {},
+   "current": [
+    "tmp",
+    "temp",
+    "root",
+    "home",
+    "workdir",
+    "scratch",
+    "scratchpad",
+    "unknown",
+    "default"
+   ],
+   "default": [
+    "tmp",
+    "temp",
+    "root",
+    "home",
+    "workdir",
+    "scratch",
+    "scratchpad",
+    "unknown",
+    "default"
+   ],
+   "description": "Names that are never projects: directory names a client reports when it is not inside a repository. A write naming one is stored with no project. Setting this key replaces the default list.",
+   "enum": null,
+   "group": "memory.projects",
+   "label": "Deny",
+   "live_target": null,
+   "path": "memory.projects.deny",
+   "secret": false,
+   "services": [
+    "hal0-api"
+   ],
+   "type": "string[]"
+  },
+  {
+   "apply_class": "service-restart",
+   "constraints": {},
+   "current": [],
+   "default": [],
+   "description": "Project names the operator has confirmed. Writes are accepted for any name; 'hal0 doctor' (memory_projects) reports names in use that are neither listed here nor aliased.",
+   "enum": null,
+   "group": "memory.projects",
+   "label": "Registered",
+   "live_target": null,
+   "path": "memory.projects.registered",
+   "secret": false,
+   "services": [
+    "hal0-api"
+   ],
+   "type": "string[]"
+  },
+  {
+   "apply_class": "immediate",
+   "constraints": {},
+   "current": [
+    "git:",
+    "gitlog:",
+    "survey-baseline:"
+   ],
+   "default": [
+    "git:",
+    "gitlog:",
+    "survey-baseline:"
+   ],
+   "description": "Document-id prefixes whose documents every client of a project shares. A client's documents are otherwise stored in a namespace of its own, so one client cannot replace another's. An id that starts with one of these is stored in the project's shared namespace instead and any client of that project may write it. The default is the ids the Hindsight coding-agents plugin derives from the repository itself: one commit (git:), the commit log (gitlog:) and a codebase-survey marker (survey-baseline:). Setting this key replaces the default list; an empty list shares nothing.",
+   "enum": null,
+   "group": "memory.compat",
+   "label": "Shared document prefixes",
+   "live_target": null,
+   "path": "memory.compat.shared_document_prefixes",
+   "secret": false,
+   "services": [],
+   "type": "string[]"
+  },
+  {
+   "apply_class": "immediate",
+   "constraints": {
+    "ge": 1,
+    "le": 64
+   },
+   "current": 2,
+   "default": 2,
+   "description": "How many reflects through the endpoint may run at once, across all clients. A reflect holds the memory engine's language model for minutes; this keeps coding agents from starving hal0's own agents of it. One client is always limited to one at a time, and the endpoint never runs more than one fewer than [memory.lanes] lets the engine run (one, when the engine runs one). A request over the limit is answered 429 with Retry-After.",
+   "enum": null,
+   "group": "memory.compat",
+   "label": "Max concurrent reflects",
+   "live_target": null,
+   "path": "memory.compat.max_concurrent_reflects",
+   "secret": false,
+   "services": [],
+   "type": "number"
+  },
+  {
+   "apply_class": "immediate",
+   "constraints": {
+    "ge": 1,
+    "le": 64
+   },
+   "current": 4,
+   "default": 4,
+   "description": "How many recalls through the endpoint may run at once, across all clients. One client is always limited to two. A request over the limit is answered 429 with Retry-After.",
+   "enum": null,
+   "group": "memory.compat",
+   "label": "Max concurrent recalls",
+   "live_target": null,
+   "path": "memory.compat.max_concurrent_recalls",
+   "secret": false,
+   "services": [],
+   "type": "number"
+  },
+  {
+   "apply_class": "immediate",
+   "constraints": {
+    "ge": 1,
+    "le": 10000
+   },
+   "current": 64,
+   "default": 64,
+   "description": "How many asynchronous retains one client may have submitted that the engine has not finished. An async retain is accepted at once and extracted later, so without this one client could fill the engine's queue. A session submits one retain per turn and the plugin polls ten at a time; a first-time repository ingest (the plugin's default is 300 commits) is slowed by this limit, not refused: the next retain is answered 429 with Retry-After until earlier ones finish.",
+   "enum": null,
+   "group": "memory.compat",
+   "label": "Max outstanding operations",
+   "live_target": null,
+   "path": "memory.compat.max_outstanding_operations",
+   "secret": false,
+   "services": [],
+   "type": "number"
+  },
+  {
+   "apply_class": "immediate",
+   "constraints": {
+    "ge": 1048576,
+    "le": 17179869184
+   },
+   "current": 268435456,
+   "default": 268435456,
+   "description": "The most bytes of unfinished asynchronous retains one client may have submitted. A single retain is always accepted when the client has nothing outstanding.",
+   "enum": null,
+   "group": "memory.compat",
+   "label": "Max outstanding bytes",
+   "live_target": null,
+   "path": "memory.compat.max_outstanding_bytes",
+   "secret": false,
+   "services": [],
+   "type": "number"
+  },
+  {
+   "apply_class": "immediate",
+   "constraints": {
+    "ge": 1024,
+    "le": 33554432
+   },
+   "current": 16777216,
+   "default": 16777216,
+   "description": "The largest 'content' of one retained item, in UTF-8 bytes. The largest thing the plugin sends is a whole session transcript. The request body is capped at 48 MiB whatever this is set to.",
+   "enum": null,
+   "group": "memory.compat",
+   "label": "Max item bytes",
+   "live_target": null,
+   "path": "memory.compat.max_item_bytes",
+   "secret": false,
+   "services": [],
+   "type": "number"
+  },
+  {
+   "apply_class": "immediate",
+   "constraints": {
+    "ge": 0,
+    "le": 2592000
+   },
+   "current": 86400,
+   "default": 86400,
+   "description": "The shortest time between two retains of one project's commit-log document (strategy 'gitlog'). The plugin re-sends its last 300 commit messages as one document whenever a session starts on a HEAD it has not sent, and every worktree and branch has its own HEAD. The engine matches stored chunks by position, so one new commit at the top changes every chunk and the whole document is extracted again: hours of the memory model's time on a local slot. A commit-log retain sooner than this after the last one accepted here is answered 429 with Retry-After; the plugin logs it and carries on. After a restart of hal0-api the stored document's last write in the engine counts as the last retain. 0 turns the limit off.",
+   "enum": null,
+   "group": "memory.compat",
+   "label": "Gitlog min interval s",
+   "live_target": null,
+   "path": "memory.compat.gitlog_min_interval_s",
+   "secret": false,
+   "services": [],
+   "type": "number"
+  },
+  {
+   "apply_class": "immediate",
+   "constraints": {},
+   "current": "scheduled",
+   "default": "scheduled",
+   "description": "When knowledge pages refresh. 'scheduled' refreshes each page on the schedule below, and only when facts in its scope changed since its last refresh. 'after_consolidation' refreshes a page after every consolidation round that touched its scope: pages stay current, but each refresh is several minutes of the memory model's time and a busy box can spend most of it on refreshes. 'manual' never refreshes a page by itself; a refresh runs only when one is asked for. Applies to every page, whatever the page asked for when it was written.",
+   "enum": [
+    "scheduled",
+    "after_consolidation",
+    "manual"
+   ],
+   "group": "memory.refresh",
+   "label": "Pages",
+   "live_target": null,
+   "path": "memory.refresh.pages",
+   "secret": false,
+   "services": [],
+   "type": "enum"
+  },
+  {
+   "apply_class": "immediate",
+   "constraints": {},
+   "current": "0 3 * * *",
+   "default": "0 3 * * *",
+   "description": "The schedule pages refresh on when pages is 'scheduled': a five-field cron expression in UTC (minute hour day-of-month month day-of-week). The default is daily at 03:00 UTC. A page whose facts have not changed skips the tick.",
+   "enum": null,
+   "group": "memory.refresh",
+   "label": "Schedule",
+   "live_target": null,
+   "path": "memory.refresh.schedule",
+   "secret": false,
+   "services": [],
+   "type": "string"
+  },
+  {
+   "apply_class": "immediate",
+   "constraints": {
+    "ge": 0,
+    "le": 2592000
+   },
+   "current": 86400,
+   "default": 86400,
+   "description": "The shortest time between two automatic refreshes of one page, in seconds. A refresh due sooner waits until the time is up. Written to every page and to the banks' default. A refresh asked for by hand is not held back. 0 turns the floor off.",
+   "enum": null,
+   "group": "memory.refresh",
+   "label": "Min interval s",
+   "live_target": null,
+   "path": "memory.refresh.min_interval_s",
+   "secret": false,
+   "services": [],
+   "type": "number"
+  },
+  {
+   "apply_class": "immediate",
+   "constraints": {},
+   "current": "continuous",
+   "default": "continuous",
+   "description": "When the engine consolidates new facts into observations. 'continuous' consolidates as facts arrive and keeps up with intake. 'scheduled' turns the engine's own consolidation off for this box's banks and has hal0-api start one run on the schedule below, so the memory model is idle the rest of the day; recall sees new facts at once, observations only after the run.",
+   "enum": [
+    "continuous",
+    "scheduled"
+   ],
+   "group": "memory.refresh",
+   "label": "Consolidation",
+   "live_target": null,
+   "path": "memory.refresh.consolidation",
+   "secret": false,
+   "services": [],
+   "type": "enum"
+  },
+  {
+   "apply_class": "immediate",
+   "constraints": {},
+   "current": "0 2 * * *",
+   "default": "0 2 * * *",
+   "description": "The schedule consolidation runs on when consolidation is 'scheduled': a five-field cron expression in UTC. The default is daily at 02:00 UTC, an hour before the default page refresh.",
+   "enum": null,
+   "group": "memory.refresh",
+   "label": "Consolidation schedule",
+   "live_target": null,
+   "path": "memory.refresh.consolidation_schedule",
+   "secret": false,
+   "services": [],
+   "type": "string"
+  },
+  {
+   "apply_class": "immediate",
+   "constraints": {},
+   "current": null,
+   "default": null,
+   "description": "The URL coding agents should reach the Hindsight engine at, e.g. through a reverse proxy. Used by the GET /api/memory/agents install one-liner in place of guessing <request host>:9177 when set.",
+   "enum": null,
+   "group": "memory",
+   "label": "Public URL",
+   "live_target": null,
+   "path": "memory.public_url",
+   "secret": false,
+   "services": [],
+   "type": "string"
+  },
+  {
+   "apply_class": "service-restart",
+   "constraints": {},
+   "current": "hal0:shared",
+   "default": "hal0:shared",
+   "description": "Name of the Hindsight bank behind the 'shared' namespace, where every agent's durable memory lives (ADR-0052, ADR-0058 decision 7). The namespace grammar ('shared' | 'private:<agent>') is unchanged; only the bank id the provider talks to differs. A store hal0 wrote before the two-bank layout keeps the bank it has (recorded in /var/lib/hal0/state/memory-layout.json) until it is folded in, and there this key names a bank only when set to something other than 'hal0:shared'. Changing it points hal0-api at a different bank, so run 'hal0 memory migrate platform' first to clone the existing bank's data into the new name, then restart hal0-api.",
+   "enum": null,
+   "group": "memory",
+   "label": "Bank",
+   "live_target": null,
+   "path": "memory.bank",
+   "secret": false,
+   "services": [
+    "hal0-api"
+   ],
+   "type": "string"
+  },
+  {
+   "apply_class": "service-restart",
+   "constraints": {},
+   "current": "hal0:private",
+   "default": "hal0:private",
+   "description": "Name of the Hindsight bank behind every 'private:<agent>' namespace in the two-bank layout (ADR-0058 decision 7): one bank for all agents, where each agent's 'agent:<id>' tag scopes it to its own memory. Must differ from [memory] bank. Not used by a store still on its pre-two-bank layout. Needs a hal0-api restart.",
+   "enum": null,
+   "group": "memory",
+   "label": "Private bank",
+   "live_target": null,
+   "path": "memory.private_bank",
+   "secret": false,
+   "services": [
+    "hal0-api"
+   ],
+   "type": "string"
+  },
+  {
+   "apply_class": "service-restart",
+   "constraints": {},
+   "current": "hindsight",
+   "default": "hindsight",
+   "description": "Active memory engine. 'hindsight' (default) is the platform engine; 'pgvector' is the in-memory, non-durable fallback. 'mem0' is accepted but not implemented: hal0 logs a warning and runs Hindsight. The legacy 'cognee' value was retired in v1.0.0 (the Cognee store has been dark since v0.4 and its wrapper was removed) \u2014 a hal0.toml still carrying it must be updated to 'hindsight'.",
+   "enum": null,
+   "group": "memory",
+   "label": "Engine",
+   "live_target": null,
+   "path": "memory.engine",
+   "secret": false,
+   "services": [
+    "hal0-api"
+   ],
+   "type": "string"
+  },
+  {
+   "apply_class": "service-restart",
+   "constraints": {},
+   "current": true,
+   "default": true,
+   "description": "Whether config-mutating actions and system state changes are recorded to the durable activity store. Consumed once at create_app(), so a change needs a hal0-api restart.",
+   "enum": null,
+   "group": "activity",
+   "label": "Enabled",
+   "live_target": null,
+   "path": "activity.enabled",
+   "secret": false,
+   "services": [
+    "hal0-api"
+   ],
+   "type": "boolean"
+  },
+  {
+   "apply_class": "service-restart",
+   "constraints": {
+    "ge": 1
+   },
+   "current": 30,
+   "default": 30,
+   "description": "How long an activity row survives before pruning. Overridden at the env layer by HAL0_ACTIVITY_RETENTION_DAYS.",
+   "enum": null,
+   "group": "activity",
+   "label": "Retention days",
+   "live_target": null,
+   "path": "activity.retention_days",
+   "secret": false,
+   "services": [
+    "hal0-api"
+   ],
+   "type": "number"
+  },
+  {
+   "apply_class": "service-restart",
+   "constraints": {
+    "ge": 100
+   },
+   "current": 50000,
+   "default": 50000,
+   "description": "Row cap for the activity table; oldest rows are pruned past this count regardless of retention_days. Set to 0 to disable the cap (retention_days still applies).",
+   "enum": null,
+   "group": "activity",
+   "label": "Max rows",
+   "live_target": null,
+   "path": "activity.max_rows",
+   "secret": false,
+   "services": [
+    "hal0-api"
+   ],
+   "type": "number"
+  },
+  {
+   "apply_class": "immediate",
+   "constraints": {},
+   "current": true,
+   "default": true,
+   "description": "Hard kill switch for the dashboard's agent-chat steward. When false, every chat turn is refused and the slide-out chat is off.",
+   "enum": null,
+   "group": "brain_chat",
+   "label": "Enabled",
+   "live_target": null,
+   "path": "brain_chat.enabled",
+   "secret": false,
+   "services": [],
+   "type": "boolean"
+  },
+  {
+   "apply_class": "immediate",
+   "constraints": {},
+   "current": true,
+   "default": true,
+   "description": "When true (the shipped default), the steward answers and reads state but every mutating or admin-write tool is refused server-side \u2014 independently of the persona's own tool policy. The steward's own memory_add into its private namespace is the one exception (#2658). Set false to let the steward act on the instance through tools.",
+   "enum": null,
+   "group": "brain_chat",
+   "label": "Read only",
+   "live_target": null,
+   "path": "brain_chat.read_only",
+   "secret": false,
+   "services": [],
+   "type": "boolean"
+  },
+  {
+   "apply_class": "immediate",
+   "constraints": {},
+   "current": "",
+   "default": "",
+   "description": "Which model/slot drives the steward chat. Empty keeps the persona's preferred_model (hal0/brain, itself falling back to the agent slot); set to a virtual slot like 'hal0/npu' to pin the steward there. Whatever this resolves to must be loaded with >= 8k context, or the chat fails outright.",
+   "enum": null,
+   "group": "brain_chat",
+   "label": "Model",
+   "live_target": null,
+   "path": "brain_chat.model",
+   "secret": false,
+   "services": [],
+   "type": "string"
+  },
+  {
+   "apply_class": "immediate",
+   "constraints": {},
+   "current": "hal0/agent",
+   "default": "hal0/agent",
+   "description": "Where a tool-calling ROUND reroutes when the chat model can't emit tool calls this runtime parses. Default 'hal0/agent' \u2014 the always-on fallback anchor \u2014 but that slot ships unbound on a fresh install, so the first tool turn has nowhere to go until an operator pulls a model into it. Per-round, not per-conversation: plain chat stays on 'model'. An empty string is coerced back to the default with a warning \u2014 to genuinely disable tool routing, set 'off', 'none', or 'disabled'.",
+   "enum": null,
+   "group": "brain_chat",
+   "label": "Tool model",
+   "live_target": null,
+   "path": "brain_chat.tool_model",
+   "secret": false,
+   "services": [],
+   "type": "string"
+  },
+  {
+   "apply_class": "immediate",
+   "constraints": {
+    "ge": 1,
+    "le": 100
+   },
+   "current": 8,
+   "default": 8,
+   "description": "Runaway backstop: max tool-calling rounds in one chat turn before the steward stops and returns whatever it has.",
+   "enum": null,
+   "group": "brain_chat",
+   "label": "Max rounds",
+   "live_target": null,
+   "path": "brain_chat.max_rounds",
+   "secret": false,
+   "services": [],
+   "type": "number"
+  },
+  {
+   "apply_class": "immediate",
+   "constraints": {
+    "gt": 0
+   },
+   "current": 300.0,
+   "default": 300.0,
+   "description": "Transport timeout (seconds) for each LLM round against the target slot. A round that exceeds this fails the turn with a timeout error instead of hanging indefinitely.",
+   "enum": null,
+   "group": "brain_chat",
+   "label": "Completion timeout s",
+   "live_target": null,
+   "path": "brain_chat.completion_timeout_s",
+   "secret": false,
+   "services": [],
+   "type": "number"
+  },
+  {
+   "apply_class": "immediate",
+   "constraints": {},
+   "current": null,
+   "default": null,
+   "description": "Persisted auth-enforcement toggle. None = unset \u2192 auth OFF (trusted-LAN open, the shipped default). True/False are explicit operator choices. Overridden at runtime by the HAL0_REQUIRE_AUTH env var.",
+   "enum": null,
+   "group": "security",
+   "label": "Require auth",
+   "live_target": null,
+   "path": "security.require_auth",
+   "secret": false,
+   "services": [],
+   "type": "boolean"
+  },
+  {
+   "apply_class": "immediate",
+   "constraints": {},
+   "current": null,
+   "default": null,
+   "description": "Honour X-Forwarded-For for the login/rotate rate limiter and caller-IP attribution instead of the raw TCP peer. None = unset \u2192 OFF (the raw peer is used \u2014 safe default, since a client can forge this header). Only enable when hal0 sits behind a reverse proxy known to strip/overwrite any client-supplied X-Forwarded-For (Traefik/nginx/Caddy do this by default) \u2014 otherwise every caller can pick its own rate-limit bucket by spoofing the header. Overridden at runtime by the HAL0_TRUST_FORWARDED_FOR env var.",
+   "enum": null,
+   "group": "security",
+   "label": "Trust forwarded for",
+   "live_target": null,
+   "path": "security.trust_forwarded_for",
+   "secret": false,
+   "services": [],
+   "type": "boolean"
+  },
+  {
+   "apply_class": "immediate",
+   "constraints": {},
+   "current": null,
+   "default": null,
+   "description": "The URL users reach hal0 at through a reverse proxy, e.g. https://hal0.example.com. Must be an absolute http or https URL. Its origin (scheme://host[:port]) is added to the browser-origin allowlist on top of HAL0_ALLOWED_ORIGINS. Applies on the next request, no restart. Unset = no reverse proxy.",
+   "enum": null,
+   "group": "network",
+   "label": "Public URL",
+   "live_target": null,
+   "path": "network.public_url",
+   "secret": false,
+   "services": [],
+   "type": "string"
+  },
+  {
+   "apply_class": "immediate",
+   "constraints": {},
+   "current": [],
+   "default": [],
+   "description": "Other browser origins allowed to make state-changing requests and WebSocket upgrades, on top of HAL0_ALLOWED_ORIGINS: a second proxy, a MagicDNS name, http://box.lan:8080. Each entry is scheme://host[:port] with http or https and no path, stored without a trailing slash and deduplicated. Applies on the next request, no restart.",
+   "enum": null,
+   "group": "network",
+   "label": "Extra origins",
+   "live_target": null,
+   "path": "network.extra_origins",
+   "secret": false,
+   "services": [],
+   "type": "string[]"
+  },
+  {
+   "apply_class": "service-restart",
+   "constraints": {},
+   "current": "lan",
+   "default": "lan",
+   "description": "Where ComfyUI's own web UI (the img slot, port 8188) answers. ``lan`` (the default) binds the LAN so other machines reach the editor at http://<host>:8188 or http://<host>.local:8188 \u2014 the Discovery (mDNS) card can announce it like Open WebUI. ComfyUI has no sign-in of its own: anyone on the network can queue workflows and read what it rendered. ``loopback`` fences the port to 127.0.0.1 like every other slot (the box itself, an SSH tunnel, or a reverse proxy you run with HAL0_COMFYUI_PUBLIC_URL). Applies at the next `hal0 slot restart img`.",
+   "enum": [
+    "lan",
+    "loopback"
+   ],
+   "group": "network",
+   "label": "Comfyui listen",
+   "live_target": null,
+   "path": "network.comfyui_listen",
+   "secret": false,
+   "services": [
+    "slots"
+   ],
+   "type": "enum"
+  },
+  {
+   "apply_class": "service-restart",
+   "constraints": {},
+   "current": true,
+   "default": true,
+   "description": "Master switch for the agent bridge. Off = no bridge key authenticates, the bridge MCP server is not mounted, and adding, rotating or re-scoping a client and GET /api/bridge/me answer 404 bridge.disabled; listing and revoking clients keep working. On is harmless until you add a client: with no clients, nothing but the admin key can authenticate. Applies at the next hal0-api restart.",
+   "enum": null,
+   "group": "bridge",
+   "label": "Enabled",
+   "live_target": null,
+   "path": "bridge.enabled",
+   "secret": false,
+   "services": [
+    "hal0-api"
+   ],
+   "type": "boolean"
+  },
+  {
+   "apply_class": "immediate",
+   "constraints": {
+    "ge": 1,
+    "le": 16
+   },
+   "current": 2,
+   "default": 2,
+   "description": "How many Hermes runs one bridge client may have in flight at once (1 to 16). A start request past the limit is refused until one of its runs finishes. Applies on the next start request, no restart.",
+   "enum": null,
+   "group": "bridge",
+   "label": "Max concurrent runs per client",
+   "live_target": null,
+   "path": "bridge.max_concurrent_runs_per_client",
+   "secret": false,
+   "services": [],
+   "type": "number"
+  },
+  {
+   "apply_class": "immediate",
+   "constraints": {
+    "ge": 1,
+    "le": 365
+   },
+   "current": 7,
+   "default": 7,
+   "description": "How many days bridge runs and their recorded events are kept before the maintenance pass deletes them (1 to 365). Applies on the next pass, no restart.",
+   "enum": null,
+   "group": "bridge",
+   "label": "Run retention days",
+   "live_target": null,
+   "path": "bridge.run_retention_days",
+   "secret": false,
+   "services": [],
+   "type": "number"
+  },
+  {
+   "apply_class": "immediate",
+   "constraints": {
+    "ge": 60,
+    "le": 3600
+   },
+   "current": 900,
+   "default": 900,
+   "description": "How long, in seconds, a run waits for the calling agent to answer a clarifying question from Hermes before the run is stopped with 'clarification unanswered' (60 to 3600). Applies to the next question, no restart.",
+   "enum": null,
+   "group": "bridge",
+   "label": "Clarify timeout s",
+   "live_target": null,
+   "path": "bridge.clarify_timeout_s",
+   "secret": false,
+   "services": [],
+   "type": "number"
+  },
+  {
+   "apply_class": "immediate",
+   "constraints": {},
+   "current": true,
+   "default": true,
+   "description": "For a request to a Hermes-profile model that carries X-OpenWebUI-Chat-Id: send X-Hermes-Session-Id: owui-<chat id> to Hermes when the client sent no session header (one Open WebUI chat is one Hermes session), and drop `tools` and `tool_choice` from the body, because Hermes already has memory and admin tools of its own. Off = every request to Hermes is relayed unchanged. Applies to the next request.",
+   "enum": null,
+   "group": "openwebui",
+   "label": "Hermes session from chat ID",
+   "live_target": null,
+   "path": "openwebui.hermes_session_from_chat_id",
+   "secret": false,
+   "services": [],
+   "type": "boolean"
+  },
+  {
+   "apply_class": "immediate",
+   "constraints": {},
+   "current": true,
+   "default": true,
+   "description": "Hard kill switch for the WS /v1/realtime voice endpoint.",
+   "enum": null,
+   "group": "realtime",
+   "label": "Enabled",
+   "live_target": null,
+   "path": "realtime.enabled",
+   "secret": false,
+   "services": [],
+   "type": "boolean"
+  },
+  {
+   "apply_class": "immediate",
+   "constraints": {
+    "ge": 8000,
+    "le": 48000
+   },
+   "current": 24000,
+   "default": 24000,
+   "description": "Fixed pcm16 sample rate (Hz). 24 kHz matches the demo client and kokoro's native output \u2014 changing this does not resample either direction, so a mismatched client will hear distorted audio.",
+   "enum": null,
+   "group": "realtime",
+   "label": "Sample rate",
+   "live_target": null,
+   "path": "realtime.sample_rate",
+   "secret": false,
+   "services": [],
+   "type": "number"
+  },
+  {
+   "apply_class": "immediate",
+   "constraints": {},
+   "current": "",
+   "default": "",
+   "description": "Fallback chat model for a realtime session when neither stt_model nor tts_model names one.",
+   "enum": null,
+   "group": "realtime",
+   "label": "Default model",
+   "live_target": null,
+   "path": "realtime.default_model",
+   "secret": false,
+   "services": [],
+   "type": "string"
+  },
+  {
+   "apply_class": "immediate",
+   "constraints": {},
+   "current": "",
+   "default": "",
+   "description": "Loaded slot the gateway calls over loopback for speech-to-text. Empty falls back to the session's chat model.",
+   "enum": null,
+   "group": "realtime",
+   "label": "STT model",
+   "live_target": null,
+   "path": "realtime.stt_model",
+   "secret": false,
+   "services": [],
+   "type": "string"
+  },
+  {
+   "apply_class": "immediate",
+   "constraints": {},
+   "current": "kokoro",
+   "default": "kokoro",
+   "description": "Loaded slot the gateway calls over loopback for text-to-speech.",
+   "enum": null,
+   "group": "realtime",
+   "label": "TTS model",
+   "live_target": null,
+   "path": "realtime.tts_model",
+   "secret": false,
+   "services": [],
+   "type": "string"
+  },
+  {
+   "apply_class": "immediate",
+   "constraints": {},
+   "current": "",
+   "default": "",
+   "description": "Voice name passed to the tts slot. Empty lets the slot's own default apply.",
+   "enum": null,
+   "group": "realtime",
+   "label": "TTS voice",
+   "live_target": null,
+   "path": "realtime.tts_voice",
+   "secret": false,
+   "services": [],
+   "type": "string"
+  },
+  {
+   "apply_class": "immediate",
+   "constraints": {
+    "ge": 0.0,
+    "le": 1.0
+   },
+   "current": 0.02,
+   "default": 0.02,
+   "description": "Normalized RMS (0-1) above which incoming audio counts as speech for the zero-dependency energy-VAD turn detector.",
+   "enum": null,
+   "group": "realtime",
+   "label": "VAD energy threshold",
+   "live_target": null,
+   "path": "realtime.vad_energy_threshold",
+   "secret": false,
+   "services": [],
+   "type": "number"
+  },
+  {
+   "apply_class": "immediate",
+   "constraints": {
+    "ge": 50,
+    "le": 10000
+   },
+   "current": 500,
+   "default": 500,
+   "description": "Trailing silence (ms) that ends a voice turn.",
+   "enum": null,
+   "group": "realtime",
+   "label": "VAD silence ms",
+   "live_target": null,
+   "path": "realtime.vad_silence_ms",
+   "secret": false,
+   "services": [],
+   "type": "number"
+  },
+  {
+   "apply_class": "immediate",
+   "constraints": {
+    "ge": 0,
+    "le": 10000
+   },
+   "current": 200,
+   "default": 200,
+   "description": "Minimum voiced-audio duration (ms) to count as speech rather than noise; shorter segments never fire a turn.",
+   "enum": null,
+   "group": "realtime",
+   "label": "VAD min speech ms",
+   "live_target": null,
+   "path": "realtime.vad_min_speech_ms",
+   "secret": false,
+   "services": [],
+   "type": "number"
+  },
+  {
+   "apply_class": "immediate",
+   "constraints": {
+    "ge": 5,
+    "le": 100
+   },
+   "current": 20,
+   "default": 20,
+   "description": "Analysis window size (ms) the energy-VAD detector evaluates at a time.",
+   "enum": null,
+   "group": "realtime",
+   "label": "VAD window ms",
+   "live_target": null,
+   "path": "realtime.vad_window_ms",
+   "secret": false,
+   "services": [],
+   "type": "number"
+  },
+  {
+   "apply_class": "immediate",
+   "constraints": {
+    "ge": 5,
+    "le": 200
+   },
+   "current": 20,
+   "default": 20,
+   "description": "Output audio frame size (ms) \u2014 the response.output_audio.delta granularity.",
+   "enum": null,
+   "group": "realtime",
+   "label": "Frame ms",
+   "live_target": null,
+   "path": "realtime.frame_ms",
+   "secret": false,
+   "services": [],
+   "type": "number"
+  },
+  {
+   "apply_class": "immediate",
+   "constraints": {
+    "gt": 0,
+    "le": 300.0
+   },
+   "current": 20.0,
+   "default": 20.0,
+   "description": "How long a gated steward tool may leave the voice session silent before the assistant speaks a 'still waiting' notice and ends the turn, instead of blocking up to 300s.",
+   "enum": null,
+   "group": "realtime",
+   "label": "Approval wait s",
+   "live_target": null,
+   "path": "realtime.approval_wait_s",
+   "secret": false,
+   "services": [],
+   "type": "number"
+  },
+  {
+   "apply_class": "immediate",
+   "constraints": {
+    "gt": 0,
+    "le": 600.0
+   },
+   "current": 30.0,
+   "default": 30.0,
+   "description": "Cap on buffered audio (seconds) held for a single realtime turn.",
+   "enum": null,
+   "group": "realtime",
+   "label": "Max buffer seconds",
+   "live_target": null,
+   "path": "realtime.max_buffer_seconds",
+   "secret": false,
+   "services": [],
+   "type": "number"
+  }
+ ]
+}
