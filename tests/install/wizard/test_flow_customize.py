@@ -476,3 +476,11 @@ def test_an_image_model_with_an_account_asks_when_no_token_is_held(
     blank = run(asked, "ENTER")
     assert view(blank).screen is Screen.STORAGE
     assert secret(blank) is None
+
+
+def test_an_information_only_models_screen_has_no_cursor_keys_in_its_hint(
+    catalog: Catalog, usable_facts: Facts
+) -> None:
+    v = view(run(custom(catalog, usable_facts), "ENTER"))
+    assert all(r.kind == "info" for r in v.rows)
+    assert v.hint == "Enter go on, b back, ? explain, q quit"

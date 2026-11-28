@@ -248,3 +248,20 @@ def test_no_plain_form_output_says_up_down(all_views: list[View]) -> None:
     for v in all_views:
         for width in (20, 60, 200):
             assert not any("Up/Down" in x for x in _lines(v, width, plain=True))
+
+
+def test_no_accent_on_an_information_only_screen(catalog: Catalog, usable_facts: Facts) -> None:
+    review = view(run(start(catalog, usable_facts), "ENTER", "ENTER"))
+    out = "\n".join(render(review, width=80, plain=False, color=True))
+    assert "\x1b[38;5;214m   " not in out
+    body = out.split("Ready to install")[1].split("Enter start")[0]
+    assert "\x1b[38;5;214m" not in body
+
+
+def test_an_information_row_gets_no_lead_mark_when_the_cursor_is_on_it(
+    catalog: Catalog, usable_facts: Facts
+) -> None:
+    review = view(run(start(catalog, usable_facts), "ENTER", "ENTER"))
+    assert review.cursor == 0
+    lines = _lines(review, 80)
+    assert not any(x.startswith(" > ") for x in lines)

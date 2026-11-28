@@ -80,6 +80,11 @@ def _wrap(text: str, avail: int, indent: str = "", style: str = "") -> list[_Lin
     return out
 
 
+def _selected(row: Row, index: int, cursor: int) -> bool:
+    """Only a row that can be chosen or changed is ever drawn as the selected one."""
+    return index == cursor and row.kind != "info"
+
+
 def _mark(row: Row, highlighted: bool) -> str:
     if row.kind == "check":
         if row.state == "unavailable":
@@ -124,8 +129,8 @@ def _placement(
     so the details of a screen all sit in the same place."""
     detail_under = note_under = False
     for index, row in enumerate(rows):
-        head, indent = _head(row, leads[index], index == cursor)
-        style = _row_style(row, index == cursor, plain)
+        head, indent = _head(row, leads[index], _selected(row, index, cursor))
+        style = _row_style(row, _selected(row, index, cursor), plain)
         first: _Line = [(head, style)]
         if row.detail:
             beside = _flow(first, indent, _segments(row, style, False, False)[:2], avail)
@@ -133,8 +138,8 @@ def _placement(
     for index, row in enumerate(rows):
         if not row.note:
             continue
-        head, indent = _head(row, leads[index], index == cursor)
-        style = _row_style(row, index == cursor, plain)
+        head, indent = _head(row, leads[index], _selected(row, index, cursor))
+        style = _row_style(row, _selected(row, index, cursor), plain)
         without = _segments(row, style, detail_under, False)[:2]
         with_note = _segments(row, style, detail_under, False)
         first = [(head, style)]
@@ -184,10 +189,8 @@ def _plain_hint(view: View) -> str:
         text = "Type a number and press Enter to choose. Enter alone keeps the marked one."
     elif kinds & {"check", "text"}:
         text = "Type a number and press Enter to change that line. Enter alone goes on."
-    elif "Up/Down" not in view.hint:
-        return view.hint
     else:
-        text = "Press Enter to go on."
+        return view.hint
     extra = [key for key in _EXTRA_KEYS if key in view.hint]
     return f"{text} Also: {', '.join(extra)}." if extra else text
 
@@ -211,10 +214,12 @@ def render(view: View, *, width: int, plain: bool, color: bool) -> list[str]:
             number += 1
             leads.append(f"{number:>3}) ")
         else:
-            leads.append(" > " if index == view.cursor and row.kind != "info" else "   ")
+            leads.append(" > " if _selected(row, index, view.cursor) else "   ")
     under = _placement(view.rows, leads, view.cursor, avail, plain)
     for index, row in enumerate(view.rows):
-        lines.extend(_row_lines(row, leads[index], index == view.cursor, avail, plain, under))
+        lines.extend(
+            _row_lines(row, leads[index], _selected(row, index, view.cursor), avail, plain, under)
+        )
     if view.error:
         lines.extend(_wrap(view.error, avail, "   ", ACCENT))
     if view.editing is not None:

@@ -81,7 +81,7 @@ __all__ = [
 ]
 
 _HINT_CHOICE = "Up/Down move, Enter choose, b back, ? explain, q quit"
-_HINT_GO_ON = "Up/Down move, Enter go on, b back, ? explain, q quit"
+_HINT_GO_ON = "Enter go on, b back, ? explain, q quit"
 _HINT_ROWS = "Up/Down move, Space change, Enter go on, b back, ? explain, q quit"
 _HINT_REVIEW = "Enter start the install, b back, s save a copy, q quit"
 _HINT_STOP = "Enter or q to leave"
@@ -290,9 +290,7 @@ def _hint(state: State) -> str:
     if state.screen is Screen.GPU and not gpu_consent(state):
         return _HINT_STOP
     hint = _HINT_CHOICE if state.screen in _CHOICE_SCREENS else _HINT_ROWS
-    if state.screen is Screen.MODELS and all(
-        r.kind == "info" for r in _SCREENS[state.screen].rows(state)
-    ):
+    if all(r.kind == "info" for r in _SCREENS[state.screen].rows(state)):
         hint = _HINT_GO_ON
     return hint.replace("b back, ", "") if state.screen is _screens(state)[0] else hint
 
