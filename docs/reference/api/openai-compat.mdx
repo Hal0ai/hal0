@@ -188,6 +188,39 @@ rendered through.
 - **`/v1/models` default filtering** — hides non-text-modality models unless
   `?show_all=true` is passed; `GET /v1/models/{id}` bypasses the filter.
 
+Responses from `/v1/chat/completions`, `/v1/completions`, `/v1/embeddings`,
+`/v1/rerankings`, `/v1/rerank`, `/v1/audio/transcriptions` and `/v1/audio/speech`
+carry two hal0 headers that name what answered:
+
+- **`X-hal0-Slot`**: the slot that served the request, on any response from a
+  slot, errors included. Absent for a remote provider that is not a slot.
+- **`X-hal0-Resolved-Model`**: the model, on a successful (2xx) response only,
+  and only when hal0 can vouch for it. It is one of two things, never a guess
+  and never the name you sent repeated back:
+
+  | What answered | The header carries |
+  |---|---|
+  | A slot running llama-server or a single-purpose engine (speech, rerank, embeddings) | The registry id of the model that slot had loaded. The engine serves that one model whatever the request names. |
+  | A FastFlowLM (NPU) chat slot | The slot's recorded model, only when the request named exactly that model. FastFlowLM chooses the model from the request, so for any other name the header is absent. |
+  | NPU embeddings (`flm-embed`) | The FastFlowLM tag hal0 sent, taken from the slot's configuration. A FastFlowLM tag, not a registry id. |
+  | NPU speech-to-text (`flm-stt`) | Nothing: the upload is forwarded as you sent it and FastFlowLM chooses. Only the slot header is set. |
+  | A remote provider | The model id hal0 sent to the provider. If the provider picks a model itself (an auto-routing id, an agent profile), this is what hal0 asked for, not necessarily what answered. |
+
+It can differ from the `model` you sent: a slot name or alias resolves to the
+slot's model, and a request for a model no slot is bound to can be answered by
+the default slot of the right kind, which serves its own model. The `model`
+field in the response body is whatever the backend returns and may echo your
+request, so read this header when the exact model matters, for example before
+storing embeddings, and treat its absence as "unknown".
+
+It is also absent on an error response, and when the slot stopped serving
+before the response was built.
+
+hal0 sets both headers itself and drops any header of the same name an upstream
+sends. They are not set on `/v1/images/generations`, `/v1/systemone` or a
+response assembled by the `"omni": true` loop, which may involve more than one
+slot.
+
 ## Hermes models
 
 When the Hermes agent is installed, `GET /v1/models` lists `hermes-agent` for the default profile and one model id per additional served profile, next to the slot models. Each profile is a pinned, read-only upstream (`hermes` and `hermes.<profile>`, bearer auth) that hal0 registers at `http://127.0.0.1:8642/v1` and `/p/<profile>/v1`. A request for one of those ids goes to that upstream, streaming or not, and never falls back to a slot: if the upstream is offline or disabled the request fails with `502 dispatch.upstream_unavailable`. An id a Hermes profile owns is listed as Hermes's even when a slot alias has the same name. `X-Hermes-Session-Id` and `X-Hermes-Session-Key` request headers are forwarded to the upstream. `/v1/responses` is not available. See [Open WebUI](/docs/guides/open-webui/#talking-to-hermes).
