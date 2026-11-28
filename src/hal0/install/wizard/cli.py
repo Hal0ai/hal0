@@ -271,7 +271,8 @@ def _run(args: argparse.Namespace, environ: Mapping[str, str]) -> int:
         and inp.saved is not None
         and not args.reconfigure
     )
-    quiet = args.headless or environ.get("HAL0_NONINTERACTIVE") == "1" or reuse
+    given = args.answers is not None  # a given answers file means no screens
+    quiet = args.headless or environ.get("HAL0_NONINTERACTIVE") == "1" or reuse or given
     if not quiet and can_open(args.tty):
         state = run_screens(inp, args.tty, environ, lambda chosen: _document(inp, chosen))
         if state is not None:

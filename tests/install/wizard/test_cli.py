@@ -1563,3 +1563,70 @@ def test_a_failed_signal_write_still_exits_0_with_the_document_and_no_partial_fi
         and p.stderr.read() == "hal0 setup: could not record the chosen folder\n"
     )
     assert out.exists() and not mark.exists() and not mark.parent.exists()
+
+
+# ------------------------------------------------ a given answers file: no screens
+
+
+@pytest.mark.parametrize("reconfigure", [False, True])
+def test_a_given_answers_file_shows_no_screens(
+    reconfigure: bool, catalog_path: Path, tmp_path: Path, pty_pair: tuple[int, str]
+) -> None:
+    given = _write_json(tmp_path / "given.json", {"network": {"port": 9123}})
+    out, mark = tmp_path / "a.json", tmp_path / "folder"
+    r = wizard(
+        "--catalog",
+        catalog_path,
+        "--answers",
+        given,
+        "--out",
+        out,
+        "--chosen-folder-out",
+        mark,
+        *(["--reconfigure"] if reconfigure else []),
+        tty=pty_pair[1],
+    )
+    assert r.returncode == 0 and r.stderr == ""
+    assert read_all(pty_pair[0]) == b""
+    assert json.loads(out.read_text())["network"]["port"] == 9123
+    assert not mark.exists()
+
+
+def test_a_given_file_wins_over_saved_answers_on_an_upgrade(
+    catalog_path: Path,
+    tmp_path: Path,
+    pty_pair: tuple[int, str],
+    upgrade_facts_path: Path,
+    saved_path: Path,
+) -> None:
+    given = _write_json(tmp_path / "given.json", {"network": {"port": 9123}})
+    out = tmp_path / "a.json"
+    r = wizard(
+        "--catalog",
+        catalog_path,
+        "--facts",
+        upgrade_facts_path,
+        "--saved",
+        saved_path,
+        "--answers",
+        given,
+        "--out",
+        out,
+        "--reconfigure",
+        tty=pty_pair[1],
+    )
+    assert r.returncode == 0 and read_all(pty_pair[0]) == b""
+    assert json.loads(out.read_text())["network"]["port"] == 9123
+
+
+def test_a_given_file_still_stops_a_box_that_cannot_run(
+    catalog_path: Path, tmp_path: Path, pty_pair: tuple[int, str]
+) -> None:
+    given = _write_json(tmp_path / "given.json", {})
+    facts = _facts_file(tmp_path, "stop.json", gpu={"outcome": "stop", "reason": "no_device"})
+    out = tmp_path / "a.json"
+    r = wizard(
+        "--catalog", catalog_path, "--facts", facts, "--answers", given, "--out", out,
+        tty=pty_pair[1],
+    )  # fmt: skip
+    assert r.returncode == 11 and not out.exists() and read_all(pty_pair[0]) == b""
