@@ -168,6 +168,8 @@ def _edit(s: State, key: str) -> State:
         return _FIELDS[s.field](s, text)
     if key == "BACKSPACE":
         return replace(s, editing=text[:-1], error=None)
+    if key == "SPACE":
+        key = " "
     if len(key) == 1:
         return replace(s, editing=text + key, error=None)
     return s

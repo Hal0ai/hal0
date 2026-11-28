@@ -300,3 +300,10 @@ def test_the_review_says_where_a_copy_will_be_saved(catalog: Catalog, usable_fac
     s = run(s, "s", *"/tmp/a.json", "ENTER")
     assert view(s).intro == ("Saving a copy of these answers to /tmp/a.json.",)
     assert view(press(s, "b")).screen is Screen.FOLDER
+
+
+def test_a_space_typed_into_a_folder_field_is_kept(catalog: Catalog, two_disk_facts: Facts) -> None:
+    s = run(start(catalog, two_disk_facts), "ENTER", "DOWN", "DOWN", "ENTER")
+    s = run(s, *"/mnt/my", "SPACE", *"models", "ENTER")
+    assert view(s).screen is Screen.REVIEW
+    assert chosen(s)["model_store.path"] == "/mnt/my models"
