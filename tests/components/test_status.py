@@ -210,6 +210,7 @@ def _row(component_id: str) -> tuple[dict, int]:
     return next(r for r in snap["components"] if r["id"] == component_id), snap["pending"]
 
 
+@pytest.mark.usefixtures("real_component_unit_enabled")
 def test_missing_install_with_an_enabled_unit_is_broken_and_pending() -> None:
     calls: list[list[str]] = []
     with (
@@ -226,6 +227,7 @@ def test_missing_install_with_an_enabled_unit_is_broken_and_pending() -> None:
     assert "hal0 update component" not in row["remedy"]
 
 
+@pytest.mark.usefixtures("real_component_unit_enabled")
 def test_broken_hermes_names_the_reprovision_command() -> None:
     with (
         patch("hal0.components.registry._hermes_installed", return_value=None),
@@ -236,6 +238,7 @@ def test_broken_hermes_names_the_reprovision_command() -> None:
     assert "hal0 agent reprovision hermes --repair" in row["remedy"]
 
 
+@pytest.mark.usefixtures("real_component_unit_enabled")
 @pytest.mark.parametrize("word", ["disabled", "masked", "static", "not-found", "", "linked"])
 def test_a_unit_left_off_keeps_not_installed(word: str) -> None:
     """Only "nothing installed and the unit enabled" is broken: a component
@@ -252,6 +255,7 @@ def test_a_unit_left_off_keeps_not_installed(word: str) -> None:
     assert rows["hindsight"]["error"] is None
 
 
+@pytest.mark.usefixtures("real_component_unit_enabled")
 def test_no_systemctl_reads_as_not_enabled() -> None:
     def boom(argv, **kwargs):
         raise FileNotFoundError("systemctl")
@@ -264,6 +268,7 @@ def test_no_systemctl_reads_as_not_enabled() -> None:
     assert row["status"] == "not-installed"
 
 
+@pytest.mark.usefixtures("real_component_unit_enabled")
 def test_an_installed_component_never_asks_systemd() -> None:
     calls: list[list[str]] = []
     with (
@@ -277,6 +282,7 @@ def test_an_installed_component_never_asks_systemd() -> None:
     assert not [c for c in calls if c[:2] == ["systemctl", "is-enabled"]]
 
 
+@pytest.mark.usefixtures("real_component_unit_enabled")
 def test_a_component_without_a_service_is_never_broken() -> None:
     """Pi has no unit of its own; absent stays ``not-installed``."""
     with (
@@ -288,6 +294,7 @@ def test_a_component_without_a_service_is_never_broken() -> None:
     assert row["status"] == "not-installed"
 
 
+@pytest.mark.usefixtures("real_component_unit_enabled")
 def test_a_recorded_failure_still_wins_over_broken() -> None:
     state.record_component_result("hindsight", {"status": "rolled_back", "error": "postcheck"})
     with (
@@ -297,3 +304,18 @@ def test_a_recorded_failure_still_wins_over_broken() -> None:
         row, _ = _row("hindsight")
     assert row["status"] == "rolled_back"
     assert row["error"] == "postcheck"
+
+
+def test_without_the_opt_in_no_test_asks_systemd() -> None:
+    """The suite-wide stub: an absent install reads ``not-installed`` and no
+    ``systemctl`` runs, whatever the host has enabled."""
+    calls: list[list[str]] = []
+    with (
+        patch("hal0.components.registry._hindsight_installed", return_value=None),
+        patch("hal0.components.registry._hermes_installed", return_value=None),
+        patch("subprocess.run", _is_enabled_says("enabled", calls)),
+    ):
+        snap = status.component_status_snapshot()
+    rows = {r["id"]: r["status"] for r in snap["components"]}
+    assert rows["hindsight"] == "not-installed" and rows["hermes"] == "not-installed"
+    assert not [c for c in calls if c[:2] == ["systemctl", "is-enabled"]]

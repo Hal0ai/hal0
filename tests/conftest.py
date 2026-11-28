@@ -563,6 +563,35 @@ def memory_budget(monkeypatch: pytest.MonkeyPatch) -> Iterator[MemoryBudgetStub]
     )
 
 
+@pytest.fixture(autouse=True)
+def _component_unit_enabled_stub(monkeypatch: pytest.MonkeyPatch) -> Any:
+    """No test asks the host's systemd whether a component's unit is enabled (#4065).
+
+    ``component_status_snapshot`` runs ``systemctl is-enabled`` for a component
+    whose install probe finds nothing, and many tests reach the snapshot
+    (status, the updater routes, the agents overview). On a machine where that
+    unit happens to be enabled the row would read ``broken`` and the test would
+    depend on its host. The probe answers "not enabled" here; a test of the
+    probe itself asks for ``real_component_unit_enabled``. Yields the real
+    function for that fixture.
+    """
+    from hal0.components import status
+
+    real = status._unit_enabled
+    monkeypatch.setattr(status, "_unit_enabled", lambda _service_id: False)
+    return real
+
+
+@pytest.fixture
+def real_component_unit_enabled(
+    _component_unit_enabled_stub: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Opt a test out of the stub above: the real probe runs (patch ``subprocess.run``)."""
+    from hal0.components import status
+
+    monkeypatch.setattr(status, "_unit_enabled", _component_unit_enabled_stub)
+
+
 @pytest.fixture
 def real_memory_budget(memory_budget: MemoryBudgetStub, monkeypatch: pytest.MonkeyPatch) -> None:
     """Opt a test out of the ``memory_budget`` stub: the real collector answers again.

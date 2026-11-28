@@ -105,8 +105,9 @@ release-pinned components — OpenWebUI, runner images, Hermes, Pi, the memory
 decision model, and Hindsight; their pins ride hal0 releases rather than updating
 independently. Exits **2** if any component isn't converged yet
 (`pending`, `stale`, `broken`, or a failure status), so it doubles as a
-scriptable convergence gate. `broken` means nothing is installed while the
-component's service is enabled, so the service cannot start; the row names
+scriptable convergence gate. `broken` means no usable install was found (the files are
+gone or unreadable) while the component's service is enabled, so the service
+cannot start; the row names
 what reinstalls it, because `hal0 update component <id>` skips a component
 that is not installed. A component whose service is disabled, masked or
 absent reads `not-installed` and does not change the exit code.

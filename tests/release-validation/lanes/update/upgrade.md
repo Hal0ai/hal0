@@ -156,7 +156,7 @@ the fact otherwise:
 18. **Attribute concurrent clients first.** Before timing anything on ct150 list who else is using it: `ss -tn | grep :8080`, the hermes pid, whether the agent slot is serving. Record `uptime` load average and agent-slot state before every restart or downtime measurement (agent traffic pushed load to 190 and distorted a 69 s startup).
 
 
-20. **Roll-forward waits for the API.** Poll `/api/health` for 200 before `hal0 update --yes` after a restart (an immediate attempt exited 1 while the API was starting), and after `--yes` returns 0 keep polling: the CLI exits 0 with `update applied` while hal0-api can be down up to ~100 s when the stop hangs (#2727). Record the outage length.
+20. **Roll-forward waits for the API.** Poll `/api/health` for 200 before `hal0 update --yes` after a restart (an immediate attempt exited 1 while the API was starting), and after `--yes` returns 0 (or 2 with a `broken` component row, which is a finding about the box as in step 9, not a failed update) keep polling: the CLI exits 0 with `update applied` while hal0-api can be down up to ~100 s when the stop hangs (#2727). Record the outage length.
 
 21. **Make #2727 a numeric assertion.** On a nightly that contains the #2746 fix, three `systemctl restart hal0-api` with a streaming request in flight to a serving slot must each stop in < 30 s with no `stop-sigterm timed out` (the new tree took 20.3-20.5 s x3). The update's own restart runs the OLD process and still hangs, so take the proof from the SECOND restart onward. An in-flight stream gets a bare HTTP 500 ('Cancel N running task(s), timeout graceful shutdown exceeded') on every restart: note it, cosmetic.
 

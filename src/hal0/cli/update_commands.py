@@ -1292,6 +1292,23 @@ def _print_component_table(rows: list[dict]) -> bool:
     return all_ok
 
 
+def _unconverged_footer(rows: list[dict]) -> str:
+    """The exit-2 line under the component table.
+
+    The converge verbs do not repair a ``broken`` row (#4065: its files are
+    gone and each arm skips an absent component), so they are named only when
+    some other row is unconverged.
+    """
+    unconverged = [r.get("status") for r in rows if r.get("status") in _COMPONENT_PENDING]
+    if unconverged and all(s == "broken" for s in unconverged):
+        return "(exit 2 = a component's install is missing; see its row above for the repair)"
+    tail = "; a broken row names its own repair above" if "broken" in unconverged else ""
+    return (
+        "(exit 2 = components not converged — run `hal0 update` "
+        f"or `hal0 update component <id>`{tail})"
+    )
+
+
 @update_app.command("status")
 def update_status_cmd() -> None:
     """Show hal0 + per-component version/convergence status (exit 2 if outstanding)."""
@@ -1304,13 +1321,11 @@ def update_status_cmd() -> None:
         die(str(exc))
         return
     _print_check(body)
-    components_ok = _print_component_table(_component_rows())
+    rows = _component_rows()
+    components_ok = _print_component_table(rows)
     _print_hermes_gateway_notice()
     if not components_ok:
-        console.print(
-            "[dim](exit 2 = components not converged — run `hal0 update` "
-            "or `hal0 update component <id>`)[/dim]"
-        )
+        console.print(f"[dim]{_unconverged_footer(rows)}[/dim]")
         raise typer.Exit(2)
 
 

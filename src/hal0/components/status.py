@@ -35,7 +35,7 @@ _PENDING_STATUSES = frozenset(
 #: the operator (or the installer's opt-out) left the component off.
 _ENABLED_STATES = frozenset({"enabled", "enabled-runtime"})
 
-_BROKEN_ERROR = "nothing is installed, but its service is enabled and cannot start"
+_BROKEN_ERROR = "no usable install was found, but its service is enabled and cannot start"
 #: What reinstalls a component whose files are gone. The converge arms do not:
 #: each skips a component it finds absent (a fresh install is the installer's
 #: job), so the generic "run `hal0 update component <id>`" hint would be wrong.

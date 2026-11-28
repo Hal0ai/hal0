@@ -2219,7 +2219,7 @@ def test_component_table_counts_a_broken_row_and_skips_the_converge_hint() -> No
                     id="hindsight",
                     status="broken",
                     installed=None,
-                    error="nothing is installed, but its service is enabled and cannot start",
+                    error="no usable install was found, but its service is enabled and cannot start",
                     remedy="re-run the installer (`sudo bash install.sh`) to reinstall it",
                 )
             ]
@@ -2230,3 +2230,16 @@ def test_component_table_counts_a_broken_row_and_skips_the_converge_hint() -> No
     text = "\n".join(printed)
     assert "install.sh" in text
     assert "hal0 update component hindsight" not in text
+
+
+def test_status_footer_names_the_converge_verbs_only_when_they_help() -> None:
+    import hal0.cli.update_commands as m
+
+    broken = _component_row(id="hindsight", status="broken")
+    pending = _component_row(id="hermes", status="pending")
+    only_broken = m._unconverged_footer([broken])
+    assert "hal0 update component" not in only_broken and "repair" in only_broken
+    mixed = m._unconverged_footer([broken, pending])
+    assert "hal0 update component <id>" in mixed and "broken row" in mixed
+    plain = m._unconverged_footer([pending])
+    assert "hal0 update component <id>" in plain and "broken" not in plain
