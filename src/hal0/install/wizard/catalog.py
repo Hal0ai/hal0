@@ -17,6 +17,7 @@ CATALOG_VERSION = 1
 KNOWN_NEEDS = frozenset({"podman", "gpu", "npu_device", "flm_build", "memory_python"})
 REQUIRED_PRESETS = ("recommended", "minimal")
 REQUIRED_QUESTIONS = ("setup_type", "cpu_only", "model_store")  # the screens index these
+CHOICE_QUESTIONS = ("cpu_only", "setup_type")  # the screens show these as a list of choices
 
 
 class CatalogError(ValueError):
@@ -129,7 +130,8 @@ def _question(path: Path, raw: object) -> Question:
     where = f"question '{qid}'"
     assert isinstance(raw, dict)
     options: list[Option] = []
-    for opt in raw.get("options", []):
+    raw_options = raw.get("options", [])
+    for opt in raw_options if isinstance(raw_options, list) else []:
         if not isinstance(opt, dict) or "value" not in opt:
             raise CatalogError(f"{path}: {where} has an option without a value")
         options.append(
@@ -221,6 +223,9 @@ def load_catalog(path: Path, models_path: Path | None = None) -> Catalog:
     for qid in REQUIRED_QUESTIONS:
         if all(q.id != qid for q in questions):
             raise CatalogError(f"{path}: question '{qid}' is missing")
+    for question in questions:
+        if question.id in CHOICE_QUESTIONS and not question.options:
+            raise CatalogError(f"{path}: question '{question.id}' needs at least one option")
     components = [_component(path, c) for c in _list(path, data, "components")]
     _unique(path, "component", [c.id for c in components])
 
