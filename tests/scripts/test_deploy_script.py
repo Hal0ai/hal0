@@ -7,9 +7,9 @@ anything, instead of printing "deploy complete".
 
 from __future__ import annotations
 
+import shlex
 import shutil
 import subprocess
-import sys
 from pathlib import Path
 
 _SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "deploy.sh"
@@ -41,7 +41,7 @@ def _checkout(tmp_path: Path) -> Path:
 
 def _fake_python(tmp_path: Path, origin: str) -> Path:
     fake = tmp_path / "python"
-    fake.write_text(f"#!{sys.executable}\nprint({origin!r})\n")
+    fake.write_text(f"#!/bin/sh\nprintf '%s\\n' {shlex.quote(origin)}\n")
     fake.chmod(0o755)
     return fake
 
@@ -147,9 +147,7 @@ def test_guard_checks_the_interpreter_of_the_named_service(tmp_path: Path) -> No
     exec_bin.write_text("#!/bin/sh\n")
     exec_bin.chmod(0o755)
     py = venv_bin / "python"
-    py.write_text(
-        f"#!{sys.executable}\nprint('/custom/venv/lib/python3.12/site-packages/hal0/__init__.py')\n"
-    )
+    py.write_text("#!/bin/sh\necho /custom/venv/lib/python3.12/site-packages/hal0/__init__.py\n")
     py.chmod(0o755)
     # No HAL0_VENV_PYTHON: the interpreter must come from the service's ExecStart.
     proc = _run(repo, None, tmp_path, "--service=hal0-custom", exec_bin=exec_bin)

@@ -10,6 +10,7 @@ bypass.
 
 from __future__ import annotations
 
+import shlex
 import subprocess
 from pathlib import Path
 
@@ -51,7 +52,7 @@ def _resolve(bin_dir: Path, env_extra: dict[str, str] | None = None):
     script = (
         "set -uo pipefail\n"
         f"{_STUBS}"
-        f"source {_PREFLIGHT!s}\n"
+        f"source {shlex.quote(str(_PREFLIGHT))}\n"
         "resolve_hindsight_python; rc=$?\n"
         'echo "RC:${rc}"\n'
         'echo "PY:${HINDSIGHT_PY}"\n'

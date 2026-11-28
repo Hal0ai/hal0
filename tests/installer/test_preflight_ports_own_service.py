@@ -14,6 +14,7 @@ blanket-warn behaviour regardless of ownership.
 from __future__ import annotations
 
 import os
+import shlex
 import stat
 import subprocess
 from pathlib import Path
@@ -52,7 +53,9 @@ def _fake_systemctl(tmp_path: Path, unit_to_pid: dict[str, str]) -> None:
 
 def _run_preflight_ports(tmp_path: Path, env_overrides: dict[str, str]) -> tuple[int, str]:
     script = (
-        f"set -uo pipefail\nsource {PREFLIGHT!s}\nrc=0\npreflight_ports {PORT} || rc=$?\nexit $rc\n"
+        "set -uo pipefail\n"
+        f"source {shlex.quote(str(PREFLIGHT))}\n"
+        f"rc=0\npreflight_ports {PORT} || rc=$?\nexit $rc\n"
     )
     env = {**os.environ, "PATH": f"{tmp_path}:{os.environ.get('PATH', '')}", **env_overrides}
     proc = subprocess.run(

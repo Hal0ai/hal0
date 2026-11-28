@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import os
 import re
+import shlex
 import shutil
 import stat
 import subprocess
@@ -83,7 +84,9 @@ def _run(script_body: str, bin_dir: Path, extra_env: dict[str, str] | None = Non
     # it, not the test runner's own PATH — seed real base tools alongside the
     # restricted bin dir (same technique as test_preflight_python_floor.py).
     _seed_base_tools(bin_dir)
-    script = "set -euo pipefail\n" + _STUBS + f"source {_PREFLIGHT!s}\n" + script_body
+    script = (
+        "set -euo pipefail\n" + _STUBS + f"source {shlex.quote(str(_PREFLIGHT))}\n" + script_body
+    )
     env = {"PATH": str(bin_dir), **(extra_env or {})}
     return subprocess.run(["bash", "-c", script], env=env, capture_output=True, text=True)
 

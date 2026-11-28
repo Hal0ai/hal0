@@ -10,6 +10,7 @@ LXC-only so the LXC remedies are not emitted for a box.
 from __future__ import annotations
 
 import os
+import shlex
 import subprocess
 from pathlib import Path
 
@@ -19,7 +20,7 @@ _INSTALL_SH = _REPO_ROOT / "installer" / "install.sh"
 
 
 def _bash(snippet: str, env_extra: dict[str, str]) -> subprocess.CompletedProcess[str]:
-    script = f"source {_PREFLIGHT!s} >/dev/null 2>&1\n{snippet}\n"
+    script = f"source {shlex.quote(str(_PREFLIGHT))} >/dev/null 2>&1\n{snippet}\n"
     env = {"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "HOME": "/tmp", **env_extra}
     return subprocess.run(
         ["bash", "-c", script], capture_output=True, text=True, env=env, check=False
@@ -85,7 +86,11 @@ def _kfd_gate(tmp_path: Path, kind: str) -> subprocess.CompletedProcess[str]:
     (tmp_path / "renderD128").touch()
     kfd = tmp_path / "kfd"
     kfd.touch()
-    script = f"set -euo pipefail\nsource {_PREFLIGHT!s}\nrc=0\npreflight_gpu || rc=$?\nexit $rc\n"
+    script = (
+        "set -euo pipefail\n"
+        f"source {shlex.quote(str(_PREFLIGHT))}\n"
+        "rc=0\npreflight_gpu || rc=$?\nexit $rc\n"
+    )
     env = {
         **os.environ,
         "HAL0_GPU_GATE": "1",
