@@ -170,7 +170,7 @@ def test_bind_host_warns_never_errors_and_is_not_emitted(tmp_path: Path, strict:
 
 
 def test_slots_and_huggingface_are_known_keys(tmp_path: Path) -> None:
-    doc = {"version": 1, "strict": True, "slots": [{"capability": "chat"}],
+    doc = {"version": 1, "strict": True, "slots": [{"capability": "chat", "name": "c", "port": 8200}],
            "huggingface": {"token_env": "HF_TOKEN"}}
     proc = run(doc, tmp_path)
     assert lines(proc) == ["HAL0_NONINTERACTIVE=1"]
@@ -548,12 +548,14 @@ def test_only_allow_listed_names_are_printed(tmp_path: Path) -> None:
     assert names <= set(ns["ALLOWED_NAMES"])
 
 
-def _emit(doc: object, tmp_path: Path, *extra: str) -> subprocess.CompletedProcess[str]:
+def _emit(doc: object, tmp_path: Path, *extra: str,
+          env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
     path = tmp_path / "doc.json"
     path.write_text(doc if isinstance(doc, str) else json.dumps(doc), encoding="utf-8")
     return subprocess.run(
         [sys.executable, "-I", str(READER), *extra, "--emit-saved", str(path)],
         capture_output=True, text=True, check=False,
+        env={**os.environ, **env} if env else None,
     )
 
 
@@ -618,13 +620,13 @@ def test_emit_saved_known_keys_round_trip(tmp_path: Path) -> None:
         "apps": {"hermes": {"enabled": True, "terminal_tool": True}, "comfyui": {"enabled": False}},
         "network": {"port": 80, "bind_host": "0.0.0.0"},
         "access": {"admin_key": "none"},
-        "slots": [{"name": "a", "anything": 1}],
+        "slots": [{"capability": "chat", "name": "a", "port": 9000, "anything": 1}],
     }
     proc = _emit(doc, tmp_path)
     assert proc.returncode == 0, proc.stderr
     expected = json.loads(json.dumps(doc))
     expected["apps"]["hermes"] = {"enabled": True}
-    expected["slots"] = [{"name": "a"}]  # unknown slot-entry keys are dropped
+    expected["slots"] = [{"capability": "chat", "name": "a", "port": 9000}]  # unknown slot-entry keys are dropped
     assert json.loads(proc.stdout) == expected
     assert proc.stderr == ""
 
@@ -821,7 +823,7 @@ def test_the_document_is_read_through_one_nonblocking_descriptor() -> None:
 
 @pytest.mark.parametrize("strict", [False, True])
 @pytest.mark.parametrize("good", ["0.0.0.0", "127.0.0.1", "::1", "2001:db8::1", "box-1",
-                                  "box.example.com", " 192.0.2.5 "])
+                                  "box.example.com", "fe80::1%eth0", "fe80::1%a_b.c-9"])
 def test_valid_bind_host_is_kept_and_warns_once(tmp_path: Path, strict: bool, good: str) -> None:
     proc = run({"version": 1, "strict": strict, "network": {"bind_host": good}}, tmp_path)
     assert lines(proc) == ["HAL0_NONINTERACTIVE=1"]
@@ -830,7 +832,11 @@ def test_valid_bind_host_is_kept_and_warns_once(tmp_path: Path, strict: bool, go
 
 @pytest.mark.parametrize("bad", ["-bad", "--help", "a b", "a;b", "$(x)", "x\ny", "x\x1b[31m", "",
                                  "   ", "-1.2.3.4", "999.1.1.1", "bad_host", 5, True, [], {}, ["1.1.1.1"],
-                                 {"token": "secret"}, "a" * 300])
+                                 {"token": "secret"}, "a" * 300, " 192.0.2.5 ", "192.0.2.5 ", " box-1",
+                                 "192.0.2.5\u00a0", "\u2003box-1", "box-1\u3000", "\u200bbox-1",
+                                 "fe80::1%$(id)", "fe80::1%", "fe80::1%" + "a" * 17, "fe80::1%a b",
+                                 "fe80::1%eth0%x", "fe80::1%a;b", "fe80::1%a/b", "fe80::1%`id`",
+                                 "fe80::1%\u00e9th0"])
 @pytest.mark.parametrize("strict", [False, True])
 def test_invalid_bind_host_is_an_error(tmp_path: Path, strict: bool, bad: object) -> None:
     proc = run({"version": 1, "strict": strict, "network": {"bind_host": bad}}, tmp_path)
@@ -851,6 +857,9 @@ def test_bind_host_survives_into_the_saved_copy(tmp_path: Path) -> None:
 
 _SLOT = {"capability": "coder", "name": "code-1", "port": 8201, "model_id": "qwen3-8b",
          "device": "auto", "profile": "auto", "context_size": 8192, "enabled_on_pull": True}
+
+
+_REQUIRED = {"capability": "chat", "name": "a", "port": 9000}
 
 
 def test_a_full_slot_entry_is_accepted_and_kept(tmp_path: Path) -> None:
@@ -892,7 +901,7 @@ def test_a_slot_entry_must_be_a_mapping(tmp_path: Path, entry: object) -> None:
 
 
 def test_nesting_inside_a_slot_entry_is_refused(tmp_path: Path) -> None:
-    doc = {"version": 1, "slots": [{"name": "a", "extra": {"token": "hf_nested_secret"}}]}
+    doc = {"version": 1, "slots": [{**_REQUIRED, "extra": {"token": "hf_nested_secret"}}]}
     for strict in (False, True):
         proc = run({**doc, "strict": strict}, tmp_path)
         assert "hf_nested_secret" not in proc.stderr
@@ -901,12 +910,12 @@ def test_nesting_inside_a_slot_entry_is_refused(tmp_path: Path) -> None:
 
 
 def test_duplicate_slot_ports_are_an_error(tmp_path: Path) -> None:
-    proc = run({"version": 1, "slots": [{"name": "a", "port": 9000}, {"name": "b", "port": 9000}]}, tmp_path)
+    proc = run({"version": 1, "slots": [_REQUIRED, {**_REQUIRED, "name": "b"}]}, tmp_path)
     assert proc.returncode == 2 and "slots[1].port" in proc.stderr and "9000" in proc.stderr
 
 
 def test_unknown_slot_key_follows_strict(tmp_path: Path) -> None:
-    doc = {"version": 1, "slots": [{"name": "a", "mystery": "hf_token_like"}]}
+    doc = {"version": 1, "slots": [{**_REQUIRED, "mystery": "hf_token_like"}]}
     loose = run(doc, tmp_path)
     assert lines(loose) == ["HAL0_NONINTERACTIVE=1"]
     assert "slots[0].mystery" in loose.stderr
@@ -915,11 +924,11 @@ def test_unknown_slot_key_follows_strict(tmp_path: Path) -> None:
 
 
 def test_unknown_slot_keys_are_dropped_from_the_saved_copy(tmp_path: Path) -> None:
-    doc = {"version": 1, "slots": [{"name": "a", "port": 9000, "token": "hf_secret_slot"}]}
+    doc = {"version": 1, "slots": [{**_REQUIRED, "token": "hf_secret_slot"}]}
     proc = _emit(doc, tmp_path)
     assert proc.returncode == 0, proc.stderr
     assert "hf_secret_slot" not in proc.stdout
-    assert json.loads(proc.stdout)["slots"] == [{"name": "a", "port": 9000}]
+    assert json.loads(proc.stdout)["slots"] == [_REQUIRED]
 
 
 def test_slots_still_emit_no_variable(tmp_path: Path) -> None:
@@ -1069,3 +1078,173 @@ def test_the_default_store_is_not_caught_by_the_inode_check(tmp_path: Path) -> N
 def test_a_real_system_tree_is_still_refused_by_name_first(tmp_path: Path, key: str) -> None:
     proc = run({"version": 1, "model_store": {key: "/etc/x"}}, tmp_path)
     assert proc.returncode == 2 and "system location" in proc.stderr
+
+
+# ── a credential anywhere in a URL: rejected, nothing of it echoed ──────────
+
+_PASSWORDS = ["Sup3r/Secret", "Sup3r?Secret", "Sup3r#Secret", "Sup3r@Secret", "Sup3r Secret",
+              "Sup3rSecret/xyz"]
+
+
+@pytest.mark.parametrize("pw", _PASSWORDS)
+@pytest.mark.parametrize("key", ["public_url", "allowed_origins"])
+@pytest.mark.parametrize("shape", ["{scheme}://admin:{pw}@host.example", "{scheme}://admin:{pw}/x@host.example",
+                                   "{scheme}://host.example/{pw}@x", "admin:{pw}@host.example"])
+def test_a_url_with_an_at_sign_anywhere_echoes_nothing_of_it(tmp_path: Path, pw: str, key: str,
+                                                              shape: str) -> None:
+    url = shape.format(scheme="https", pw=pw)
+    value = url if key == "public_url" else [url]
+    proc = run({"version": 1, "network": {key: value}}, tmp_path)
+    assert proc.returncode == 2 and proc.stdout == ""
+    assert "Sup3r" not in proc.stderr and "host.example" not in proc.stderr
+    where = "network.public_url" if key == "public_url" else "network.allowed_origins[0]"
+    assert f"error: {where}: must not contain a user name or password" in proc.stderr
+
+
+def test_the_motivating_url_is_rejected_without_its_password(tmp_path: Path) -> None:
+    proc = run({"version": 1, "network": {"public_url": "https://admin:Sup3rSecret/xyz@host.example"}},
+               tmp_path)
+    assert proc.returncode == 2 and "Sup3rSecret" not in proc.stderr
+
+
+# ── a scope id on an IPv6 address is bounded text, and so is a URL host ─────
+
+
+def test_a_scoped_address_is_not_a_url_host(tmp_path: Path) -> None:
+    for url in ("https://[fe80::1%eth0]/", "https://[fe80::1%25eth0]/", "https://[fe80::1%$(id)]"):
+        proc = run({"version": 1, "network": {"public_url": url}}, tmp_path)
+        assert proc.returncode == 2, url
+        assert "$(id)" not in proc.stdout
+
+
+# ── slots: the loader's required keys, and no path-like model id ────────────
+
+
+@pytest.mark.parametrize("entry", [{}, {"capability": "chat"}, {"name": "a", "port": 9000},
+                                   {"capability": "chat", "port": 9000},
+                                   {"capability": "chat", "name": "a"}])
+def test_a_slot_entry_needs_capability_name_and_port(tmp_path: Path, entry: dict) -> None:
+    proc = run({"version": 1, "slots": [entry]}, tmp_path)
+    assert proc.returncode == 2 and proc.stdout == ""
+    for key in ("capability", "name", "port"):
+        if key not in entry:
+            assert f"slots[0].{key}: is required" in proc.stderr
+
+
+@pytest.mark.parametrize("bad", ["../x", "a/b", "a..b", "..", "/abs", "org/model", "x/../y"])
+def test_a_slot_model_id_has_no_dotdot_or_slash(tmp_path: Path, bad: str) -> None:
+    proc = run({"version": 1, "slots": [{**_REQUIRED, "model_id": bad}]}, tmp_path)
+    assert proc.returncode == 2 and "slots[0].model_id" in proc.stderr
+
+
+@pytest.mark.parametrize("good", ["auto", "qwen3-8b", "llama-3.2-3b", "q4_k_m", "name:tag", "a+b"])
+def test_a_plain_slot_model_id_is_accepted(tmp_path: Path, good: str) -> None:
+    assert run({"version": 1, "slots": [{**_REQUIRED, "model_id": good}]}, tmp_path).returncode == 0
+
+
+# ── a value of unknown type is never echoed in full ─────────────────────────
+
+_MARK = "SECRETMARK" + "x" * 190
+
+
+@pytest.mark.parametrize("bad", [{"token": "hf_nested_secret"}, ["hf_nested_secret"]])
+def test_version_and_gen_mode_never_echo_a_container(tmp_path: Path, bad: object) -> None:
+    for doc in ({"version": bad}, {"version": 1, "gen": {"mode": bad}}):
+        proc = run(doc, tmp_path)
+        assert proc.returncode == 2
+        assert "hf_nested_secret" not in proc.stderr and "token" not in proc.stderr
+
+
+def _every_key() -> list[tuple[str, ...]]:
+    paths: list[tuple[str, ...]] = [(key,) for key in sorted(_reader_module()._TOP_KEYS)]
+    reader = _reader_module()
+    for section, keys in reader._SECTION_KEYS.items():
+        paths += [(section, key) for key in sorted(keys)]
+    paths += [("apps", app) for app in reader._APP_KEYS]
+    paths += [("apps", app, key) for app, keys in reader._APP_KEYS.items() for key in sorted(keys)]
+    paths += [("access", "admin_key"), ("access", "other"), ("strict",)]
+    paths += [("slots", 0, key) for key in sorted(reader._SLOT_KEYS)]  # type: ignore[misc]
+    paths += [("slots", 0), ("gen", "models", 0), ("network", "allowed_origins", 0)]  # type: ignore[misc]
+    return paths
+
+
+def _doc_with(path: tuple, value: object) -> dict:
+    doc: dict = {"version": 1}
+    node: object = doc
+    for step, nxt in zip(path, [*path[1:], None]):
+        container: object = [] if isinstance(nxt, int) else {}
+        if isinstance(node, dict):
+            if nxt is None:
+                node[step] = value
+            else:
+                node = node.setdefault(step, container)
+        else:
+            assert isinstance(node, list)
+            if nxt is None:
+                node.append(value)
+            else:
+                node.append(container)
+                node = node[-1]
+    return doc
+
+
+@pytest.mark.parametrize("path", _every_key(), ids=lambda p: ".".join(map(str, p)))
+@pytest.mark.parametrize("strict", [False, True])
+def test_a_nested_value_in_any_key_is_never_echoed(tmp_path: Path, path: tuple, strict: bool) -> None:
+    doc = _doc_with(path, {"k": {"deeper": _MARK}, "m": [_MARK]})
+    doc["strict"] = strict if path != ("strict",) else doc["strict"]
+    proc = run(doc, tmp_path, manifest=_manifest(tmp_path))
+    assert _MARK not in proc.stderr, proc.stderr
+    assert "SECRETMARK" not in proc.stderr, proc.stderr
+    assert "Traceback" not in proc.stderr
+
+
+def test_a_long_scalar_in_any_key_is_capped(tmp_path: Path) -> None:
+    for path in _every_key():
+        proc = run(_doc_with(path, _MARK), tmp_path, manifest=_manifest(tmp_path))
+        assert _MARK not in proc.stderr, path
+        assert "Traceback" not in proc.stderr, path
+
+
+# ── values are exported and saved in canonical form ─────────────────────────
+
+
+@pytest.mark.parametrize(("key", "given", "canonical"), [
+    ("path", "/mnt//x/./", "/mnt/x"),
+    ("path", "//mnt/x///y/", "/mnt/x/y"),
+    ("path", "/mnt/./x", "/mnt/x"),
+    ("flm_path", "{t}//flm/./", "{t}/flm"),
+])
+def test_store_paths_are_exported_and_saved_normalised(tmp_path: Path, key: str, given: str,
+                                                        canonical: str) -> None:
+    given, canonical = given.format(t=tmp_path), canonical.format(t=tmp_path)
+    doc = {"version": 1, "model_store": {key: given}}
+    env = _ME
+    proc = run(doc, tmp_path, env=env)
+    name = "HAL0_MODELS_DIR" if key == "path" else "HAL0_FLM_MODELS_DIR"
+    assert f"{name}={canonical}" in lines(proc)
+    saved = _emit(doc, tmp_path, env=env)
+    assert saved.returncode == 0, saved.stderr
+    assert json.loads(saved.stdout)["model_store"] == {key: canonical}
+
+
+def test_the_normalised_path_is_checked_too(tmp_path: Path) -> None:
+    for bad in ("/mnt/../etc/x", "/./usr/./lib", "//etc//x"):
+        proc = run({"version": 1, "model_store": {"path": bad}}, tmp_path)
+        assert proc.returncode == 2, bad
+    proc = run({"version": 1, "model_store": {"path": "/./etc/./x"}}, tmp_path)
+    assert "system location" in proc.stderr
+
+
+@pytest.mark.parametrize("blank", ["", " ", "  ", "\t", " ", "  "])
+def test_a_blank_public_url_is_an_error(tmp_path: Path, blank: str) -> None:
+    proc = run({"version": 1, "network": {"public_url": blank}}, tmp_path)
+    # \t and the Unicode spaces are control/format text as well; any error will do
+    assert proc.returncode == 2 and proc.stdout == ""
+    assert "network.public_url" in proc.stderr
+
+
+def test_a_null_public_url_is_still_fine(tmp_path: Path) -> None:
+    assert lines(run({"version": 1, "network": {"public_url": None}}, tmp_path)) == [
+        "HAL0_NONINTERACTIVE=1"
+    ]

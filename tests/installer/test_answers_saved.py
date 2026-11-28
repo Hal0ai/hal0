@@ -19,7 +19,7 @@ DOC = {
     "memory": {"enabled": False},
     "network": {"port": 9000, "bind_host": "0.0.0.0"},
     "huggingface": {"token": "hf_secret_value"},
-    "slots": [{"name": "a"}],
+    "slots": [{"capability": "chat", "name": "a", "port": 9000}],
 }
 
 
@@ -61,7 +61,7 @@ def test_saved_document_drops_terminal_tool_and_token(tmp_path: Path) -> None:
     assert "huggingface" not in saved
     assert saved["apps"]["hermes"] == {"enabled": True}
     assert saved["apps"]["pi"] == {"enabled": False}
-    assert saved["slots"] == [{"name": "a"}]
+    assert saved["slots"] == [{"capability": "chat", "name": "a", "port": 9000}]
     assert saved["network"]["bind_host"] == "0.0.0.0"
     assert list(saved) == [k for k in DOC if k != "huggingface"]
     assert body.endswith("}\n") and body.startswith('{\n  "version"')

@@ -127,7 +127,8 @@ _SLOT_KEYS = frozenset(
 )
 _SLOT_CAPABILITIES = ("chat", "coder")  # _VALID_SLOT_CAPABILITIES in the loader
 _SLOT_NAME = re.compile(r"^[a-z0-9][a-z0-9_-]{0,31}$")  # slots/routing.py slot-name policy
-_SLOT_MODEL = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:+/-]{0,199}$")
+_SLOT_MODEL = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:+-]{0,199}$")  # no '/': not a path
+_SCOPE_ID = re.compile(r"^[A-Za-z0-9_.-]{1,16}$")  # an IPv6 scope id (interface name or number)
 _SLOT_WORD = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")  # device and profile
 
 # Generated beside the reader (scripts/gen_setup_models.py); located from this
@@ -369,7 +370,7 @@ def _abs_path(obj: dict[str, Any], key: str, where: str, problems: _Problems,
         return None
     if not _safe_location(value, full, problems, installer_creates=installer_creates):
         return None
-    return value
+    return _normal(value)  # exported and saved in this form; _safe_location checked it
 
 
 def _inside(path: str, tree: str) -> bool:
@@ -538,6 +539,8 @@ def _ip_literal(value: str) -> bool:
 def _host_part(host: str) -> str | None:
     """Canonical host for a URL: DNS name, IPv4, or bracketed IPv6; else None."""
     if host.startswith("[") and host.endswith("]"):
+        if "%" in host:  # a scope id is not part of a URL host (and is free text)
+            return None
         try:
             return f"[{ipaddress.IPv6Address(host[1:-1])}]"
         except ValueError:
@@ -564,7 +567,7 @@ def _shown(raw: str) -> str:
 
     Messages end up in a log other users can read, so a user name, a password,
     a path or a query that was pasted into a URL must never be printed. The
-    caller has already refused any authority holding '@'.
+    caller has already refused any value holding '@'.
     """
     text = raw.strip()
     scheme = text.split("://", 1)[0] + "://" if "://" in text else ""
@@ -578,8 +581,10 @@ def _http_url(raw: str, full: str, problems: _Problems, *, allow_path: bool,
     if not text:
         problems.error(f"{full}: must not be empty")
         return None
-    # First, before any message can echo the value: credentials in the URL.
-    if "@" in _authority(text):
+    # First, before any message can echo the value: credentials in the URL. An
+    # '@' anywhere is refused (a password may hold '/', '?' or '#', so the
+    # authority cannot be found reliably), and the message echoes nothing.
+    if "@" in text:
         problems.error(f"{full}: must not contain a user name or password")
         return None
     shown = _shown(text)
@@ -699,6 +704,9 @@ def _check_slots(slots: Any, strict: bool, problems: _Problems) -> None:
             problems.error(f"{full}: must be a mapping")
             continue
         _unknown(entry, _SLOT_KEYS, full, strict, problems)
+        for required in ("capability", "name", "port"):  # as the loader requires them
+            if required not in entry:
+                problems.error(f"{full}.{required}: is required")
         if "capability" in entry and entry["capability"] not in _SLOT_CAPABILITIES:
             problems.error(
                 f"{full}.capability: must be one of {', '.join(_SLOT_CAPABILITIES)} "
@@ -714,6 +722,9 @@ def _check_slots(slots: Any, strict: bool, problems: _Problems) -> None:
             else:
                 seen[port] = i
         _slot_text(entry, "model_id", _SLOT_MODEL, full, problems, nullable=True)
+        model_id = entry.get("model_id")
+        if isinstance(model_id, str) and ".." in model_id and _SLOT_MODEL.match(model_id):
+            problems.error(f"{full}.model_id: must not contain '..' (got {_q_flat(model_id)})")
         _slot_text(entry, "device", _SLOT_WORD, full, problems, nullable=True)
         _slot_text(entry, "profile", _SLOT_WORD, full, problems, nullable=True)
         if "context_size" in entry:
@@ -728,9 +739,16 @@ def _bind_host_ok(value: Any) -> bool:
     """An IP address or a host name: text, no control characters, not an option."""
     if not isinstance(value, str):
         return False
-    text = value.strip()
-    if not text or text.startswith("-") or _has_control(text):
+    text = value
+    # No whitespace of any kind at either end (str.isspace covers Unicode spaces).
+    if not text or text[0].isspace() or text[-1].isspace():
         return False
+    if text.startswith("-") or _has_control(text):
+        return False
+    if "%" in text:
+        # An IPv6 scope id: ipaddress takes any text after '%', so bound it.
+        scope = text.partition("%")[2]
+        return bool(_SCOPE_ID.match(scope)) and _ip_literal(text)
     if _ip_literal(text):
         return True
     # A dotted name whose last label is a number (999.1.1.1) is a malformed address.
@@ -774,7 +792,7 @@ def _build(doc: dict[str, Any], origin: str, problems: _Problems,
 
     version = doc.get("version")
     if isinstance(version, bool) or not isinstance(version, int) or version != 1:
-        problems.error(f"version: must be 1 (got {_q(version)})")
+        problems.error(f"version: must be 1 (got {_q_flat(version)})")
 
     _unknown(doc, _TOP_KEYS, "", strict, problems)
     _check_slots(doc.get("slots"), strict, problems)
@@ -843,7 +861,9 @@ def _build(doc: dict[str, Any], origin: str, problems: _Problems,
         mode = gen.get("mode", "off")
         models = gen.get("models")
         if not isinstance(mode, str) or mode not in _GEN_MODES:
-            problems.error(f"gen.mode: must be one of {', '.join(_GEN_MODES)} (got {_q(mode)})")
+            problems.error(
+                f"gen.mode: must be one of {', '.join(_GEN_MODES)} (got {_q_flat(mode)})"
+            )
         else:
             ids: list[str] = []
             if models is not None and not isinstance(models, list):
@@ -925,7 +945,7 @@ def _build(doc: dict[str, Any], origin: str, problems: _Problems,
     if pub is not None:
         if not isinstance(pub, str):
             problems.error("network.public_url: must be a string or null")
-        elif pub.strip():
+        else:
             clean = _http_url(pub, "network.public_url", problems, allow_path=True, bare_ok=True)
             if clean is not None:
                 out["HAL0_PUBLIC_URL"] = clean
@@ -1035,6 +1055,8 @@ def _saved_document(doc: dict[str, Any]) -> dict[str, Any]:
             ]
         elif key in tables and isinstance(value, dict):
             value = {k: v for k, v in value.items() if k in tables[key]}
+            if key == "model_store":  # kept as exported: the normalised form
+                value = {k: _normal(v) if isinstance(v, str) else v for k, v in value.items()}
         saved[key] = value
     return saved
 
