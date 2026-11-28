@@ -330,6 +330,12 @@ HAL0_HERMES_TERMINAL=1 gives the bundled Hermes agent a terminal tool, letting
 it run commands as the hal0 user (root-equivalent on this box). It is OFF by
 default. An unattended install leaves it off unless HAL0_HERMES_TERMINAL=1 is
 set in the environment, which is the explicit opt-in.
+
+Turning the assistant off on the setup screens, on a box that already has it,
+stops it; it stays installed, and turning it on there again, or
+\`systemctl enable --now hal0-agent@hermes\`, starts it. A skip flag or
+variable alone (--no-hermes, --no-agents, --bare, HAL0_SKIP_HERMES=1) does not
+stop an installed assistant: only setup screens that a person confirmed do.
 EOF
             exit 0
             ;;
@@ -5147,12 +5153,46 @@ else
         unset _ht_value
     fi
 
+    # An installed assistant that a confirmed run of the setup screens turned
+    # off is stopped and disabled, not removed: its venv, its data and its
+    # settings stay, and a later run with the assistant on enables it again
+    # through the block below. HAL0_HERMES_STOP is 1 only when the answers
+    # reader printed it for origin wizard with the screens-shown marker and the
+    # assistant off (installer/lib/answers.sh unsets an inherited one and
+    # refuses it for any other origin), so a skip flag, HAL0_SKIP_HERMES=1, a
+    # file document, a saved document or a headless run never gets here. This
+    # step does not run at all under --dev or --no-start (the service-start
+    # branch it lives in is skipped). It disables exactly the units the block
+    # below would enable: the agent unit, and the gateway unit when its state
+    # was enabled; a masked or disabled gateway, and one started by hand, are
+    # left as they are. Linger for hal0, the dashboard proxy, containers, the
+    # venv and /var/lib/hal0 are not touched.
+    _hermes_stop_signal=0
+    if [[ "${HAL0_HERMES_STOP:-}" == "1" && "${_hermes_was_provisioned}" -eq 1 && -f "${AGENT_UNIT_DST}" ]]; then
+        _hermes_stop_signal=1
+        _hermes_stop_failed=0
+        systemctl disable --now hal0-agent@hermes.service || _hermes_stop_failed=1
+        if [[ "${_gateway_state}" == enabled* ]]; then
+            _gw_stop_runtime=()
+            [[ "${_gateway_state}" == "enabled-runtime" ]] && _gw_stop_runtime=(--runtime)
+            systemctl disable ${_gw_stop_runtime[@]+"${_gw_stop_runtime[@]}"} --now hermes-gateway.service \
+                || _hermes_stop_failed=1
+        fi
+        if [[ "${_hermes_stop_failed}" -eq 0 ]]; then
+            COMPONENT_STATES["hermes"]="stopped"
+            info "the assistant (Hermes) was stopped and disabled; it stays installed — start it again with 'systemctl enable --now hal0-agent@hermes' or run the installer with the assistant turned on"
+        else
+            warn "the assistant (Hermes) may still be running — stopping it failed; run 'systemctl disable --now hal0-agent@hermes.service hermes-gateway.service' by hand (component state stays skipped)"
+        fi
+        unset _hermes_stop_failed _gw_stop_runtime
+    fi
+
     # Enable the unit + gateway for both fresh (just-provisioned) and upgrade
     # installs. `hal0 agent install hermes` already enables the agent unit, so
     # the enable here is idempotent; it also covers the upgrade path where no
     # provision ran, plus the system-scope gateway (which the provision does
     # not install).
-    if [[ -f "${AGENT_UNIT_DST}" && -x "/var/lib/hal0/venvs/hermes/bin/hermes" ]]; then
+    if [[ -f "${AGENT_UNIT_DST}" && -x "/var/lib/hal0/venvs/hermes/bin/hermes" && "${_hermes_stop_signal}" -ne 1 ]]; then
         # Non-fatal: a hermes start hiccup must NOT abort an otherwise-good
         # install (hal0-api + chat are already up). Under `set -e` a failed
         # `enable --now` (e.g. the unit tripped StartLimitBurst) would fire the
@@ -5261,7 +5301,7 @@ else
             warn "hermes-gateway unit not installed (${GATEWAY_UNIT_DST} missing) — Telegram/Discord bridge unavailable"
             warn "  retry with 'sudo ${HAL0_BIN} agent install hermes'"
         fi
-    elif [[ -f "${AGENT_UNIT_DST}" ]]; then
+    elif [[ -f "${AGENT_UNIT_DST}" && "${_hermes_stop_signal}" -ne 1 ]]; then
         # No venv after the provision block: it was skipped (HAL0_SKIP_HERMES=1)
         # or failed. The warnings above already explain; this is the summary line.
         info "hal0-agent@hermes not enabled — provision with '${HAL0_BIN} agent install hermes'"
@@ -5413,6 +5453,8 @@ fi
 if [[ "${IS_UPGRADE}" -eq 0 ]]; then
     _summary_skipped=()
     for _summary_cid in openwebui comfyui hermes pi hindsight brain; do
+        # `stopped` (an installed assistant the screens turned off) is not
+        # "skipped": the step already said so, and it is not listed here.
         if [[ "${COMPONENT_STATES[${_summary_cid}]:-}" == "skipped" ]]; then
             case "${_summary_cid}" in
                 openwebui) _summary_clabel="Open WebUI" ;;
@@ -5575,8 +5617,8 @@ for entry in blob.split("\x1e"):
         except ValueError:
             pass
 
-# Component choices: id -> selected | skipped | unavailable:<reason>, same
-# RS-joined blob (HAL0_COMPONENTS_BLOB). Additive to v1; {} when absent.
+# Component choices: id -> selected | skipped | stopped | unavailable:<reason>
+# (the state string passes through as it is), same RS-joined blob (HAL0_COMPONENTS_BLOB). Additive to v1; {} when absent.
 components = {}
 for entry in os.environ.get("HAL0_COMPONENTS_BLOB", "").split("\x1e"):
     cid, sep, state = entry.partition("=")
