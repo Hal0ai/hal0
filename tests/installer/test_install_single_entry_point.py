@@ -203,13 +203,16 @@ def test_bootstrap_pipes_stdin_so_the_gate_can_do_its_job() -> None:
 
 
 def test_fresh_test_ct_drives_the_install_without_a_tty() -> None:
-    """The fresh-CT test script must keep using a tty-less ssh invocation."""
-    text = (_REPO_ROOT / "scripts" / "fresh-test-ct.sh").read_text(encoding="utf-8")
-    assert re.search(r"SSH\s+\"[^\"]*bash installer/install\.sh", text), (
-        "fresh-test-ct.sh no longer runs install.sh over a plain (tty-less) ssh — "
-        "an allocated tty would make the install interactive"
+    """The fresh-CT wrapper hands off to the matrix, whose unattended entry sets the env."""
+    wrapper = (_REPO_ROOT / "scripts" / "fresh-test-ct.sh").read_text(encoding="utf-8")
+    assert "install-matrix/run-shape.sh" in wrapper, (
+        "fresh-test-ct.sh no longer calls the install-matrix orchestrator"
     )
-    assert "-t -t" not in text and "ssh -t" not in text
+    run_shape = (_REPO_ROOT / "scripts" / "install-matrix" / "run-shape.sh").read_text(encoding="utf-8")
+    assert "HAL0_NONINTERACTIVE=1" in run_shape, (
+        "run-shape.sh lost its unattended entry (HAL0_NONINTERACTIVE=1): a headless "
+        "install would then prompt on /dev/tty"
+    )
 
 
 def test_models_dir_and_hf_token_prompts_prefill_from_env(install_sh_text: str) -> None:

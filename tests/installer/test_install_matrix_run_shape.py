@@ -1,0 +1,390 @@
+"""The install-matrix orchestrator (scripts/install-matrix/run-shape.sh).
+
+Real bash under subprocess. Every run puts a FAKE ``ssh`` first on PATH: it
+records its arguments and plays a small Proxmox host and guest from a state
+directory. No real host is ever contacted; the pct/pveam/pvesm/pvesh names are
+stubbed to fail loudly in case a code path ran them locally.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import re
+import signal
+import stat
+import subprocess
+import time
+from pathlib import Path
+
+import pytest
+
+REPO = Path(__file__).resolve().parents[2]
+RUN_SHAPE = REPO / "scripts" / "install-matrix" / "run-shape.sh"
+WRAPPER = REPO / "scripts" / "fresh-test-ct.sh"
+
+FAKE_SSH = r"""#!/usr/bin/env bash
+# Fake Proxmox host + guest. State lives in $FAKE_STATE.
+printf '%s\n' "$*" >> "$FAKE_STATE/ssh.log"
+cmd="${*: -1}"
+plain="${cmd//\\/}"
+[[ " $* " == *" -n "* || " $* " == *" -tt "* ]] || cat > "$FAKE_STATE/stdin.dump"
+case "$cmd" in
+  "free -g")
+    printf '              total used free shared buff/cache available\nMem: 125 20 60 1 45 %s\n' "${FAKE_MEM:-100}"
+    exit 0 ;;
+  "pveam list local")
+    printf 'Volume Size\nlocal:vztmpl/ubuntu-26.04-standard_26.04-1_amd64.tar.zst 1\nlocal:vztmpl/ubuntu-24.04-standard_24.04-1_amd64.tar.zst 1\n'
+    exit 0 ;;
+  "pvesm status"*)
+    printf 'Name Type Status\nlocal dir active\n'
+    exit 0 ;;
+  "pvesh get"*)
+    echo '[]'; exit 0 ;;
+  "if test -e /etc/pve/lxc/"*)
+    if [[ -e "$FAKE_STATE/present" ]]; then echo present; else echo absent; fi
+    exit 0 ;;
+  "bash -s -- gpu"*)
+    printf 'dev /dev/dri/renderD128,gid=44\nmajor 226\n'; exit 0 ;;
+  "pct config "*)
+    [[ -e "$FAKE_STATE/present" ]] || exit 2
+    vm="${cmd#pct config }"
+    printf 'hostname: hal0-mx-%s\ntags: hal0-matrix\ncores: 8\n' "${vm%% *}"
+    exit 0 ;;
+  "pct create "*)
+    [[ -z "${FAKE_CREATE_FAILS:-}" ]] || exit 1
+    touch "$FAKE_STATE/present"; exit 0 ;;
+  "pct start "*)
+    exit 0 ;;
+  *"pct destroy "*)
+    [[ -z "${FAKE_DESTROY_FAILS:-}" ]] || exit 1
+    rm -f "$FAKE_STATE/present"; exit 0 ;;
+esac
+case "$plain" in
+  *"getent hosts"*) exit 0 ;;
+  *"command -v curl"*) exit 0 ;;
+  *"cat > "*) exit 0 ;;
+  *"mkdir -p /root/hal0-src"*) exit 0 ;;
+  *"-o /root/install.sh"*) exit 0 ;;
+  *"collect.sh pre"*) printf 'disk_used_bytes=1000\nnet_rx_bytes=100\n'; exit 0 ;;
+  *"collect.sh post"*)
+    printf 'disk_used_bytes=5000\nnet_rx_bytes=900\nslot_count=2\nslots=a,b\nfailed_units=\ninstall_log=/var/log/hal0/install-1.log\nfailure_report=/tmp/hal0-install-report-1.txt\n'
+    exit 0 ;;
+  *"collect.sh probe"*)
+    printf 'api_health_s=3\ndoctor_ok=10\ndoctor_warn=1\ndoctor_critical=0\ndoctor_exit=0\nchat_ok=1\nchat_first_token_s=0.5\nchat_model=m\nmemory_write_ok=1\nmemory_read_ok=1\nhermes_reply_ok=1\nhermes_reply_s=2\n'
+    exit 0 ;;
+  *"cat /var/log/hal0/install-1.log"*) echo "the install log"; exit 0 ;;
+  *"cat /tmp/hal0-install-report-1.txt"*) echo "the failure report"; exit 0 ;;
+  *"cat /root/hal0-summary.json"*)
+    echo '{"hal0_version": "9.9.9", "elapsed_seconds": 7, "step_durations_seconds": {"Pre-flight checks": 2}, "warnings": 0, "errors": 0}'
+    exit 0 ;;
+  *"hal0 uninstall"*) exit 0 ;;
+  *"list-unit-files"*) echo; exit 0 ;;
+  *"summary-json"*)
+    touch "$FAKE_STATE/install-started"
+    echo "installing hal0"
+    if [[ -n "${FAKE_INSTALL_SLEEP:-}" ]]; then exec sleep "$FAKE_INSTALL_SLEEP"; fi
+    exit "${FAKE_INSTALL_RC:-0}" ;;
+esac
+echo "fake ssh: unexpected command: $cmd" >&2
+exit 97
+"""
+
+
+class Host:
+    def __init__(self, tmp_path: Path):
+        self.root = tmp_path / "host"
+        self.root.mkdir()
+        self.bin = self.root / "bin"
+        self.bin.mkdir()
+        self.state = self.root / "state"
+        self.state.mkdir()
+        self.log = self.state / "ssh.log"
+        self.log.write_text("")
+        ssh = self.bin / "ssh"
+        ssh.write_text(FAKE_SSH)
+        ssh.chmod(0o755)
+        for name in ("pct", "pveam", "pvesm", "pvesh"):
+            p = self.bin / name
+            p.write_text(f"#!/bin/sh\necho 'real {name} called locally' >&2\nexit 98\n")
+            p.chmod(0o755)
+        self.out = tmp_path / "out"
+
+    def env(self, **extra: str) -> dict[str, str]:
+        return {
+            "PATH": f"{self.bin}:/usr/bin:/bin",
+            "HOME": str(self.root),
+            "HAL0_PVE": "testpve",
+            "HAL0_MATRIX_DESTROY_SLEEP": "0",
+            "FAKE_STATE": str(self.state),
+            **extra,
+        }
+
+    def calls(self) -> list[str]:
+        return [x for x in self.log.read_text().splitlines() if x]
+
+    def run(self, *args: str, script: Path = RUN_SHAPE, **env: str):
+        return subprocess.run(
+            ["bash", str(script), *args],
+            env=self.env(**env),
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=180,
+        )
+
+    def dry(self, shape: str, *args: str, **env: str):
+        return self.run(shape, "--dry-run", "--out", str(self.out), *args, **env)
+
+
+@pytest.fixture
+def host(tmp_path):
+    return Host(tmp_path)
+
+
+def plan_lines(proc) -> list[str]:
+    return [x for x in proc.stdout.splitlines() if x.startswith("[dry-run]")]
+
+
+# --- refusals --------------------------------------------------------------
+
+
+def test_refuses_shape_not_runnable(host):
+    r = host.run("baremetal-amd")
+    assert r.returncode == 2
+    assert "not runnable" in r.stderr
+    assert host.calls() == []
+
+
+def test_refuses_unknown_shape_and_bad_source(host):
+    assert host.run("no-such-shape").returncode == 2
+    assert host.run("u2404-cpu", "--source", "weird").returncode == 2
+    assert host.run("u2404-cpu", "--source", "tree:/no/such/dir/anywhere").returncode == 2
+    assert host.calls() == []
+
+
+def test_refuses_when_host_low_on_memory(host):
+    r = host.run("u2404-cpu", "--out", str(host.out), FAKE_MEM="5")
+    assert r.returncode == 2
+    assert "5 GB" in r.stderr
+    assert not any("pct create" in c for c in host.calls())
+    assert not host.out.exists()
+
+
+def test_refuses_a_vmid_that_already_exists(host):
+    (host.state / "present").touch()
+    r = host.run("u2404-cpu", "--vmid", "172", "--out", str(host.out))
+    assert r.returncode == 2
+    assert not any("pct create" in c or "pct destroy" in c for c in host.calls())
+
+
+def test_refuses_a_vmid_outside_the_range(host):
+    r = host.run("u2404-cpu", "--vmid", "100", "--out", str(host.out))
+    assert r.returncode == 2
+    assert not any("pct create" in c for c in host.calls())
+
+
+def test_tree_source_refuses_the_box_entry(host):
+    r = host.dry("u2604-box", "--source", f"tree:{REPO}")
+    assert r.returncode == 2
+
+
+# --- dry run ---------------------------------------------------------------
+
+
+def test_dry_run_creates_nothing(host):
+    r = host.dry("u2604-gpu")
+    assert r.returncode == 0, r.stderr
+    calls = host.calls()
+    assert calls == [], "a dry run must never reach ssh"
+    plan = "\n".join(plan_lines(r))
+    assert "pct create 170" in plan  # the plan names what it would do
+    assert "--dev0" in plan and "renderD128" in plan
+    assert "pct destroy 170" in plan
+    assert not host.out.exists()
+
+
+def test_oneliner_runs_in_a_terminal_and_passes_summary_flag(host):
+    r = host.dry("u2404-cpu")
+    assert r.returncode == 0, r.stderr
+    plan = "\n".join(plan_lines(r))
+    assert "ssh -tt" in plan
+    assert "| bash -s -- --summary-json=/root/hal0-summary.json" in plan
+    assert "pct exec 170 -- bash -c '" in plan
+    assert "HAL0_NONINTERACTIVE" not in plan
+    assert "cpu-consent.tsv" in plan
+
+
+def test_box_adds_the_box_flag(host):
+    r = host.dry("u2604-box")
+    plan = "\n".join(plan_lines(r))
+    assert "| bash -s -- --box --summary-json=/root/hal0-summary.json" in plan
+
+
+def test_unattended_sets_both_variables_and_no_terminal(host):
+    r = host.dry("u2604-cpu-unattended")
+    assert r.returncode == 0, r.stderr
+    plan = "\n".join(plan_lines(r))
+    assert "HAL0_NONINTERACTIVE=1" in plan
+    assert "HAL0_ALLOW_CPU_ONLY=1" in plan
+    assert "-tt" not in plan
+    assert "tty:" not in plan
+
+
+def test_terminal_entry_downloads_first_then_runs_with_a_terminal(host):
+    r = host.dry("u2604-cpu-terminal")
+    plan = "\n".join(plan_lines(r))
+    assert "-o /root/install.sh" in plan.replace("\\", "")
+    assert "bash /root/install.sh --summary-json=/root/hal0-summary.json" in plan
+    assert "ssh -tt" in plan
+    assert "terminal-defaults.tsv" in plan
+
+
+def test_prereqs_never_include_python(host):
+    r = host.dry("deb13-cpu")
+    plan = "\n".join(plan_lines(r)).replace("\\", "")
+    installs = re.findall(r"install -y(?: -\w+)* ([^;|>}&]+)", plan)
+    assert installs, "the prerequisite install should be planned"
+    for tail in installs:
+        assert set(tail.split()) <= {"curl", "ca-certificates"}, tail
+    # Only the one guarded install line may name packages at all.
+    assert "python" not in plan.split("command -v curl")[1].split("prereqs=")[0]
+
+
+@pytest.mark.parametrize("source", ["stable", "preview", "nightly"])
+def test_cosign_not_skipped(host, source):
+    r = host.dry("u2404-cpu", "--source", source)
+    plan = "\n".join(plan_lines(r))
+    assert "HAL0_UPDATE_SKIP_COSIGN" not in plan
+    assert "HAL0_INSTALL_SKIP_VERIFY" not in plan
+    assert "https://hal0.dev/install.sh" in plan
+    if source != "stable":
+        assert f"HAL0_CHANNEL={source} bash -s --" in plan
+
+
+def test_tree_source_packs_and_skips_verify_only_there(host, tmp_path):
+    tree = tmp_path / "my tree"
+    (tree / "installer").mkdir(parents=True)
+    (tree / "installer" / "install.sh").write_text("echo hi\n")
+    (tree / ".git").mkdir()
+    r = host.dry("u2404-cpu", "--source", f"tree:{tree}")
+    assert r.returncode == 0, r.stderr
+    plan = "\n".join(plan_lines(r))
+    assert "HAL0_INSTALL_SKIP_VERIFY=1 bash installer/install.sh" in plan
+    assert str(tree) not in plan, "a local path must never reach the host"
+    assert "HAL0_UPDATE_SKIP_COSIGN" not in plan
+
+
+def test_dry_run_still_validates_the_source(host):
+    r = host.dry("u2404-cpu", "--source", "tree:/definitely/not/here")
+    assert r.returncode == 2
+
+
+# --- cleanup and results ---------------------------------------------------
+
+
+def test_cleanup_destroys_on_interrupt(host):
+    proc = subprocess.Popen(
+        ["bash", str(RUN_SHAPE), "u2604-cpu-unattended", "--vmid", "172", "--out", str(host.out)],
+        env=host.env(FAKE_INSTALL_SLEEP="60"),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+    )
+    started = host.state / "install-started"
+    deadline = time.monotonic() + 90
+    while not started.exists():
+        assert proc.poll() is None, "run ended before the install started"
+        assert time.monotonic() < deadline, "install never started"
+        time.sleep(0.05)
+    os.killpg(proc.pid, signal.SIGINT)
+    out, err = proc.communicate(timeout=120)
+    assert proc.returncode == 130, err
+    calls = host.calls()
+    install_at = max(i for i, c in enumerate(calls) if "summary-json" in c)
+    destroy_at = [i for i, c in enumerate(calls) if "pct destroy 172" in c]
+    assert destroy_at and destroy_at[0] > install_at
+    assert not (host.state / "present").exists(), "the container must be gone"
+    assert "LEFT BEHIND" not in err
+    result = json.loads((host.out / "result.json").read_text())
+    assert result["install_exit_code"] == 130
+
+
+def test_failed_destroy_prints_left_behind(host):
+    r = host.run("u2404-cpu", "--vmid", "172", "--out", str(host.out), FAKE_DESTROY_FAILS="1")
+    assert "LEFT BEHIND: 172" in r.stderr
+    assert "pct destroy 172" in r.stderr
+    assert r.returncode == 1
+
+
+def test_failed_install_still_writes_result(host):
+    r = host.run("u2604-cpu-unattended", "--vmid", "172", "--out", str(host.out), FAKE_INSTALL_RC="1")
+    assert r.returncode == 1
+    result = json.loads((host.out / "result.json").read_text())
+    assert result["install_exit_code"] == 1
+    assert result["schema"] == "hal0.install-matrix.v1"
+    assert result["chat"] is None  # the probe only runs after a good install
+    assert (host.out / "install.log").read_text().strip() == "the install log"
+    assert (host.out / "failure-report.txt").read_text().strip() == "the failure report"
+    assert not (host.state / "present").exists()
+
+
+def test_nothing_alarming_when_create_fails(host):
+    r = host.run("u2404-cpu", "--vmid", "172", "--out", str(host.out), FAKE_CREATE_FAILS="1")
+    assert r.returncode == 1
+    assert "LEFT BEHIND" not in r.stderr
+    assert not any("pct destroy" in c for c in host.calls())
+
+
+def test_successful_terminal_run(host):
+    r = host.run("u2604-cpu-terminal", "--vmid", "172", "--out", str(host.out), "--uninstall")
+    assert r.returncode == 0, r.stderr
+    path = Path(r.stdout.strip().splitlines()[-1])
+    assert path == host.out / "result.json"
+    result = json.loads(path.read_text())
+    assert result["install_exit_code"] == 0
+    assert result["hal0_version"] == "9.9.9"
+    assert result["chat"]["ok"] is True
+    assert result["bytes_downloaded"] == 800
+    assert result["disk_used_bytes"] == 4000
+    assert "uninstall" not in result and "vmid" not in result
+    note = (host.out / "run.txt").read_text().splitlines()
+    assert note == ["vmid=172", "uninstall_ok=1", "residue=clean"]
+    assert result["harness_prereqs"] == []
+    assert stat.S_IMODE(host.out.stat().st_mode) == 0o700
+    for f in host.out.iterdir():
+        assert stat.S_IMODE(f.stat().st_mode) == 0o600, f.name
+    assert "installing hal0" in (host.out / "transcript.txt").read_text()
+    assert not (host.state / "present").exists()
+    assert any("-tt" in c and "pct exec 172" in c for c in host.calls())
+
+
+def test_keep_leaves_the_container(host):
+    r = host.run("u2404-cpu", "--vmid", "172", "--keep", "--out", str(host.out))
+    assert r.returncode == 0, r.stderr
+    assert (host.state / "present").exists()
+    assert "pct destroy 172" in r.stderr  # printed as the manual command
+    assert not any("pct destroy" in c for c in host.calls())
+
+
+# --- the wrapper -----------------------------------------------------------
+
+
+def test_wrapper_prints_the_old_row_shape(host):
+    r = host.run("--vmid", "172", "--out", str(host.out), script=WRAPPER)
+    assert r.returncode == 0, r.stderr
+    row = json.loads(r.stdout.strip().splitlines()[-1])
+    assert set(row) == {
+        "row", "clone_id", "install_ok", "smoke_ok", "uninstall_ok", "residue", "ip", "elapsed_s",
+    }  # fmt: skip
+    assert row["row"] == "install-smoke"
+    assert row["clone_id"] == 172
+    assert row["install_ok"] is True and row["smoke_ok"] is True
+    assert row["uninstall_ok"] is True and row["residue"] == "clean"
+
+
+def test_wrapper_ignores_with_models_once(host):
+    r = host.run("--vmid", "172", "--with-models", "--with-models", "--out", str(host.out),
+                 script=WRAPPER)  # fmt: skip
+    assert r.stderr.count("--with-models") == 1

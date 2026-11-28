@@ -1,188 +1,116 @@
 #!/usr/bin/env bash
-# fresh-test-ct.sh (#407) — clone the CT-200 hal0-test-template, run a full
-# install -> smoke -> uninstall cycle on a byte-identical clean box, assert
-# ZERO residue, destroy the clone, and emit one JSON line.
+# fresh-test-ct.sh (#407) - install -> smoke -> uninstall on a fresh container,
+# assert zero residue, destroy the container, emit one JSON line.
 #
-# This is the regression net PR CI cannot provide: CI runs `pytest`/UI builds
-# but never executes install.sh (needs root + systemd + a real machine). This
-# harness does, on an ephemeral clone, so installer/updater/uninstall changes
-# (notably the FHS-layout work in #495/#406) become verifiable end-to-end.
+# This is now a thin wrapper over scripts/install-matrix/run-shape.sh, which
+# creates a throwaway container from a raw OS template (no pre-built test
+# template needed), installs hal0 as a newcomer would, and records the run.
 #
-#   fresh-test-ct.sh [--vmid N] [--keep] [--from-tree <dir>] [--with-models]
+#   fresh-test-ct.sh [--shape ID] [--vmid N] [--keep] [--from-tree DIR]
+#                    [--out DIR] [--with-models]
 #
-# Modes:
-#   (default)         install the LIVE release: `curl hal0.dev/install.sh | bash`.
-#                     NOTE: that serves the last *published* tarball, which may
-#                     predate unmerged fixes on main.
-#   --from-tree <dir> rsync the working tree to the clone and run its
-#                     installer/install.sh directly (HAL0_INSTALL_SKIP_VERIFY=1).
-#                     Use this to verify the CURRENT code, e.g. an installer PR.
+#   --shape ID        a shape from scripts/install-matrix/shapes.json
+#                     (default u2604-cpu-unattended: no terminal, CPU consent
+#                     given through the environment).
+#   --from-tree DIR   install the working tree at DIR instead of the public
+#                     release (run-shape.sh --source tree:DIR).
+#   --with-models     accepted and ignored: the matrix containers share no
+#                     model store.
 #
-# Env overrides: HAL0_TEST_TEMPLATE(200), HAL0_PVE(pve ssh alias),
-#   HAL0_TEST_KEY(~/.ssh/id_ed25519), HAL0_INSTALL_URL(https://hal0.dev/install.sh).
+# It always runs with --uninstall. The JSON row has the same keys as before
+# (row, clone_id, install_ok, smoke_ok, uninstall_ok, residue, ip, elapsed_s),
+# built from the run's result.json and run.txt; ip is empty. Exit 0 only when the install,
+# the smoke probe, the uninstall and the residue check all came out clean.
+#
+# Env overrides: HAL0_PVE (ssh alias of the Proxmox host, default pve) and the
+# HAL0_MATRIX_* settings documented in scripts/install-matrix/lib/pve.sh.
 set -uo pipefail
 
-TEMPLATE="${HAL0_TEST_TEMPLATE:-200}"
-PVE_HOST="${HAL0_PVE:-pve}"
-KEY="${HAL0_TEST_KEY:-$HOME/.ssh/id_ed25519}"
-INSTALL_URL="${HAL0_INSTALL_URL:-https://hal0.dev/install.sh}"
-VMID=""; KEEP=0; FROM_TREE=""; WITH_MODELS=0
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+RUN_SHAPE="${HERE}/install-matrix/run-shape.sh"
 
-usage() { sed -n '2,30p' "$0"; }
+SHAPE="u2604-cpu-unattended" VMID="" KEEP=0 TREE="" OUT="" WARNED_MODELS=0
+usage() { sed -n '2,24p' "${BASH_SOURCE[0]}"; }
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --vmid) VMID="$2"; shift 2 ;;
+    --shape | --vmid | --from-tree | --out)
+      [[ $# -ge 2 ]] || { echo "$1 needs a value" >&2; exit 2; }
+      case "$1" in
+        --shape) SHAPE="$2" ;;
+        --vmid) VMID="$2" ;;
+        --from-tree) TREE="$2" ;;
+        --out) OUT="$2" ;;
+      esac
+      shift 2
+      ;;
     --keep) KEEP=1; shift ;;
-    --from-tree) FROM_TREE="$2"; shift 2 ;;
-    --with-models) WITH_MODELS=1; shift ;;
-    -h|--help) usage; exit 0 ;;
-    *) echo "unknown arg: $1" >&2; usage; exit 2 ;;
+    --with-models)
+      if [[ "$WARNED_MODELS" == "0" ]]; then
+        echo "[fresh-test-ct] --with-models is ignored: matrix containers share no model store" >&2
+        WARNED_MODELS=1
+      fi
+      shift
+      ;;
+    -h | --help) usage; exit 0 ;;
+    *) echo "unknown arg: $1" >&2; usage >&2; exit 2 ;;
   esac
 done
 
-PVE() { ssh -i "$KEY" -o BatchMode=yes -o ConnectTimeout=10 "$PVE_HOST" "$@"; }
-log() { echo "[fresh-test-ct] $*" >&2; }
+args=("$SHAPE" --uninstall)
+[[ -z "$VMID" ]] || args+=(--vmid "$VMID")
+[[ "$KEEP" != "1" ]] || args+=(--keep)
+[[ -z "$TREE" ]] || args+=(--source "tree:${TREE}")
+[[ -z "$OUT" ]] || args+=(--out "$OUT")
 
-# ── preflight: fail loudly BEFORE allocating a vmid ─────────────────────────
-# `pct clone` against a missing template produced a bare "install_ok:false"
-# JSON row with no reason, which reads as "the installer broke" when in fact
-# the harness was pointed at a template that does not exist. Both defaults
-# (HAL0_PVE=pve, HAL0_TEST_TEMPLATE=200) go stale as soon as the lab is
-# rebuilt, so check them explicitly and say what IS available.
-PVE "true" >/dev/null 2>&1 || {
-  echo "cannot reach Proxmox host via ssh alias '${PVE_HOST}'" >&2
-  echo "  set HAL0_PVE to the right ssh alias (check: grep -i '^Host ' ~/.ssh/config)" >&2
-  exit 2
-}
-if ! PVE "pct config ${TEMPLATE}" >/dev/null 2>&1; then
-  echo "template CT ${TEMPLATE} does not exist on ${PVE_HOST}" >&2
-  echo "  set HAL0_TEST_TEMPLATE to a real template vmid. Templates present:" >&2
-  PVE "pct list | tail -n +2 | awk '{print \$1}' | while read -r v; do
-        pct config \"\$v\" 2>/dev/null | grep -q '^template: 1' && echo \"    \$v \$(pct config \"\$v\" | sed -n 's/^hostname: //p')\"
-      done" >&2 || true
-  exit 2
-fi
-PVE "pct config ${TEMPLATE} | grep -q '^template: 1'" 2>/dev/null || {
-  echo "CT ${TEMPLATE} exists but is NOT a template — refusing to clone a live container" >&2
-  echo "  convert it first: pct stop ${TEMPLATE} && pct template ${TEMPLATE}" >&2
-  exit 2
-}
-[[ -r "$KEY" ]] || { echo "ssh key not readable: ${KEY} (set HAL0_TEST_KEY)" >&2; exit 2; }
+start="$(date +%s)"
+stdout="$(bash "$RUN_SHAPE" "${args[@]}")"
+rc=$?
+result="$(printf '%s\n' "$stdout" | tail -n 1)"
+elapsed=$(($(date +%s) - start))
 
-# Pick a free ephemeral vmid (990-999) if none given.
-if [[ -z "$VMID" ]]; then
-  for c in $(seq 990 999); do
-    PVE "pct status $c" >/dev/null 2>&1 || { VMID="$c"; break; }
-  done
-fi
-[[ -n "$VMID" ]] || { echo "no free vmid in 990-999" >&2; exit 1; }
-
-START="$(date +%s)"
-INSTALL_OK=false; SMOKE_OK=false; UNINSTALL_OK=false; RESIDUE="unknown"; IP=""
-
-emit() {
-  local elapsed=$(( $(date +%s) - START ))
-  printf '{"row":"install-smoke","clone_id":%s,"install_ok":%s,"smoke_ok":%s,"uninstall_ok":%s,"residue":"%s","ip":"%s","elapsed_s":%s}\n' \
-    "$VMID" "$INSTALL_OK" "$SMOKE_OK" "$UNINSTALL_OK" "$RESIDUE" "$IP" "$elapsed"
-}
-cleanup() {
-  [[ -n "${KNOWN_HOSTS:-}" ]] && rm -f "${KNOWN_HOSTS}"
-  if [[ "$KEEP" == "1" ]]; then log "--keep: clone $VMID left running at ${IP:-?}"; return; fi
-  # A privileged LXC holding /dev/kfd (after install warms ROCm) hangs on
-  # `lxc-stop --kill`. SIGKILL the lxc-start monitor first — that tears the
-  # container down immediately — then clear any stale lock and purge-destroy.
-  # The first destroy can race the monitor teardown and leave the CT
-  # stopped-but-present, so retry — then VERIFY with `pct status` and only
-  # claim "destroyed" when it's actually gone (a swallowed `|| true` used to
-  # log success unconditionally and orphan clones piled up).
-  for _ in 1 2; do
-    PVE "pkill -9 -f 'lxc-start -F -n ${VMID}' 2>/dev/null; sleep 2; rm -f /run/lock/lxc/pve-config-${VMID}.lock; pct destroy $VMID --force --purge" >/dev/null 2>&1 || true
-    PVE "pct status $VMID" >/dev/null 2>&1 || { log "destroyed clone $VMID"; return; }
-    sleep 3
-  done
-  log "WARNING: clone $VMID still present after destroy attempts — run 'pct destroy $VMID --force --purge' on $PVE_HOST"
-}
-trap cleanup EXIT
-
-log "clone $TEMPLATE -> $VMID"
-PVE "pct clone $TEMPLATE $VMID --hostname hal0-test-$VMID" >&2 || { emit; exit 1; }
-# Optional: mount the shared model store read-only (skips re-download for
-# tests that exercise model pulls). Not needed for the install/uninstall smoke.
-if [[ "$WITH_MODELS" == "1" ]]; then
-  PVE "pct set $VMID --mp0 /mnt/ai-models,mp=/mnt/ai-models,ro=1,backup=0" >&2 || true
-fi
-PVE "pct start $VMID" >&2 || { emit; exit 1; }
-
-log "wait for readiness marker (max 120s)"
-for _ in $(seq 1 60); do
-  PVE "pct exec $VMID -- test -f /tmp/hal0-test-ready" 2>/dev/null && break
-  sleep 2
-done
-IP="$(PVE "pct exec $VMID -- hostname -I" 2>/dev/null | awk '{print $1}')"
-[[ -n "$IP" ]] || { log "no IP"; emit; exit 1; }
-log "clone IP $IP"
-
-# Throwaway known_hosts. Ephemeral clones recycle both vmids AND DHCP leases,
-# so a previous run's host key sits in ~/.ssh/known_hosts under the same IP and
-# the next run dies on REMOTE HOST IDENTIFICATION HAS CHANGED. accept-new does
-# NOT cover a *changed* key — only an unknown one — so isolate the file instead
-# of polluting (or having to hand-prune) the operator's real known_hosts.
-# (Removed by cleanup() — do NOT add a second `trap ... EXIT` here, it would
-# override `trap cleanup EXIT` above and orphan every clone.)
-KNOWN_HOSTS="$(mktemp)"
-SSH() { ssh -i "$KEY" -o BatchMode=yes -o StrictHostKeyChecking=no \
-  -o UserKnownHostsFile="$KNOWN_HOSTS" -o GlobalKnownHostsFile=/dev/null \
-  -o ConnectTimeout=10 "halo@$IP" "$@"; }
-for _ in $(seq 1 30); do SSH true 2>/dev/null && break; sleep 2; done
-
-# ── install ──────────────────────────────────────────────────────────────────
-if [[ -n "$FROM_TREE" ]]; then
-  log "install from working tree: $FROM_TREE"
-  rsync -a -e "ssh -i $KEY -o BatchMode=yes -o StrictHostKeyChecking=accept-new" \
-    --exclude .git --exclude .venv --exclude node_modules --exclude 'ui/dist' \
-    "$FROM_TREE"/ "halo@$IP:/tmp/hal0-src/" >&2 2>&1 \
-    && SSH "cd /tmp/hal0-src && HAL0_INSTALL_SKIP_VERIFY=1 sudo -E bash installer/install.sh" >&2 2>&1 \
-    && INSTALL_OK=true
-else
-  log "install live release: $INSTALL_URL"
-  # cosign is absent on the fresh box; skip the signature check for the test
-  # (the box is a throwaway clone — we test the install mechanism, not the sig).
-  SSH "curl -fsSL '$INSTALL_URL' | HAL0_UPDATE_SKIP_COSIGN=1 sudo -E bash" >&2 2>&1 && INSTALL_OK=true
+# No result file means the run was refused before a container existed; the
+# message is already on stderr and there is no row to append.
+if [[ ! -f "$result" ]]; then
+  exit "$rc"
 fi
 
-# ── smoke ────────────────────────────────────────────────────────────────────
-# The API can take a few seconds past install to answer; poll /api/health
-# (the endpoint install.sh's live-hello uses) for up to ~30s.
-log "smoke: status / version / health"
-SSH "hal0 status && hal0 --version && for i in \$(seq 1 15); do curl -fsS -m 5 http://localhost:8080/api/health && break; sleep 2; done" >&2 2>&1 && SMOKE_OK=true
+python3 -I - "$result" "$elapsed" <<'PY' || exit 1
+import json
+import os
+import sys
 
-# ── uninstall ────────────────────────────────────────────────────────────────
-log "uninstall"
-# `hal0 uninstall` resolves uninstall.sh for either layout (#495). Fall back to
-# running it directly — FHS prod path first, then the legacy editable path.
-# Use --purge: the conservative default deliberately KEEPS /etc/hal0 +
-# /var/lib/hal0 + the hal0 group (so a re-install reuses them), but the residue
-# check below asserts ZERO residue including those paths — only --purge removes
-# them. Without it this harness always fails on a clean uninstall.
-if SSH "sudo hal0 uninstall --purge --force" >&2 2>&1 \
-   || SSH "sudo bash /usr/lib/hal0/current/installer/uninstall.sh --purge --force" >&2 2>&1 \
-   || SSH "sudo bash /opt/hal0/installer/uninstall.sh --purge --force" >&2 2>&1; then
-  UNINSTALL_OK=true
-fi
-
-# ── residue assertion (the whole point: a clean uninstall leaves nothing) ─────
-log "residue check"
-RES="$(SSH 'r=""
-for p in /opt/hal0 /usr/lib/hal0/current /etc/hal0 /var/lib/hal0 /usr/local/bin/hal0 /usr/local/bin/hal0-agent; do
-  [ -e "$p" ] && r="$r path:$p"
-done
-for u in hal0-api hal0-openwebui hal0-agent@; do
-  systemctl list-unit-files 2>/dev/null | grep -q "^$u" && r="$r unit:$u"
-done
-getent group hal0 >/dev/null && r="$r group:hal0"
-echo "$r"' 2>/dev/null | tr -s ' ')"
-RES="$(echo "$RES" | sed -e 's/^ *//' -e 's/ *$//')"
-if [[ -z "$RES" ]]; then RESIDUE="clean"; else RESIDUE="$RES"; UNINSTALL_OK=false; fi
-
-emit
-[[ "$INSTALL_OK" == true && "$SMOKE_OK" == true && "$UNINSTALL_OK" == true && "$RESIDUE" == clean ]]
+result = json.load(open(sys.argv[1], encoding="utf-8"))
+# run.txt sits beside result.json: the container id and the uninstall verdict.
+note = {}
+try:
+    with open(os.path.join(os.path.dirname(sys.argv[1]), "run.txt"), encoding="utf-8") as fh:
+        for line in fh:
+            key, _, value = line.rstrip("\n").partition("=")
+            note[key] = value
+except OSError:
+    pass
+uninstall = {"ok": note.get("uninstall_ok") == "1", "residue": note.get("residue")}
+chat = result.get("chat") or {}
+print(
+    json.dumps(
+        {
+            "row": "install-smoke",
+            "clone_id": int(note["vmid"]) if note.get("vmid", "").isdigit() else None,
+            "install_ok": result.get("install_exit_code") == 0,
+            "smoke_ok": chat.get("ok") is True,
+            "uninstall_ok": uninstall.get("ok") is True,
+            "residue": uninstall.get("residue") or "unknown",
+            "ip": "",
+            "elapsed_s": int(sys.argv[2]),
+        },
+        separators=(",", ":"),
+    )
+)
+ok = (
+    result.get("install_exit_code") == 0
+    and chat.get("ok") is True
+    and uninstall.get("ok") is True
+    and uninstall.get("residue") == "clean"
+)
+sys.exit(0 if ok else 1)
+PY
