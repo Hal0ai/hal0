@@ -22,8 +22,8 @@ def _slot(label: str, **values: Any) -> RoleSlotCandidate:
     return RoleSlotCandidate(**defaults)
 
 
-def _entries(*slots: RoleSlotCandidate):
-    return {entry.role: entry for entry in resolve_role_slots("hermes", slots).entries}
+def _entries(*slots: RoleSlotCandidate, **kwargs: Any):
+    return {entry.role: entry for entry in resolve_role_slots("hermes", slots, **kwargs).entries}
 
 
 def test_returns_every_role_in_canonical_order() -> None:
@@ -56,13 +56,29 @@ def test_legacy_main_labels_are_ordinary_slots() -> None:
 
 
 def test_utility_roles_prefer_ready_utility_slot() -> None:
-    entries = _entries(_slot("agent"), _slot("utility", model="utility-model"))
+    entries = _entries(
+        _slot("agent"), _slot("utility", model="utility-model"), auxiliary_slot="utility"
+    )
 
     for role in ("compression", "approval", "session_search", "memory_flush", "skills_hub", "mcp"):
         entry = entries[role]
         assert entry.slot_id == "slot-utility"
         assert entry.model == "utility-model"
         assert entry.basis == "utility"
+
+
+def test_default_auxiliary_slot_is_memory_not_utility() -> None:
+    roles = ("compression", "approval", "session_search", "memory_flush", "skills_hub", "mcp")
+    with_memory = _entries(_slot("agent"), _slot("memory", model="memory-model"))
+    for role in roles:
+        assert with_memory[role].slot_id == "slot-memory"
+        assert with_memory[role].model == "memory-model"
+
+    # No memory slot: a bound utility slot is not looked for by default.
+    with_utility = _entries(_slot("agent"), _slot("utility", model="utility-model"))
+    for role in roles:
+        assert with_utility[role].slot_id == "slot-agent"
+        assert with_utility[role].basis == "main_fallback"
 
 
 def test_utility_roles_fall_back_to_main() -> None:
@@ -83,7 +99,9 @@ def test_ready_npu_uses_virtual_model_address() -> None:
 
 
 def test_ready_non_llm_utility_is_rejected() -> None:
-    entries = _entries(_slot("agent"), _slot("utility", capabilities=("embedding",)))
+    entries = _entries(
+        _slot("agent"), _slot("utility", capabilities=("embedding",)), auxiliary_slot="utility"
+    )
 
     assert entries["compression"].basis == "main_fallback"
 
@@ -118,8 +136,8 @@ def test_rename_preserves_opaque_identity_and_changes_label() -> None:
             "type": "llm",
         }
     )
-    before = resolve_role_slots("hermes", [before_candidate])
-    after = resolve_role_slots("hermes", [after_candidate])
+    before = resolve_role_slots("hermes", [before_candidate], auxiliary_slot="utility")
+    after = resolve_role_slots("hermes", [after_candidate], auxiliary_slot="utility")
 
     before_entry = next(entry for entry in before.entries if entry.role == "compression")
     after_entry = next(entry for entry in after.entries if entry.role == "compression")
@@ -172,8 +190,12 @@ def test_mapping_adapter_normalizes_mixed_case_npu_device() -> None:
 
 
 def test_model_swap_changes_advertised_model_and_generation() -> None:
-    before = resolve_role_slots("hermes", [_slot("utility", model="model-a")])
-    after = resolve_role_slots("hermes", [_slot("utility", model="model-b")])
+    before = resolve_role_slots(
+        "hermes", [_slot("utility", model="model-a")], auxiliary_slot="utility"
+    )
+    after = resolve_role_slots(
+        "hermes", [_slot("utility", model="model-b")], auxiliary_slot="utility"
+    )
 
     assert next(entry for entry in before.entries if entry.role == "mcp").model == "model-a"
     assert next(entry for entry in after.entries if entry.role == "mcp").model == "model-b"
@@ -181,8 +203,12 @@ def test_model_swap_changes_advertised_model_and_generation() -> None:
 
 
 def test_generation_is_stable_for_same_normalized_mapping() -> None:
-    first = resolve_role_slots("hermes", [_slot("agent"), _slot("utility")])
-    second = resolve_role_slots("hermes", [_slot("utility"), _slot("agent")])
+    first = resolve_role_slots(
+        "hermes", [_slot("agent"), _slot("utility")], auxiliary_slot="utility"
+    )
+    second = resolve_role_slots(
+        "hermes", [_slot("utility"), _slot("agent")], auxiliary_slot="utility"
+    )
 
     assert first.generation == second.generation
 
@@ -197,7 +223,9 @@ def test_generation_is_agent_scoped() -> None:
 
 
 def test_generation_changes_for_each_advertised_mapping_input() -> None:
-    baseline = resolve_role_slots("hermes", [_slot("agent"), _slot("utility", role_hint="utility")])
+    baseline = resolve_role_slots(
+        "hermes", [_slot("agent"), _slot("utility", role_hint="utility")], auxiliary_slot="utility"
+    )
     changes = (
         _slot("utility", role_hint="utility", ready=False),
         _slot("utility", role_hint="utility", capabilities=("llm", "tools")),
@@ -207,7 +235,9 @@ def test_generation_changes_for_each_advertised_mapping_input() -> None:
 
     for changed in changes:
         assert (
-            resolve_role_slots("hermes", [_slot("agent"), changed]).generation
+            resolve_role_slots(
+                "hermes", [_slot("agent"), changed], auxiliary_slot="utility"
+            ).generation
             != baseline.generation
         )
 

@@ -17,7 +17,7 @@ from pathlib import Path
 import pytest
 
 from hal0.config import paths
-from hal0.install.static_seeds import STATIC_SEED_SLOTS, seed_static_slots
+from hal0.install.static_seeds import SEED_TEMPLATES, seed_static_slots
 from hal0.ports.authority import PortAuthority
 from hal0.slots.identity import SlotIdentityStore
 from hal0.slots.manager import SlotManager
@@ -42,7 +42,7 @@ def _fake_installer_root(tmp_path: Path) -> Path:
     root = tmp_path / "installer-root"
     src_dir = root / "installer" / "etc-hal0" / "slots"
     src_dir.mkdir(parents=True)
-    for i, name in enumerate(STATIC_SEED_SLOTS):
+    for i, name in enumerate(SEED_TEMPLATES):
         (src_dir / f"{name}.toml").write_text(
             f'name = "{name}"\nport = {9000 + i}\ntype = "llm"\n',
             encoding="utf-8",
@@ -62,7 +62,9 @@ async def test_halo143_reboot_no_split_brain(hal0_home: Path, tmp_path: Path) ->
     slots_dir = paths.slots_config_dir()
 
     # ── 1. Fresh box: seed name-keyed + fold identity ─────────────────────────
-    first = seed_static_slots(installer_root=installer_root, slots_dir=slots_dir)
+    first = seed_static_slots(
+        installer_root=installer_root, slots_dir=slots_dir, names=SEED_TEMPLATES
+    )
     assert set(_SEEDS).issubset(set(first))
     for name in _SEEDS:
         assert (slots_dir / f"{name}.toml").exists()
@@ -85,7 +87,7 @@ async def test_halo143_reboot_no_split_brain(hal0_home: Path, tmp_path: Path) ->
         config_dir=slots_dir,
         data_dir=paths.var_lib() / "slots",
         ops=ops,
-        seeded_names=set(STATIC_SEED_SLOTS),
+        seeded_names=set(SEED_TEMPLATES),
     )
     migrated_names = {m.name for m in report.migrations}
     assert set(_SEEDS).issubset(migrated_names)
@@ -103,6 +105,7 @@ async def test_halo143_reboot_no_split_brain(hal0_home: Path, tmp_path: Path) ->
         installer_root=installer_root,
         slots_dir=slots_dir,
         existing_names=existing_names,
+        names=SEED_TEMPLATES,
     )
 
     # ── (a) NO <name>.toml recreated for any migrated slot ────────────────────

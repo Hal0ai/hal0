@@ -626,13 +626,19 @@ async def _live_target_for(request: Request, value: Any) -> bool | None:
     if not isinstance(value, str) or not value.startswith("hal0/"):
         return None
     try:
-        from hal0.api.routes.v1 import _normalize_loaded_models, _normalize_slot_views
+        from hal0.api.routes.v1 import (
+            _normalize_configured_slot_names,
+            _normalize_loaded_models,
+            _normalize_slot_views,
+        )
         from hal0.normalize.resolver import LiveSlotResolver
 
         views = await _normalize_slot_views(request)
+        configured = await _normalize_configured_slot_names(request)
         resolver = LiveSlotResolver(
             slot_views_provider=lambda: views,
             loaded_models_provider=lambda: _normalize_loaded_models(request),
+            configured_names_provider=lambda: configured,
         )
         res = await resolver.resolve(value)
     except Exception:

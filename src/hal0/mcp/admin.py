@@ -2003,7 +2003,7 @@ TOOL_PARAM_HINTS: dict[str, dict[str, Any]] = {
             },
             "use_llm": {
                 "type": "boolean",
-                "description": "Summarize the model card via the utility LLM for the intent headline",
+                "description": "Summarize the model card via the helper LLM for the intent headline",
             },
         },
     },
@@ -3792,7 +3792,7 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
         "Generate a draft profile (flags, ctx_size, enable_thinking, vision, reasoning_effort, reasoning_budget, speculation, runner) from "
         "a registered model or a HuggingFace repo — compute-only, persists nothing. Args: exactly one of model_id / hf_repo (required), "
         "optional name, optional use_llm=true to summarize the model card via the platform "
-        "utility LLM (degrades to heuristics on failure). Returns {profile, warnings, sources} "
+        "helper LLM (degrades to heuristics on failure). Returns {profile, warnings, sources} "
         "— 'profile' is the exact envelope shape profile_export produces, so it can be handed "
         "straight to profile_create (unwrap .profile) or profile_import (as 'envelope')."
     ),

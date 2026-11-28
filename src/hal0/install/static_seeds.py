@@ -10,17 +10,23 @@ grows the file. This module is the same copy-if-absent logic, callable
 from Python, so the hal0-api lifespan can close that gap the way it
 already does for persona seeding (:func:`hal0.agents.personas.seed_default_personas`).
 
-Keep :data:`STATIC_SEED_SLOTS` in sync with install.sh's
-``for seed_slot in ...`` line by hand — bash and Python don't share a
-source here, mirroring how ``setup_command._SETUP_SLOTS`` and
-``routes.installer._SLOT_META`` already hand-mirror each other.
+Two lists live here. :data:`SEED_TEMPLATES` names every seed file that
+exists under ``installer/etc-hal0/slots/`` (the vocabulary: tombstones,
+``is_seed``, doctor targets). :data:`FRESH_INSTALL_SEEDS` names the subset a
+fresh install actually creates. Keep :data:`FRESH_INSTALL_SEEDS` in sync with
+install.sh's ``for seed_slot in ...`` line by hand — bash and Python don't
+share a source here; ``tests/install/test_seed_lists.py`` fails when they
+drift.
 """
 
 from __future__ import annotations
 
+import enum
+import os
 import re
 import shutil
-from collections.abc import Collection
+import tempfile
+from collections.abc import Collection, Iterable
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -33,10 +39,12 @@ if TYPE_CHECKING:
 
 log = structlog.get_logger(__name__)
 
-#: Slot names with a static seed TOML in installer/etc-hal0/slots/.
-#: MUST mirror install.sh's:
-#:   for seed_slot in flm tts rerank memory img agent brain qwen3tts coder embed; do
-STATIC_SEED_SLOTS: tuple[str, ...] = (
+#: Every slot name with a static seed TOML in installer/etc-hal0/slots/.
+#: This is the template vocabulary, NOT the list of slots a box gets: an
+#: existing box keeps every one of these it already has, and a deletion of any
+#: of them is tombstoned. See :data:`FRESH_INSTALL_SEEDS` for what a fresh
+#: install creates.
+SEED_TEMPLATES: tuple[str, ...] = (
     "flm",
     "tts",
     "rerank",
@@ -48,6 +56,11 @@ STATIC_SEED_SLOTS: tuple[str, ...] = (
     "coder",
     "embed",
 )
+
+#: The slots a FRESH install creates, a subset of :data:`SEED_TEMPLATES`.
+#: MUST mirror install.sh's:
+#:   for seed_slot in agent brain memory; do
+FRESH_INSTALL_SEEDS: tuple[str, ...] = ("agent", "brain", "memory")
 
 #: Seed name → :func:`hal0.install.profile_derive.derive_device` capability for
 #: the llama.cpp-backed lifecycle seeds (#2023). Every one of these ships
@@ -376,8 +389,13 @@ def seed_static_slots(
     slots_dir: Path | None = None,
     existing_names: Collection[str] = (),
     hw: HardwareInfo | None = None,
+    names: Iterable[str] | None = None,
 ) -> list[str]:
     """Copy any missing static seed TOML into the slots config dir.
+
+    ``names`` picks which seeds to consider; ``None`` means
+    :data:`FRESH_INSTALL_SEEDS`. A name outside :data:`SEED_TEMPLATES` raises
+    :class:`ValueError`. Tombstoned names are skipped either way.
 
     Idempotent and non-destructive: an existing ``<name>.toml`` — an
     operator edit, a seed from a prior run, or a slot the operator
@@ -408,46 +426,110 @@ def seed_static_slots(
     :func:`_resolve_hardware_info`; unresolvable hardware keeps the verbatim
     copy (fail-soft).
     """
+    wanted = tuple(FRESH_INSTALL_SEEDS if names is None else names)
+    unknown = [n for n in wanted if n not in SEED_TEMPLATES]
+    if unknown:
+        raise ValueError(f"not a seed template: {', '.join(sorted(unknown))}")
+    seeded: list[str] = []
+    for name in wanted:
+        # clear_tombstone=False: boot and the default path never bring back a
+        # slot the operator deleted; only an explicit ensure_seed_slot() ask does.
+        try:
+            result = ensure_seed_slot(
+                name,
+                installer_root=installer_root,
+                slots_dir=slots_dir,
+                existing_names=existing_names,
+                hw=hw,
+                clear_tombstone=False,
+            )
+        except FileNotFoundError:
+            continue  # already logged as install.static_seed_missing
+        if result is SeedResult.CREATED:
+            seeded.append(name)
+    return seeded
+
+
+class SeedResult(enum.Enum):
+    """What :func:`ensure_seed_slot` did."""
+
+    CREATED = "created"
+    EXISTS = "exists"
+    #: Only when ``clear_tombstone=False``: the operator deleted this seed.
+    TOMBSTONED = "tombstoned"
+
+
+def ensure_seed_slot(
+    name: str,
+    *,
+    installer_root: Path | None = None,
+    slots_dir: Path | None = None,
+    existing_names: Collection[str] = (),
+    hw: HardwareInfo | None = None,
+    clear_tombstone: bool = True,
+) -> SeedResult:
+    """Create the one seed slot ``name`` if it is absent, with this box's device.
+
+    The single copy path: :func:`seed_static_slots` calls this per name. An
+    existing ``<name>.toml`` (or a name in ``existing_names``, an id-keyed slot)
+    is never rewritten and returns :attr:`SeedResult.EXISTS`. A tombstoned name
+    returns :attr:`SeedResult.TOMBSTONED` when ``clear_tombstone=False``; with
+    the default ``True`` this is an explicit ask, so the slot is created and the
+    tombstone cleared. A freshly copied llama.cpp seed gets the host-derived
+    device and context envelope exactly as the whole-list path applies them.
+
+    Raises :class:`ValueError` for a name outside :data:`SEED_TEMPLATES` and
+    :class:`FileNotFoundError` when the seed template file is missing.
+    """
+    if name not in SEED_TEMPLATES:
+        raise ValueError(f"not a seed template: {name}")
     if installer_root is None:
         from hal0.agents.hermes_provision import REPO_ROOT_FOR_INSTALLER
 
         installer_root = REPO_ROOT_FOR_INSTALLER
-    dest_dir = slots_dir if slots_dir is not None else paths.slots_config_dir()
-    src_dir = installer_root / "installer" / "etc-hal0" / "slots"
-    known = set(existing_names)
+    from hal0.slot_config import slot_write_lock
 
-    tombstoned = read_seed_tombstones(slots_dir=dest_dir)
-    seeded: list[str] = []
-    for name in STATIC_SEED_SLOTS:
-        dest = dest_dir / f"{name}.toml"
+    dest_dir = slots_dir if slots_dir is not None else paths.slots_config_dir()
+    dest = dest_dir / f"{name}.toml"
+    src = installer_root / "installer" / "etc-hal0" / "slots" / f"{name}.toml"
+    # Check, build, publish and tombstone clear all happen under the cross-process
+    # slot-TOML lock (synchronous on purpose: never await while holding it).
+    with slot_write_lock():
         # "Already known" = the identity store tracks it (id-keyed, no
         # <name>.toml) OR a name-keyed file still exists (pre-migration box).
-        # A tombstoned name is an operator DELETION — honour it instead of
-        # resurrecting the slot on every boot (the pre-tombstone behaviour
-        # that made seeded slots effectively undeletable).
-        if name in known or name in tombstoned or dest.exists():
-            continue
-        src = src_dir / f"{name}.toml"
+        if name in existing_names or dest.exists():
+            return SeedResult.EXISTS
+        tombstoned = name in read_seed_tombstones(slots_dir=dest_dir)
+        if tombstoned and not clear_tombstone:
+            return SeedResult.TOMBSTONED
         if not src.is_file():
             log.warning("install.static_seed_missing", slot=name, src=str(src))
-            continue
+            raise FileNotFoundError(str(src))
         dest_dir.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(src, dest)
-        dest.chmod(0o644)
-        seeded.append(name)
+        # Build the final content in a private hidden directory beside the
+        # destination (same filesystem, invisible to ``*.toml`` readers), then
+        # publish it with a hard link: the file appears under its final name only
+        # with its final content, and an existing file is never replaced.
+        staging = Path(tempfile.mkdtemp(prefix=".seed-", dir=dest_dir))
+        try:
+            staged = staging / f"{name}.toml"
+            shutil.copyfile(src, staged)
+            staged.chmod(0o644)
+            # #2023: the template carries the reference platform's device
+            # verbatim; derive the one this host can load. #1868: clamp the
+            # window to the memory envelope. Both act on the staged copy only.
+            apply_derived_seed_devices([name], slots_dir=staging, hw=hw)
+            apply_context_size_envelope([name], slots_dir=staging, hw=hw)
+            try:
+                os.link(staged, dest)
+            except FileExistsError:
+                return SeedResult.EXISTS
+        finally:
+            shutil.rmtree(staging, ignore_errors=True)
         log.info("install.static_seed_applied", slot=name, dest=str(dest))
-    if seeded:
-        # #2023: freshly copied llama.cpp seeds carry the reference platform's
-        # device = "gpu-rocm" verbatim — derive the device this host can
-        # actually load, exactly like `hal0 setup --auto` would have. Only the
-        # names copied THIS call are touched; existing/operator files above
-        # were skipped and stay untouched.
-        apply_derived_seed_devices(seeded, slots_dir=dest_dir, hw=hw)
-        # #1868: the same seeds name profiles whose window is sized for the
-        # reference platform — repoint them at a clamped clone when THIS box's
-        # memory envelope cannot afford it.
-        apply_context_size_envelope(seeded, slots_dir=dest_dir, hw=hw)
-    return seeded
+        if tombstoned:
+            clear_seed_tombstone(name, slots_dir=dest_dir)
+        return SeedResult.CREATED
 
 
 # ── Seed tombstones — "the operator deleted this seed on purpose" ────────────
@@ -517,6 +599,37 @@ def clear_seed_tombstone(name: str, *, slots_dir: Path | None = None) -> None:
             log.warning("install.seed_tombstone_clear_failed", slot=name, error=str(exc))
 
 
+def _ensure_main(names: list[str], slots_dir: Path | None) -> int:
+    """The ``--ensure`` mode: one ``NAME created|exists`` line per name, exit 0.
+
+    Every name is checked against :data:`SEED_TEMPLATES` before any slot is
+    created, so an unknown name exits 2 with nothing written. A name whose
+    name that fails prints ``NAME failed: reason`` on stderr and the exit
+    status is 1, but the other names are still processed.
+    """
+    import contextlib
+    import sys
+
+    unknown = [n for n in names if n not in SEED_TEMPLATES]
+    if unknown:
+        print(f"not a seed template: {', '.join(unknown)}", file=sys.stderr)
+        return 2
+    status = 0
+    for name in names:
+        try:
+            # structlog's default logger prints to stdout; keep that stream to
+            # the one result line per name that install.sh reads.
+            with contextlib.redirect_stdout(sys.stderr):
+                result = ensure_seed_slot(name, slots_dir=slots_dir)
+        except Exception as exc:
+            reason = " ".join(f"{type(exc).__name__}: {exc}".split())
+            print(f"{name} failed: {reason}", file=sys.stderr)
+            status = 1
+            continue
+        print(f"{name} {'created' if result is SeedResult.CREATED else 'exists'}")
+    return status
+
+
 def _main(argv: list[str] | None = None) -> int:
     """``python -m hal0.install.static_seeds`` — install.sh's derivation pass.
 
@@ -539,8 +652,28 @@ def _main(argv: list[str] | None = None) -> int:
         default=None,
         help="Slot config dir (default: the platform slots config dir).",
     )
-    parser.add_argument("names", nargs="+", help="Freshly seeded slot names.")
+    parser.add_argument("names", nargs="*", help="Freshly seeded slot names.")
+    parser.add_argument(
+        "--ensure",
+        nargs="+",
+        metavar="NAME",
+        default=None,
+        help=(
+            "Create each named seed slot that is missing (an explicit ask: a "
+            "tombstone is cleared); print 'NAME created' or 'NAME exists'. "
+            "An unknown name exits 2 and creates nothing."
+        ),
+    )
     args = parser.parse_args(argv)
+
+    if args.ensure is not None:
+        if args.names:
+            parser.error(
+                "--ensure takes its names after the flag; positional names are not allowed"
+            )
+        return _ensure_main(args.ensure, args.slots_dir)
+    if not args.names:
+        parser.error("the following arguments are required: names")
 
     hw = _resolve_hardware_info()
     if hw is None:
@@ -567,8 +700,10 @@ if __name__ == "__main__":  # pragma: no cover — exercised via install.sh
 
 
 __all__ = [
+    "FRESH_INSTALL_SEEDS",
     "LLAMA_SEED_CAPABILITIES",
-    "STATIC_SEED_SLOTS",
+    "SEED_TEMPLATES",
+    "SeedResult",
     "add_seed_tombstone",
     "apply_context_size_envelope",
     "apply_derived_seed_devices",
@@ -576,6 +711,7 @@ __all__ = [
     "clear_seed_tombstone",
     "derive_seed_device",
     "ensure_clamped_profile",
+    "ensure_seed_slot",
     "read_seed_tombstones",
     "seed_static_slots",
 ]

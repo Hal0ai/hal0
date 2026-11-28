@@ -7,6 +7,7 @@ import pytest
 
 from hal0.cli import doctor_all as da
 from hal0.config import paths
+from hal0.jobs import not_set_up_detail
 
 CAPTURED = """[ERROR] [ComfyUI-Manager] Neither `python -m pip` nor `uv` are available.
    0.3 seconds (PRESTARTUP FAILED): /opt/ComfyUI/custom_nodes/ComfyUI-Manager
@@ -76,7 +77,7 @@ def test_no_img_does_not_query_journal(slots: Path, monkeypatch: pytest.MonkeyPa
         pytest.fail("no unit should be queried without img")
 
     monkeypatch.setattr(subprocess, "run", unexpected)
-    assert da.check_img_custom_nodes().detail == "no img slot configured"
+    assert da.check_img_custom_nodes().detail == not_set_up_detail("image")
 
 
 @pytest.mark.parametrize("line", CAPTURED.splitlines()[1:])

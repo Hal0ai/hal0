@@ -5,6 +5,9 @@
 Amended by [ADR-0053](0053-memory-slot-and-chat-priority.md) for the memory
 chain/default and the staged retirement of fresh utility seeding. Existing
 utility slots and explicitly stored extraction targets are preserved.
+Amended by [ADR-0064](0064-fresh-installs-seed-three-slots.md) (2026-11-28):
+`utility` is retired as a default name, and a fresh install seeds `agent`,
+`brain` and `memory` only.
 
 **ACCEPTED.** Shipped in `v0.8.0-beta.3` (2026-06-23), per
 `CHANGELOG.md`: "Canonical LLM roles + Hindsight-native memory extraction

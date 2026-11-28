@@ -183,7 +183,7 @@ def resolve_role_slots(
     agent_id: str,
     slots: Sequence[RoleSlotCandidate],
     *,
-    auxiliary_slot: str | None = "utility",
+    auxiliary_slot: str | None = "memory",
     npu_fallback: bool = True,
 ) -> RoleSlotMap:
     """Return the complete deterministic role map for an agent."""

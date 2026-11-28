@@ -487,10 +487,13 @@ def test_child_to_slot_type_mapping() -> None:
     assert _CHILD_TO_SLOT_TYPE["stt"] == "transcription"
 
 
-async def test_ensure_slot_exists_writes_type_for_embed(
+async def test_ensure_slot_exists_writes_type_for_stt(
     tmp_hal0_home: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Auto-creating the embed slot stamps ``type=embedding`` into the cfg.
+    """Auto-creating the stt slot stamps ``type=transcription`` into the cfg.
+
+    ``stt`` has no seed file, so it is still synthesised; ``embed`` is now
+    copied from its seed (``tests/capabilities/test_ensure_slot_from_seed.py``).
 
     The dispatch gate (`v1._is_npu_trio_request`) keys on ``type`` first;
     a created slot that omits it never activates trio dispatch.
@@ -500,15 +503,15 @@ async def test_ensure_slot_exists_writes_type_for_embed(
     fake = FakeSlotManager()
     orch = CapabilityOrchestrator(slot_manager=fake)
     selection = CapabilitySelection.model_validate(
-        {"device": "npu", "provider": "flm", "model": "some-embed", "enabled": True}
+        {"device": "npu", "provider": "flm", "model": "some-stt", "enabled": True}
     )
-    # No embed.toml on disk under tmp_hal0_home → create path fires.
-    await orch._ensure_slot_exists("embed", selection)
+    # No stt.toml on disk under tmp_hal0_home → create path fires.
+    await orch._ensure_slot_exists("stt", selection)
 
     create_calls = [c for c in fake.calls if c[0] == "create"]
     assert create_calls, f"create was never invoked: {fake.calls}"
     cfg = create_calls[-1][2]["cfg"]
-    assert cfg.get("type") == "embedding", f"created cfg missing type: {cfg!r}"
+    assert cfg.get("type") == "transcription", f"created cfg missing type: {cfg!r}"
 
 
 def test_ensure_slot_exists_omits_type_for_rerank() -> None:

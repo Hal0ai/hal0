@@ -142,8 +142,8 @@ class TestSeedStacks:
             assert isinstance(stack, StackConfig)
             assert stack.name, f"{slug}: seed needs a display name"
             assert stack.slots, f"{slug}: seed needs at least one slot"
-            # Seeds use the canonical agent/utility slots (ADR-0023).
-            assert {e.slot for e in stack.slots} <= {"agent", "utility"}
+            # Seeds use the canonical agent/memory slots (ADR-0023, ADR-0053).
+            assert {e.slot for e in stack.slots} <= {"agent", "memory"}
             # Every slot carries a model and a valid device.
             for entry in stack.slots:
                 assert entry.model, f"{slug}/{entry.slot}: seed slot needs a model"

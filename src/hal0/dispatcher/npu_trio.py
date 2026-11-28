@@ -35,6 +35,8 @@ import httpx
 from hal0.dispatcher._npu_common import is_container_npu_cfg
 from hal0.errors import Hal0Error
 from hal0.http_client import async_client
+from hal0.jobs import CapabilityNotEnabled
+from hal0.slots.state import SlotNotFound
 
 log = logging.getLogger(__name__)
 
@@ -85,6 +87,25 @@ class NpuTrioRouter:
         self._timeout_s = timeout_s
 
     # ── discovery ──────────────────────────────────────────────────
+
+    async def _unavailable(self, endpoint: str) -> Hal0Error:
+        """The refusal for a trio call with no dispatchable container.
+
+        When the ``flm`` slot does not exist at all the NPU was never set up, which
+        is answered as such; every other cause keeps the "load an NPU chat slot first"
+        message the dashboard matches on.
+        """
+        if self._slot_manager is not None:
+            try:
+                await self._slot_manager.get_config("flm")
+            except SlotNotFound:
+                return CapabilityNotEnabled("npu")
+            except Exception:  # TIER2 — any other read failure is the old, generic answer
+                log.debug("npu_trio.slot_probe_failed", exc_info=True)
+        return NpuTrioNotAvailable(
+            "NPU trio not available — load an NPU chat slot first.",
+            details={"endpoint": endpoint},
+        )
 
     async def resolve_npu_url(self) -> str | None:
         """Return the static-port URL for the containerized npu slot, or None.
@@ -154,10 +175,7 @@ class NpuTrioRouter:
         """
         backend_url = await self.resolve_npu_url()
         if backend_url is None:
-            raise NpuTrioNotAvailable(
-                "NPU trio not available — load an NPU chat slot first.",
-                details={"endpoint": "/v1/audio/transcriptions"},
-            )
+            raise await self._unavailable("/v1/audio/transcriptions")
         return await self._post(
             f"{backend_url}/v1/audio/transcriptions",
             content=body,
@@ -187,10 +205,7 @@ class NpuTrioRouter:
         """
         backend_url = await self.resolve_npu_url()
         if backend_url is None:
-            raise NpuTrioNotAvailable(
-                "NPU trio not available — load an NPU chat slot first.",
-                details={"endpoint": "/v1/embeddings"},
-            )
+            raise await self._unavailable("/v1/embeddings")
         return await self._post(
             f"{backend_url}/v1/embeddings",
             json=body,

@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from hal0.config.schema import SEED_PROFILES, MemoryEmbeddingConfig, SlotConfig
-from hal0.install.static_seeds import STATIC_SEED_SLOTS
+from hal0.install.static_seeds import SEED_TEMPLATES
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _SEEDED_SLOTS_DIR = _REPO_ROOT / "installer" / "etc-hal0" / "slots"
@@ -109,7 +109,7 @@ def test_seed_slot_ports_are_mutually_unique() -> None:
 #: pinned a 1B model so the steward "worked out of the box"). The steward's
 #: readiness now comes from the installer actually pulling the weights — see
 #: test_brain_seed_defers_its_model_to_the_installer.
-_CLEAN_SEED_SLOTS = sorted(set(STATIC_SEED_SLOTS) | {"qwen3tts"})
+_CLEAN_SEED_SLOTS = sorted(set(SEED_TEMPLATES) | {"qwen3tts"})
 
 
 @pytest.mark.parametrize("name", _CLEAN_SEED_SLOTS)

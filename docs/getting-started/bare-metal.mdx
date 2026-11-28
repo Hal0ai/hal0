@@ -61,7 +61,7 @@ curl -fsSL https://hal0.dev/install.sh | sudo bash
 
 The bootstrap fetches the release manifest, SHA-256- and cosign-verifies
 the tarball, then hands off to the installer, which installs podman, builds
-the venv, writes systemd units, scaffolds the capability slots from the hardware probe, pulls the small brain model, and
+the venv, writes systemd units, scaffolds the `agent` and `brain` slots from the hardware probe, pulls the small brain model, and
 starts `hal0-api` on port `8080`. See [Install hal0](/docs/getting-started/install/)
 for the full sequence and every environment variable and flag.
 
@@ -101,8 +101,10 @@ flm validate       # → "flm validate ok — NPU runtime reachable"
 ```
 
 A single `flm serve` process backs the **NPU trio** — a chat model plus
-opt-in embedding and speech-to-text passengers on the seeded `flm` slot
-(port `8088`). On non-apt distros the NPU path is skipped and you install
+opt-in embedding and speech-to-text passengers on the `flm` slot (port `8088`).
+A fresh install does not create that slot in this version, and there is no
+switch for it yet; a box upgraded from an earlier version keeps its `flm` slot.
+On non-apt distros the NPU path is skipped and you install
 FastFlowLM manually; the GPU and CPU paths are unaffected. On a box with an
 NPU the dashboard adds **Slots → NPU**, which shows the FLM and GGML lanes with
 live activity. To run plain GGUF models on the NPU with the optional `xdna`

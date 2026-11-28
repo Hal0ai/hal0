@@ -2056,7 +2056,11 @@ def test_read_delegation_slot(tmp_path) -> None:
 
 
 def test_resolve_auxiliary_tasks_routes_utility_group_to_utility_slot() -> None:
-    aux = hp._resolve_auxiliary_tasks(_ROLE_SLOTS, hal0_base_url=_HAL0_V1)
+    # The shape of a box upgraded from before `memory` replaced `utility`: the
+    # v4 migration left memory.graph.extraction_slot = "utility".
+    aux = hp._resolve_auxiliary_tasks(
+        _ROLE_SLOTS, hal0_base_url=_HAL0_V1, extraction_slot="utility"
+    )
     # Utility group → custom provider on the utility slot's model.
     for task in ("compression", "title_generation", "mcp"):
         assert aux[task] == {
@@ -2103,6 +2107,21 @@ def test_resolve_auxiliary_tasks_shared_mode_uses_main_even_with_npu() -> None:
 
     upgraded = hp._resolve_auxiliary_tasks(slots, hal0_base_url=_HAL0_V1, extraction_slot="utility")
     assert upgraded["compression"]["model"] == "hal0/npu"
+
+
+def test_custom_extraction_target_picks_utility_only_when_the_box_has_one() -> None:
+    """The production rule for `auxiliary_slot`: an existing `utility` slot, else `memory`."""
+    memory = {"name": "memory", "type": "llm", "state": "ready", "model_id": "memory-m"}
+    agent = _ROLE_SLOTS[1]
+    utility = _ROLE_SLOTS[2]
+    assert utility["name"] == "utility"
+    for kwargs in ({"extraction_slot": "utility"}, {"extraction_model": "cloud-model"}):
+        old_box = hp._resolve_auxiliary_tasks(
+            [agent, memory, utility], hal0_base_url=_HAL0_V1, **kwargs
+        )
+        fresh_box = hp._resolve_auxiliary_tasks([agent, memory], hal0_base_url=_HAL0_V1, **kwargs)
+        assert old_box["compression"]["model"] == utility["model_id"], kwargs
+        assert fresh_box["compression"]["model"] == "hal0/memory", kwargs
 
 
 def test_resolve_auxiliary_tasks_uses_bound_memory_when_cold() -> None:
@@ -2172,7 +2191,9 @@ def test_resolve_auxiliary_tasks_keeps_the_npu_lane_when_memory_is_unbound() -> 
 
 def test_overlay_emits_delegation_and_auxiliary_keys() -> None:
     deleg = hp._resolve_delegation(_ROLE_SLOTS, hal0_base_url=_HAL0_V1)
-    aux = hp._resolve_auxiliary_tasks(_ROLE_SLOTS, hal0_base_url=_HAL0_V1)
+    aux = hp._resolve_auxiliary_tasks(
+        _ROLE_SLOTS, hal0_base_url=_HAL0_V1, extraction_slot="utility"
+    )
     keys = _build_overlay_keys(
         primary={"model_id": "chat-m", "backend_url": _HAL0_V1, "context_length": 32768},
         chat_slots=hp._collect_chat_slots(_ROLE_SLOTS),

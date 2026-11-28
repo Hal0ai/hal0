@@ -203,15 +203,16 @@ A **slot** is a named place where one model runs. A model on disk does
 nothing until it is loaded into a slot. Other programs ask for a slot by
 name, so you can swap the model in a slot without reconfiguring them.
 
-A new install creates a set of empty slots. Two matter first:
+A new install creates three slots. Two matter first:
 
 | Slot | What it is for | After a default install |
 |---|---|---|
 | `brain` | The small helper behind the dashboard's built-in chat | Has a model already |
 | `agent` | Your main chat model. Agents use this one | Empty until you give it a model |
 
-Leave the others (`coder`, `memory`, `embed`, `rerank`, `tts`, `img` and
-more) empty for now.
+The third, `memory`, stays empty for now. Slots for other jobs (`embed`,
+`rerank`, `tts` and `img`) do not exist until you switch the job on, or,
+for `img`, install an image model.
 
 ### Chat with the model you already have
 

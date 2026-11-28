@@ -35,7 +35,7 @@ from hal0.capabilities.orchestrator import CapabilityOrchestrator
 from hal0.config import paths
 from hal0.config.loader import ConfigParseError, list_slots, load_slot_config
 from hal0.config.schema import HardwareInfo
-from hal0.install.static_seeds import STATIC_SEED_SLOTS, seed_static_slots
+from hal0.install.static_seeds import SEED_TEMPLATES, seed_static_slots
 from hal0.ports.authority import PortAuthority
 from hal0.slot_config import SlotConfigStore, SlotSelection, write_slot_toml
 from hal0.slots.identity import SlotIdentityStore
@@ -68,10 +68,10 @@ def _raw(stem: str) -> dict[str, Any]:
 
 
 def test_seed_static_slots_output_loads(tmp_hal0_home: str) -> None:
-    seeded = seed_static_slots(installer_root=_REPO_ROOT, hw=HardwareInfo())
-    assert set(seeded) == set(STATIC_SEED_SLOTS)
+    seeded = seed_static_slots(installer_root=_REPO_ROOT, hw=HardwareInfo(), names=SEED_TEMPLATES)
+    assert set(seeded) == set(SEED_TEMPLATES)
     loaded = _load_everything()
-    assert set(loaded) == set(STATIC_SEED_SLOTS)
+    assert set(loaded) == set(SEED_TEMPLATES)
     # The seeds keep what they ship: kind, profile and port survive the load.
     assert loaded["img"].type == "image"
     assert loaded["img"].provider == "comfyui"

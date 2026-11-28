@@ -2687,7 +2687,7 @@ slot_name_exists() {
 }
 
 # slot_seed_tombstoned — mirrors hal0.install.static_seeds.read_seed_tombstones:
-# `hal0 slot delete <name>` on a STATIC_SEED_SLOTS member writes its name into
+# `hal0 slot delete <name>` on a SEED_TEMPLATES member writes its name into
 # ${ETC_DIR}/slots/.seed-tombstones (one name per line, SlotManager.delete →
 # add_seed_tombstone). #1631's contract is that this file records a
 # deliberate operator DELETION and seeding must honour it instead of
@@ -2704,7 +2704,7 @@ slot_seed_tombstoned() {
 
 SEEDED_NEW_SLOTS=()
 SEEDED_EXISTING_SLOTS=0
-for seed_slot in flm tts rerank memory img agent brain qwen3tts coder embed; do
+for seed_slot in agent brain memory; do
     SLOT_TOML="${ETC_DIR}/slots/${seed_slot}.toml"
     SLOT_SRC="${REPO_ROOT}/installer/etc-hal0/slots/${seed_slot}.toml"
     if slot_seed_tombstoned "${seed_slot}"; then

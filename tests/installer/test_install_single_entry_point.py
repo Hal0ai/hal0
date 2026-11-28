@@ -121,7 +121,7 @@ def test_curated_slot_seeds_are_copied_before_the_scaffold_pass(install_sh_text:
     (``build_auto_selections``' ``existing_slots`` skip) instead of a special
     case, so this ordering IS the fix — assert it directly.
     """
-    seed_loop = _line_of(install_sh_text, "for seed_slot in flm tts rerank")
+    seed_loop = _line_of(install_sh_text, "for seed_slot in agent brain memory")
     scaffold = _line_of(install_sh_text, '"${HAL0_BIN}" setup "${_setup_args[@]}"')
     assert seed_loop < scaffold, (
         f"curated seed loop (line {seed_loop}) must run BEFORE the "

@@ -2,7 +2,7 @@
 # Stacks page ships with (spec §10). Returned by `load_stacks_config` when no
 # stacks.toml exists yet, and consulted by `StacksCatalog` for the
 # seed-immutability guard. Grounded in the live Strix-Halo model roster and the
-# canonical `agent`/`utility` slots (ADR-0023; the spec's pre-ADR `chat`/
+# canonical `agent`/`memory` slots (ADR-0023, ADR-0053; the spec's pre-ADR `chat`/
 # `primary`/`util` slot names are mapped onto these). Each carries embed +
 # rerank capability rows so memory recall works out of the box. Model metadata
 # (`models{}`) is intentionally left empty -- `export_envelope` fills it from
@@ -21,7 +21,7 @@
 # saber -- max-throughput agentic MoE. Decode-per-GB leader on the board.
 [stack.saber]
 name = "Saber"
-description = "High-speed agentic MoE: a 35B-A3B agent on ROCm with a fast ROCm utility helper, plus memory recall."
+description = "High-speed agentic MoE: a 35B-A3B agent on ROCm with a fast ROCm helper on the memory slot, plus memory recall."
 author = "hal0"
 icon = "⚡"
 tags = ["agentic", "moe", "fast"]
@@ -34,7 +34,7 @@ profile = "agent"
 capabilities = "@embed_rerank"
 
 [[stack.saber.slots]]
-slot = "utility"
+slot = "memory"
 model = "gemma-4-12b-it-ud-q4-k-xl"
 device = "gpu-rocm"
 profile = "chat"
@@ -42,7 +42,7 @@ profile = "chat"
 # forge -- coding-first developer loadout: a coder agent + a fast draft coder.
 [stack.forge]
 name = "Forge"
-description = "Coding-first: a 27B coder agent on ROCm with a small fast draft coder as the utility, plus codebase retrieval."
+description = "Coding-first: a 27B coder agent on ROCm with a small fast draft coder on the memory slot, plus codebase retrieval."
 author = "hal0"
 icon = "🛠️"
 tags = ["coding", "developer"]
@@ -55,7 +55,7 @@ profile = "chat"
 capabilities = "@embed_rerank"
 
 [[stack.forge.slots]]
-slot = "utility"
+slot = "memory"
 model = "qwopus3-5-4b-coder-mtp-q6-k"
 device = "gpu-rocm"
 profile = "chat"
@@ -63,13 +63,13 @@ profile = "chat"
 # pi -- always-on support: faithful compaction, memory recall (quality > speed).
 [stack.pi]
 name = "Pi"
-description = "Always-on support: a q-rich 27B utility for faithful compaction and recall, with a light ROCm agent."
+description = "Always-on support: a q-rich 27B on the memory slot for faithful compaction and recall, with a light ROCm agent."
 author = "hal0"
 icon = "🥧"
 tags = ["support", "memory", "compaction"]
 
 [[stack.pi.slots]]
-slot = "utility"
+slot = "memory"
 model = "qwen3.8-27b"
 device = "gpu-rocm"
 profile = "chat"

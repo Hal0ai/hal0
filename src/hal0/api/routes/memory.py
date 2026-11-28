@@ -563,12 +563,13 @@ async def _resolved_serving_slot(request: Request, slot: str) -> str | None:
     ``agent`` anchor while it has no model bound), so a model-less target is
     measured where its extraction calls actually land (#3837).
     """
-    from hal0.api.routes.v1 import _normalize_slot_views
+    from hal0.api.routes.v1 import _normalize_configured_slot_names, _normalize_slot_views
     from hal0.normalize.resolver import _configured_primary, resolve_chain
 
     try:
         views = await _normalize_slot_views(request)
-        res = resolve_chain(f"hal0/{slot}", views, set())
+        configured = await _normalize_configured_slot_names(request)
+        res = resolve_chain(f"hal0/{slot}", views, set(), configured)
     except Exception:
         return None
     if res is None or not res.model_id:

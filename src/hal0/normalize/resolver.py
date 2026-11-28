@@ -7,7 +7,7 @@ slot states SlotManager already tracks — no extra polling.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Collection
 from dataclasses import dataclass
 
 import structlog
@@ -31,8 +31,10 @@ DEFAULT_CHAINS: dict[str, tuple[str, ...]] = {
     "hal0/agent": (_ANCHOR_NAME,),
     # ADR-0053: an empty or absent memory slot shares the agent anchor.
     "hal0/memory": ("memory", _ANCHOR_NAME),
-    # hal0/utility → the cheap helper slot (loaded on demand when cold); falls
-    # back to the anchor only when utility has no bound model (#2741).
+    # hal0/utility → a box's own `utility` slot (loaded on demand when cold);
+    # falls back to the anchor only when utility has no bound model (#2741). A box
+    # without a utility slot reads these two chains through `_without_utility`.
+    # HAL0-SUNSET: v2.0.0  — the `hal0/utility` alias and `utility` in the `hal0/npu` chain; delete both entries and `_without_utility` once every supported box has moved off the `utility` slot name.
     "hal0/utility": ("utility", _ANCHOR_NAME),
     "hal0/npu": ("npu", "utility", _ANCHOR_NAME),
     # hal0/brain → the dashboard agent-chat persona. No installer seeds a `brain`
@@ -42,7 +44,40 @@ DEFAULT_CHAINS: dict[str, tuple[str, ...]] = {
 }
 
 
-def _chain_for(virtual_name: str, slots: list[SlotView]) -> tuple[str, ...] | None:
+# HAL0-SUNSET: v2.0.0  — see DEFAULT_CHAINS; delete this function with the `hal0/utility` alias.
+def _without_utility(
+    virtual_name: str, chain: tuple[str, ...], configured_names: Collection[str] | None
+) -> tuple[str, ...]:
+    """Read a chain naming ``utility`` for a box that has no such slot.
+
+    ``configured_names`` is the names of every CONFIGURED slot, model-less and
+    disabled ones included: a ``utility`` slot the operator created without a
+    model is still theirs, and ``hal0/utility`` there keeps its chain (``utility``,
+    then ``agent``). ``None`` means the caller cannot say; the chain is then left
+    as it was before ``memory`` replaced ``utility``.
+
+    New installs seed ``memory``, not ``utility``. ``hal0/utility`` there means
+    the helper lane, which is what ``hal0/memory`` resolves, so it takes that
+    chain. ``hal0/npu`` is not an alias of the helper lane: it only loses the
+    ``utility`` step, which on such a box could never match. A box that does have
+    a ``utility`` slot keeps the chain unchanged.
+    """
+    if (
+        "utility" not in chain
+        or configured_names is None
+        or any(str(n).lower() == "utility" for n in configured_names)
+    ):
+        return chain
+    if virtual_name == "hal0/utility":
+        return DEFAULT_CHAINS["hal0/memory"]
+    return tuple(name for name in chain if name != "utility")
+
+
+def _chain_for(
+    virtual_name: str,
+    slots: list[SlotView],
+    configured_names: Collection[str] | None = None,
+) -> tuple[str, ...] | None:
     """Resolve a virtual name to an ordered slot-name chain.
 
     Canonical names (DEFAULT_CHAINS) win. Otherwise ADR-0023 §2 generalization:
@@ -53,7 +88,7 @@ def _chain_for(virtual_name: str, slots: list[SlotView]) -> tuple[str, ...] | No
     """
     canonical = DEFAULT_CHAINS.get(virtual_name)
     if canonical is not None:
-        return canonical
+        return _without_utility(virtual_name, canonical, configured_names)
     if virtual_name.startswith(_VIRTUAL_PREFIX):
         slot = virtual_name[len(_VIRTUAL_PREFIX) :]
         if slot and any(_slot_matches_name(s, slot) for s in slots):
@@ -125,8 +160,12 @@ def resolve_chain(
     virtual_name: str,
     slots: list[SlotView],
     loaded: set[str],
+    configured_names: Collection[str] | None = None,
 ) -> Resolution | None:
     """Resolve a virtual name to a live slot's physical model id.
+
+    ``configured_names`` lists every configured slot name (model-less and
+    disabled included); see :func:`_without_utility`. ``None`` = unknown.
 
     Returns ``None`` if ``virtual_name`` is not a known virtual name. Otherwise
     always returns a ``Resolution``: the first chain entry with a model-bound
@@ -134,7 +173,7 @@ def resolve_chain(
     configured primary with ``fallback=True`` when no chain entry has a
     model-bound slot. Every substitution is logged as ``resolver.fallback``.
     """
-    chain = _chain_for(virtual_name, slots)
+    chain = _chain_for(virtual_name, slots, configured_names)
     if chain is None:
         return None
 
@@ -169,7 +208,7 @@ def resolve_chain(
                 needs_load=needs_load,
             )
 
-    # No chain entry has a model-bound slot (e.g. a model-less utility on a
+    # No chain entry has a model-bound slot (e.g. a model-less memory slot on a
     # fresh install, #2716): fall back to the configured primary.
     primary = _configured_primary(slots)
     if primary is not None:
@@ -203,9 +242,11 @@ class LiveSlotResolver:
         self,
         slot_views_provider: Callable[[], list[SlotView]],
         loaded_models_provider: Callable[[], set[str]],
+        configured_names_provider: Callable[[], Collection[str] | None] | None = None,
     ) -> None:
         self._views = slot_views_provider
         self._loaded = loaded_models_provider
+        self._configured_names = configured_names_provider
 
     async def resolve(self, model_name: str) -> Resolution | None:
         # ADR-0023 §2: any `hal0/<slot>` may resolve (canonical or generalized), so
@@ -216,6 +257,7 @@ class LiveSlotResolver:
         try:
             views = list(self._views() or [])
             loaded = set(self._loaded() or set())
+            names = self._configured_names() if self._configured_names else None
         except Exception:
-            views, loaded = [], set()
-        return resolve_chain(model_name, views, loaded)
+            views, loaded, names = [], set(), None
+        return resolve_chain(model_name, views, loaded, names)

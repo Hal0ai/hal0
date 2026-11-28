@@ -3,9 +3,9 @@
 # implement the OpenAI /v1/audio/speech contract.
 #
 # Per spec §5.4: this file was previously an opt-in template (NOT in the
-# installer's STATIC_SEED_SLOTS loop). For 1.0 it becomes a real static
-# seed — adds to STATIC_SEED_SLOTS tuple + install.sh:1666 loop + the
-# spec §5.1 mapping table. Like other seeds it ships with no
+# installer's seed loop). For 1.0 it became a seed template — listed in
+# SEED_TEMPLATES in hal0.install.static_seeds, not created on a fresh
+# install. Like other seeds it ships with no
 # `[model].default` pin (the activation signal, #1369), so copying it in never
 # triggers a surprise download or a crash-loop.
 name = "qwen3tts"

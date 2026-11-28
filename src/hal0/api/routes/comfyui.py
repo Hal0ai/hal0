@@ -90,6 +90,7 @@ from hal0.comfyui.picker import recommendation, recommended_id
 from hal0.hardware import gpu_view
 from hal0.hardware.memory_budget import MemoryBudget
 from hal0.http_client import async_client
+from hal0.jobs import CapabilityNotEnabled, capability_not_enabled_message, job_slot_present
 from hal0.providers import comfyui as comfyui_provider
 from hal0.providers.comfyui_workflows import effective_size
 from hal0.registry.pull import PullJob, make_job
@@ -194,6 +195,22 @@ async def _img_artefacts(request: Request) -> tuple[str, str]:
     manager = getattr(request.app.state, "slot_manager", None)
     token = await slot_token_for(manager, _IMG_SLOT) if manager is not None else _IMG_SLOT
     return slot_unit_name(token), slot_container_name(token)
+
+
+async def require_img_slot(request: Request) -> None:
+    """Raise :class:`CapabilityNotEnabled` when this box has no image slot.
+
+    An image slot is created when an image model is installed or the images job is
+    switched on, so a fresh install has none. A request that needs the engine answers
+    that plainly. With no slot manager the answer is unknown and nothing is refused.
+    """
+    upstreams = getattr(request.app.state, "upstreams", None)
+    names = {u.name for u in upstreams.list()} if upstreams is not None else set()
+    present = await job_slot_present(
+        getattr(request.app.state, "slot_manager", None), "image", upstream_names=names
+    )
+    if present is False:
+        raise CapabilityNotEnabled("image")
 
 
 def _build_client(timeout: httpx.Timeout) -> httpx.AsyncClient:
@@ -827,6 +844,14 @@ async def comfyui_switchover(
             f"a switch to {_switch['target']} is already running",
             code="comfyui.switch_in_progress",
         )
+    # Image mode needs the image slot. A box that never switched the job on has none:
+    # say so now, not as an error that only shows up later in /status.
+    if mode == "generation":
+        try:
+            await require_img_slot(request)
+        except CapabilityNotEnabled:
+            _record_gate_rejection(request, 503, capability_not_enabled_message("image"))
+            raise
     # Idempotency: the arbiter is the source of truth for the current mode
     # (D7). The img unit stays up in inference mode, so it cannot tell the
     # modes apart: when the arbiter cannot answer, refuse rather than guess.
@@ -1268,6 +1293,25 @@ async def _after_install(model: ImageModel, *, orchestrator: Any, tree_lock: asy
         await asyncio.to_thread(_rewire_open_webui, model.id)
 
 
+async def _ensure_img_slot(app: FastAPI) -> None:
+    """Create the ``img`` slot from its seed when the box has none (best-effort).
+
+    A fresh install ships no ``img`` slot; the first image-model install switches the
+    images job on. An existing slot, id-keyed or not, is left untouched. A failure is
+    logged and never fails the install: the weights still download, and the capability
+    apply that follows retries the creation.
+    """
+    manager = getattr(app.state, "slot_manager", None)
+    if manager is None:
+        return
+    try:
+        from hal0.capabilities.orchestrator import ensure_seed_slot_registered
+
+        await ensure_seed_slot_registered(manager, _IMG_SLOT)
+    except Exception:
+        log.warning("comfyui.img_slot_create_failed", exc_info=True)
+
+
 async def start_image_install(app: FastAPI, model_id: str) -> PullJob:
     """Start downloading what the model is missing and return the new install job.
 
@@ -1295,6 +1339,9 @@ async def start_image_install(app: FastAPI, model_id: str) -> PullJob:
                 comfyui_install.require_one_filesystem()
                 comfyui_install.require_writable_destinations(model)
                 comfyui_install.preflight_disk(model)
+        await _ensure_img_slot(
+            app
+        )  # installing an image model is how the images job is switched on
         comfyui_install.clear_removed(model.id)  # asking for it is the operator changing their mind
         job = make_job(model_id)
         jobs[model_id] = job
@@ -1580,6 +1627,7 @@ async def comfyui_restart(request: Request, background_tasks: BackgroundTasks) -
     manager = getattr(request.app.state, "slot_manager", None)
     if manager is None or not hasattr(manager, "restart"):
         return _arbiter_unavailable()
+    await require_img_slot(request)
 
     async def _restart_img() -> None:
         try:

@@ -165,7 +165,7 @@ class ProfileGenerateBody(BaseModel):
     use_llm: bool = Field(
         default=False,
         description=(
-            "Summarize the model card through the platform's utility LLM to fill the "
+            "Summarize the model card through the platform's helper LLM to fill the "
             "intent headline. Degrades to heuristics (plus a warning) when the LLM is "
             "unavailable — never fails the request."
         ),
@@ -367,14 +367,14 @@ async def generate_profile_route(body: ProfileGenerateBody, request: Request) ->
     Response::
 
         {"profile": {...portable .hal0profile.json envelope...},
-         "warnings": ["..."], "sources": ["registry:...", "huggingface:...", "llm:hal0/utility"]}
+         "warnings": ["..."], "sources": ["registry:...", "huggingface:...", "llm:hal0/memory"]}
 
     Compute-only — never writes to the catalog. ``profile`` is the exact
     envelope shape :func:`export_profile` produces, so it can be handed
     straight to ``POST /api/profiles`` (after unwrapping ``.profile``) or
     ``POST /api/profiles/import`` (as ``envelope``) unmodified.
 
-    ``use_llm: true`` asks the platform's ``hal0/utility`` slot to summarize
+    ``use_llm: true`` asks the platform's ``hal0/memory`` lane to summarize
     the model card into the profile's ``intent`` headline. Any failure (slot
     unavailable, transport error, timeout, empty completion) degrades to the
     heuristic intent with the reason recorded in ``warnings`` — it never

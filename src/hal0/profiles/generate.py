@@ -73,7 +73,7 @@ _PREFERRED_QUANT_TOKENS: tuple[str, ...] = ("q4_k_m", "q4_k_s", "q5_k_m")
 
 @dataclass(frozen=True, slots=True)
 class LlmCallContext:
-    """Where + how to reach the platform's utility LLM for the ``use_llm`` path.
+    """Where + how to reach the platform's helper LLM for the ``use_llm`` path.
 
     Mirrors the self-call pattern :func:`hal0.brain.chat._resolve_llm` uses
     to reach hal0-api's own ``/v1/chat/completions``: a base URL plus
@@ -85,9 +85,9 @@ class LlmCallContext:
 
     base_url: str = "http://127.0.0.1:8080"
     headers: dict[str, str] = field(default_factory=dict)
-    #: Keep the utility alias for existing boxes; its resolver chain falls back
-    #: to agent when a fresh install has no utility slot.
-    model: str = "hal0/utility"
+    #: The helper lane. ``hal0/memory`` resolves the memory slot and falls back
+    #: to agent while no model is bound to it.
+    model: str = "hal0/memory"
 
 
 @dataclass(frozen=True, slots=True)
@@ -406,7 +406,7 @@ def _build_intent(facts: _ModelFacts, capability: str, device: str) -> str:
 
 
 async def _llm_headline(facts: _ModelFacts, llm: LlmCallContext) -> tuple[str | None, str | None]:
-    """Ask the utility LLM for a one-line profile headline.
+    """Ask the helper LLM for a one-line profile headline.
 
     Returns ``(headline, None)`` on success or ``(None, reason)`` on any
     failure — mirrors the transport/route-status/shape handling
@@ -454,24 +454,24 @@ async def _llm_headline(facts: _ModelFacts, llm: LlmCallContext) -> tuple[str | 
                 headers=llm.headers or None,
             )
     except httpx.HTTPError as exc:
-        return None, f"utility LLM transport failure: {exc}"
+        return None, f"helper LLM transport failure: {exc}"
     if resp.status_code == 404:
-        return None, "utility LLM slot unavailable (no route to hal0/utility)"
+        return None, f"helper LLM slot unavailable (no route to {llm.model})"
     if not (200 <= resp.status_code < 300):
-        return None, f"utility LLM returned HTTP {resp.status_code}"
+        return None, f"helper LLM returned HTTP {resp.status_code}"
     try:
         data = resp.json()
     except ValueError:
-        return None, "utility LLM returned non-JSON"
+        return None, "helper LLM returned non-JSON"
     if isinstance(data, dict) and data.get("error"):
-        return None, f"utility LLM error: {data['error']}"
+        return None, f"helper LLM error: {data['error']}"
     try:
         text = data["choices"][0]["message"]["content"]
     except (KeyError, IndexError, TypeError):
-        return None, "utility LLM returned an unexpected response shape"
+        return None, "helper LLM returned an unexpected response shape"
     line = (text or "").strip().splitlines()[0].strip().strip('"') if text else ""
     if not line:
-        return None, "utility LLM returned an empty completion"
+        return None, "helper LLM returned an empty completion"
     return line[:160], None
 
 

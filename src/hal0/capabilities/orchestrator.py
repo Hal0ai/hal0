@@ -32,6 +32,7 @@ and non-NPU devices keep spawning their own slot via the regular
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import logging
 from pathlib import Path
@@ -56,6 +57,7 @@ from hal0.config.loader import load_slot_config, write_toml_atomic
 from hal0.config.locking import file_lock
 from hal0.dispatcher._npu_common import is_container_npu_cfg
 from hal0.errors import BadRequest, Conflict, Hal0Error, NotFound
+from hal0.install.static_seeds import SEED_TEMPLATES, SeedResult, ensure_seed_slot
 from hal0.model_fit import evaluate_model_fit
 from hal0.model_meta import canonical_device
 from hal0.profiles import ProfileCatalog, ResolvedProfile
@@ -1125,6 +1127,25 @@ class CapabilityOrchestrator:
         if resolve_slot_stem(paths.slots_config_dir(), slot_name) is not None:
             return
 
+        # A job with a shipped seed (everything in SEED_TEMPLATES except the NPU's
+        # ``flm``, which the NPU plan owns) is created from that seed file, so the
+        # new slot has the seed's port, profile and type and the device this box can
+        # run. Any other name is synthesised below.
+        if slot_name in SEED_TEMPLATES and slot_name != "flm":
+            try:
+                result = await ensure_seed_slot_registered(self._slot_manager, slot_name)
+            except FileNotFoundError:
+                log.warning("capability.seed_template_missing slot=%s", slot_name)
+            except Exception as exc:
+                raise CapabilityApplyFailed(
+                    f"failed to create slot {slot_name!r} from its seed: {exc}",
+                    details={"slot": slot_name, "error": str(exc)},
+                ) from exc
+            else:
+                if result is SeedResult.CREATED:
+                    self._project_selection_onto_seeded_slot(slot_name, selection)
+                return
+
         port = self._next_free_slot_port()
         # Emit ``device`` (v0.2 canonical, sole persisted truth).
         slot_device = canonical_device(selection.device)
@@ -1192,6 +1213,31 @@ class CapabilityOrchestrator:
         except Exception as exc:
             raise CapabilityApplyFailed(
                 f"failed to create slot {slot_name!r}: {exc}",
+                details={"slot": slot_name, "error": str(exc)},
+            ) from exc
+
+    def _project_selection_onto_seeded_slot(
+        self, slot_name: str, selection: CapabilitySelection
+    ) -> None:
+        """Reconcile the selection onto a slot that was just copied from its seed.
+
+        ``apply`` commits the selection before this slot's file exists, and the
+        store only projects a selection onto a slot file that is already there, so
+        the device and provider the operator chose would be lost. Re-running the
+        same reconcile now that the file exists keeps the old behaviour of a
+        synthesised slot, where the slot carried the selection's device.
+        """
+        key = _SLOT_TO_CHILD.get(slot_name)
+        if key is None:
+            return
+        slot, child = key
+        try:
+            self._store.apply_and_commit(
+                SlotSelection(slot=slot, child=child, slot_name=slot_name, selection=selection)
+            )
+        except Exception as exc:
+            raise CapabilityApplyFailed(
+                f"failed to apply the selection to new slot {slot_name!r}: {exc}",
                 details={"slot": slot_name, "error": str(exc)},
             ) from exc
 
@@ -1357,11 +1403,32 @@ class CapabilityOrchestrator:
             ) from exc
 
 
+async def ensure_seed_slot_registered(slot_manager: Any, name: str) -> SeedResult:
+    """Create the seed slot ``name`` if absent and make the slot manager know it.
+
+    The one path by which switching a job on creates its slot: the capability
+    switch (``_ensure_slot_exists``) and an image-model install both call it.
+    The copy takes the slot write lock itself, synchronously, so it runs in a
+    worker thread and nothing is awaited while the lock is held. A tombstone is
+    cleared (this is an explicit ask); an existing file or id-keyed slot is
+    never replaced. After a copy, ``register_seeded_slot`` gives the new slot its
+    identity row and a port claim (a free port, written into the file, when the
+    seed's own is taken) and raises when it cannot.
+    """
+    result = await asyncio.to_thread(
+        ensure_seed_slot, name, existing_names=slot_manager.identity_names()
+    )
+    if result is SeedResult.CREATED:
+        await slot_manager.register_seeded_slot(name)
+    return result
+
+
 __all__ = [
     "LEGAL_SLOTS",
     "CapabilityApplyFailed",
     "CapabilityOrchestrator",
     "child_to_slot",
+    "ensure_seed_slot_registered",
     "legal_children",
 ]
 

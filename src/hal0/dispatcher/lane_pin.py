@@ -54,10 +54,11 @@ UPSTREAM_ONLY_ATTR = "hal0_upstream_only"
 #: when it is longer than its own default and never when it is shorter.
 READ_TIMEOUT_ATTR = "hal0_read_timeout_s"
 
-#: The cheap-helper slot (ADR-0023). Keyed on the slot NAME, as the reaper's
-#: pinned set is (:data:`hal0.slots.reaper._PINNED_BY_DEFAULT`): ADR-0023 fixes
-#: the name, and a role/label lookup would need a config read on the dispatch
-#: hot path.
+#: The cheap-helper slot of a box installed before ``memory`` replaced it
+#: (ADR-0023). Keyed on the slot NAME, as the reaper's pinned set is
+#: (:data:`hal0.slots.reaper._PINNED_BY_DEFAULT`): a role/label lookup would
+#: need a config read on the dispatch hot path.
+# HAL0-SUNSET: v2.0.0  — the idle-sibling tiebreak for a slot named `utility` (`rank_slot_name`); delete this constant and the tiebreak once every supported box has moved off the `utility` slot name.
 UTILITY_SLOT_NAME = "utility"
 
 __all__ = [

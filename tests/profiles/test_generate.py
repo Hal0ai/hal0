@@ -465,7 +465,7 @@ def test_generate_use_llm_success_overrides_intent(
     )
 
     assert result.profile["profile"]["intent"] == "Great for fast local chat with tool use."
-    assert "llm:hal0/utility" in result.sources
+    assert "llm:hal0/memory" in result.sources
     assert result.warnings == ()
 
 

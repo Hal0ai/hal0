@@ -27,6 +27,7 @@ import pytest
 from hal0.capabilities.config import CapabilitySelection
 from hal0.capabilities.orchestrator import CapabilityOrchestrator
 from hal0.ports.authority import PortAuthority
+from hal0.slots.config_write import _cfg_effective_provider
 from hal0.slots.identity import SlotIdentityStore
 from hal0.slots.manager import SlotManager
 
@@ -120,7 +121,11 @@ async def test_autocreated_slot_provider_is_the_engine_the_profile_runs(
         slot_name, CapabilitySelection(device=device, provider="", model="", enabled=True)
     )
 
-    assert _read(home, slot_name).get("provider") == expected_provider
+    # A slot copied from its seed (tts, embed, rerank, img) carries no ``provider`` line: the
+    # engine is what the seed's profile runs, read through the same effective-provider rule
+    # the launch dispatch uses. A synthesised slot (stt) stamps the label itself.
+    raw = _read(home, slot_name)
+    assert (raw.get("provider") or _cfg_effective_provider(raw)) == expected_provider
 
 
 async def test_first_stt_enable_then_reseed_still_applies(tmp_hal0_home: str) -> None:

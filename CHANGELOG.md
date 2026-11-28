@@ -30,6 +30,15 @@ applying. Add those subsections to a version's section to surface them; see
 
 ## [Unreleased]
 
+### Breaking
+
+- **A request for a job that is not set up now answers `503 capability_not_enabled` instead of `404 dispatch.no_route`.** It covers embeddings, reranking, speech, transcription and image generation on a box with no slot for the job, which is the case on a fresh install until you switch the job on. The error carries a `capability` field and a message that names the job and how to turn it on. A client or script that matched on `dispatch.no_route` for these jobs should match on `capability_not_enabled`. A box that already has the slot is unaffected, and so is transcription on a box whose NPU serves it. A chat request for a slot that does not exist still reaches `agent`. To get the old routing back for a job, switch the job on: from the dashboard's Slots page, with `hal0 capabilities set`, or for images by installing an image model. `hal0 doctor all` passes the capabilities check on a box with no optional job switched on, and the services list shows the ComfyUI row as stopped rather than down when there is no `img` slot.
+
+### Changed
+
+- **A fresh install creates three slots: `agent`, `brain` and `memory`.** It used to copy ten slot files, most of them empty. The slots for embeddings, reranking and speech are now created from their seed when you switch the job on, from the dashboard's Slots page or with `hal0 capabilities set`; the transcription slot is built from your selection when you switch transcription on; and the image slot is created when an image model is installed. The installer's starter image step does this when you pick a model on a box that can run ComfyUI, and creates nothing when you skip it. The embedding and reranking slots get a device chosen for the box, so a box with no GPU gets `device = "cpu"` on them, and a seed whose port is taken gets a free one. An upgraded box keeps every slot it has, and a slot you deleted is not created again unless you switch its job on. `hal0 setup --auto` scaffolds `agent` and `brain` only. The installer does not set up voice yet. A fresh install does not create the NPU slot in this version, and there is no switch for it yet: it arrives with the NPU setup change. A box upgraded from an earlier version keeps its NPU slot. ([ADR-0064](docs/adr/0064-fresh-installs-seed-three-slots.md))
+- **`utility` is retired as a default slot name.** Built-in defaults (the seed stacks, the helper lane, the Hermes auxiliary slot, the profile generator) now say `memory`. A box that has a `utility` slot keeps it: `hal0/utility` still resolves to it, it stays pinned against the idle reaper, and a stored `memory.graph.extraction_slot = "utility"` still works. On a box without one, `hal0/utility` takes the `hal0/memory` chain. These paths are marked `HAL0-SUNSET: v2.0.0` and go in v2.0.0.
+
 ## [1.8.3] — 2026-11-28
 
 ### Highlights

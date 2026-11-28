@@ -208,7 +208,7 @@ def test_generate_use_llm_success(client: TestClient, monkeypatch: pytest.Monkey
     assert r.status_code == 200, r.text
     data = r.json()
     assert data["profile"]["profile"]["intent"] == "Fast local chat with tool use."
-    assert "llm:hal0/utility" in data["sources"]
+    assert "llm:hal0/memory" in data["sources"]
     assert data["warnings"] == []
 
 

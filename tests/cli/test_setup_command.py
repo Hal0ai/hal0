@@ -54,13 +54,13 @@ def test_auto_selections_scaffolds_capability_slots_empty():
     # scaffold rides along.
     # vision is retired — a model property served by any llm slot, no
     # dedicated scaffold.
-    assert {"agent", "brain", "embed", "rerank", "stt", "tts"} <= names
+    assert names == {"agent", "brain"}
     assert "vision" not in names
     assert all(s.model_id is None for s in sel.slots)  # every slot empty
     assert sel.extensions["openwebui"] is True
     assert sel.extensions["hermes"] is True
-    # an agent extension is enabled by default → coder slot is scaffolded too
-    assert "coder" in names
+    # an agent extension alone does not scaffold a coder slot
+    assert "coder" not in names
 
 
 def test_auto_selections_brain_scaffold_is_chat_capability():
@@ -85,7 +85,7 @@ def test_auto_selections_no_slots_seeds_nothing():
 def test_auto_selections_no_extensions_disables_all_and_skips_agent_slot():
     sel = build_auto_selections(_hw(96), storage_dir="/var/lib/hal0/models", with_extensions=False)
     assert all(v is False for v in sel.extensions.values())
-    # agent (Main) slot still seeded; coder slot NOT seeded (no agent ext on)
+    # agent (Main) slot still seeded; coder slot NOT seeded
     assert any(s.slot_name == "agent" for s in sel.slots)
     assert not any(s.slot_name == "coder" for s in sel.slots)
 
@@ -93,7 +93,7 @@ def test_auto_selections_no_extensions_disables_all_and_skips_agent_slot():
 def test_auto_selections_default_keeps_extensions_and_agent_slot():
     sel = build_auto_selections(_hw(96), storage_dir="/var/lib/hal0/models")
     assert sel.extensions["hermes"] is True
-    assert any(s.slot_name == "coder" for s in sel.slots)
+    assert not any(s.slot_name == "coder" for s in sel.slots)
 
 
 def test_auto_selections_skips_existing_slots():
@@ -102,11 +102,9 @@ def test_auto_selections_skips_existing_slots():
         storage_dir="/var/lib/hal0/models",
         existing_slots=frozenset({"agent", "brain"}),
     )
-    # agent + brain already exist on disk → not re-seeded; coder (agent
-    # extension default on) still seeded
-    assert not any(s.slot_name == "agent" for s in sel.slots)
-    assert not any(s.slot_name == "brain" for s in sel.slots)
-    assert any(s.slot_name == "coder" for s in sel.slots)
+    # agent + brain already exist on disk → not re-seeded; nothing else is
+    # scaffolded, so nothing is left
+    assert sel.slots == []
 
 
 def test_auto_selections_no_existing_seeds_all_default():

@@ -4,7 +4,10 @@
 
 Accepted 2026-11-04 for v1.9.0. Amends ADR-0023's utility seed and memory-role
 policy. Implementation is staged through H0-191; publishing this decision does
-not certify the later gate, seeding or hardware acceptance.
+not certify the later gate, seeding or hardware acceptance. Amended by
+[ADR-0064](0064-fresh-installs-seed-three-slots.md) (2026-11-28): a fresh
+install seeds `agent`, `brain` and `memory` only, and the `utility` retirement
+this record staged is completed with a sunset at v2.0.0.
 
 ## Context
 

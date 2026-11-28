@@ -8,7 +8,7 @@ sidebar:
 import { Aside, Card, CardGrid, LinkCard, Steps } from '@astrojs/starlight/components';
 
 Editing slots one at a time works, but swapping an entire lineup — the
-`agent` model, the `utility` model, their profiles, the embed
+`agent` model, the `memory` model, their profiles, the embed
 and rerank lanes that ride along with them — is tedious to do by hand, and
 easy to leave half-applied. A **stack** is a single named entry that bundles
 a whole set of slot assignments together with the profile and model metadata
@@ -64,11 +64,11 @@ already having the right profile or registry entry.
 ## Seed stacks
 
 hal0 ships three built-in stacks tuned to the reference Strix Halo roster,
-each pairing an `agent` and a `utility` slot and carrying dedicated embed and
+each pairing an `agent` and a `memory` slot and carrying dedicated embed and
 rerank rows so memory recall works out of the box:
 
-- **`saber`** — a MoE agent model on the `agent` profile, paired with a fast utility model.
-- **`forge`** — a coding-focused agent/utility pair, both MTP-capable builds.
+- **`saber`** — a MoE agent model on the `agent` profile, paired with a fast helper model on the `memory` slot.
+- **`forge`** — a coding-focused agent/memory pair, both MTP-capable builds.
 - **`pi`** — a lightweight-host-oriented pairing.
 
 Like seed profiles, the three seeds are **immutable** — applying a change to

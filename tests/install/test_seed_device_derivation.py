@@ -33,7 +33,7 @@ import pytest
 from hal0.config.schema import GPUInfo, HardwareInfo
 from hal0.install.static_seeds import (
     LLAMA_SEED_CAPABILITIES,
-    STATIC_SEED_SLOTS,
+    SEED_TEMPLATES,
     apply_derived_seed_devices,
     seed_static_slots,
 )
@@ -89,8 +89,10 @@ def test_kfd_less_host_seeds_no_gpu_rocm_llama_slot(
     llama.cpp slot labelled ``gpu-rocm`` — that device can only refuse."""
     hw = _kfd_less_render_node_box(monkeypatch)
     dest = tmp_path / "slots"
-    seeded = seed_static_slots(installer_root=_REPO_ROOT, slots_dir=dest, hw=hw)
-    assert set(seeded) == set(STATIC_SEED_SLOTS)
+    seeded = seed_static_slots(
+        installer_root=_REPO_ROOT, slots_dir=dest, hw=hw, names=SEED_TEMPLATES
+    )
+    assert set(seeded) == set(SEED_TEMPLATES)
     devices = _seeded_devices(dest)
     offenders = [name for name in LLAMA_SEED_CAPABILITIES if devices.get(name) == "gpu-rocm"]
     assert not offenders, (
@@ -106,7 +108,7 @@ def test_kfd_present_host_still_derives_gpu_rocm(
     """Operator ruling: ROCm stays the default wherever /dev/kfd is usable."""
     hw = _kfd_present_rocm_box(monkeypatch)
     dest = tmp_path / "slots"
-    seed_static_slots(installer_root=_REPO_ROOT, slots_dir=dest, hw=hw)
+    seed_static_slots(installer_root=_REPO_ROOT, slots_dir=dest, hw=hw, names=SEED_TEMPLATES)
     devices = _seeded_devices(dest)
     for name in LLAMA_SEED_CAPABILITIES:
         assert devices[name] == "gpu-rocm", (name, devices[name])
@@ -115,7 +117,7 @@ def test_kfd_present_host_still_derives_gpu_rocm(
 def test_no_gpu_host_derives_cpu(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     hw = _no_gpu_box(monkeypatch)
     dest = tmp_path / "slots"
-    seed_static_slots(installer_root=_REPO_ROOT, slots_dir=dest, hw=hw)
+    seed_static_slots(installer_root=_REPO_ROOT, slots_dir=dest, hw=hw, names=SEED_TEMPLATES)
     devices = _seeded_devices(dest)
     for name in LLAMA_SEED_CAPABILITIES:
         assert devices[name] == "cpu", (name, devices[name])
@@ -128,9 +130,9 @@ def test_non_llama_seeds_keep_their_shipped_device_verbatim(
     device logic — derivation must not touch them, whatever the host."""
     hw = _kfd_less_render_node_box(monkeypatch)
     dest = tmp_path / "slots"
-    seed_static_slots(installer_root=_REPO_ROOT, slots_dir=dest, hw=hw)
+    seed_static_slots(installer_root=_REPO_ROOT, slots_dir=dest, hw=hw, names=SEED_TEMPLATES)
     devices = _seeded_devices(dest)
-    for name in STATIC_SEED_SLOTS:
+    for name in SEED_TEMPLATES:
         if name in LLAMA_SEED_CAPABILITIES:
             continue
         shipped = tomllib.loads((_SEED_SRC_DIR / f"{name}.toml").read_text(encoding="utf-8")).get(
@@ -146,8 +148,8 @@ def test_unresolvable_hardware_keeps_verbatim_copy(
     (today's verbatim behaviour) rather than aborting the seed pass."""
     monkeypatch.setattr("hal0.install.static_seeds._resolve_hardware_info", lambda: None)
     dest = tmp_path / "slots"
-    seeded = seed_static_slots(installer_root=_REPO_ROOT, slots_dir=dest)
-    assert set(seeded) == set(STATIC_SEED_SLOTS)
+    seeded = seed_static_slots(installer_root=_REPO_ROOT, slots_dir=dest, names=SEED_TEMPLATES)
+    assert set(seeded) == set(SEED_TEMPLATES)
     devices = _seeded_devices(dest)
     shipped = tomllib.loads((_SEED_SRC_DIR / "agent.toml").read_text(encoding="utf-8")).get(
         "device"
@@ -184,9 +186,9 @@ def test_apply_derived_seed_devices_rewrites_verbatim_copies(
     hw = _kfd_less_render_node_box(monkeypatch)
     dest = tmp_path / "slots"
     dest.mkdir()
-    for name in STATIC_SEED_SLOTS:
+    for name in SEED_TEMPLATES:
         shutil.copyfile(_SEED_SRC_DIR / f"{name}.toml", dest / f"{name}.toml")
-    rewritten = apply_derived_seed_devices(STATIC_SEED_SLOTS, slots_dir=dest, hw=hw)
+    rewritten = apply_derived_seed_devices(SEED_TEMPLATES, slots_dir=dest, hw=hw)
     assert rewritten == {name: "gpu-vulkan" for name in LLAMA_SEED_CAPABILITIES}
     devices = _seeded_devices(dest)
     for name in LLAMA_SEED_CAPABILITIES:
@@ -234,7 +236,7 @@ def test_apply_derived_seed_devices_ignores_missing_files(
 def _non_llama_gpu_rocm_seed_cfgs() -> dict[str, dict]:
     """The shipped non-llama seeds whose TOML carries ``device = "gpu-rocm"``."""
     cfgs: dict[str, dict] = {}
-    for name in STATIC_SEED_SLOTS:
+    for name in SEED_TEMPLATES:
         if name in LLAMA_SEED_CAPABILITIES:
             continue
         cfg = tomllib.loads((_SEED_SRC_DIR / f"{name}.toml").read_text(encoding="utf-8"))

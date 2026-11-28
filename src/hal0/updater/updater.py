@@ -2280,6 +2280,14 @@ def run_post_activation_migrations(
         # but a file that still carries the key fails hal0 doctor's slot
         # validation until the operator deletes the line.
 
+    try:
+        from hal0.config.migrations.utility_pin import pin_utility_slot
+
+        pin_utility_slot(job_id=job_id)
+    except Exception as exc:
+        log.warning("updater.utility_pin_failed", job_id=job_id, error=str(exc))
+        # Non-fatal: the reaper's default-pinned set still covers the slot.
+
     # ── Kokoro store bundle (#2739, ADR-0030): from 1.4.0 the tts slot
     # launches only from the pulled kokoro-v1 bundle, so an upgraded box that
     # uses kokoro gets it fetched once here instead of losing speech until a

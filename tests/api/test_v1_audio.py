@@ -19,6 +19,9 @@ forward path without a live upstream container.
 
 from __future__ import annotations
 
+import os
+from pathlib import Path
+
 import httpx
 import pytest
 from fastapi.testclient import TestClient
@@ -63,6 +66,11 @@ def _seed_stt_upstream(client: TestClient, port: int = 8089) -> None:
     register under that name so the dispatch resolves cleanly in tests without
     having to install a registry binding.
     """
+    # The box has a transcription slot (a fresh install has none, and then the request is
+    # refused as "not set up"); the request still lands on the agent anchor, as before.
+    slots = Path(os.environ["HAL0_HOME"]) / "etc" / "hal0" / "slots"
+    slots.mkdir(parents=True, exist_ok=True)
+    (slots / "stt.toml").write_text('name = "stt"\ntype = "transcription"\nport = 8097\n')
     client.app.state.upstreams.upsert(
         Upstream(
             name="agent",

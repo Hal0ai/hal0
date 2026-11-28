@@ -48,6 +48,19 @@ path strings, not reachable over HTTP):
 - `/v1/assistants`, `/v1/threads`, `/v1/files`, `/v1/fine_tuning/*`, `/v1/batches`
 - `/v1/responses` — not available through hal0, including for Hermes models; use `/v1/chat/completions`.
 
+### A job that is not set up
+
+A fresh install creates only the `agent`, `brain` and `memory` slots. A request
+that needs the slot of a job the box has not set up (`/v1/embeddings`,
+`/v1/rerank` and `/v1/rerankings`, `/v1/audio/speech`,
+`/v1/audio/transcriptions`, `/v1/images/generations`) is refused with
+HTTP 503 and the code `capability_not_enabled`. `error.capability` is
+`embed`, `rerank`, `tts`, `stt` or `image`, and `error.message` names the job
+and how to turn it on, in the dashboard under Slots or with a command such as
+`hal0 capabilities set embed embed --model <model> --enabled`. A box whose NPU
+serves transcription answers as before. A chat request for a slot that does not
+exist still reaches the `agent` slot.
+
 ## Request body deviations from standard OpenAI shape
 
 ### `/v1/chat/completions`

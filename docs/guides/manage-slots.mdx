@@ -70,8 +70,8 @@ editor and is the only way to clear a profile.
 <Aside type="note">
 `primary` and `chat` are retired slot names — neither is accepted as
 an alias anymore. The canonical LLM slots are `agent` (the capable
-default/fallback anchor) and `utility` (the cheap helper seeded for
-memory extraction); a slot is reachable only by its own name.
+default/fallback anchor) and `memory` (the helper seeded for memory
+extraction); a slot is reachable only by its own name.
 </Aside>
 
 ## Create a slot
@@ -431,11 +431,13 @@ Stops the unit and removes the config. You'll be asked to confirm; pass
 bypasses the delete protection described below.
 
 <Aside type="note">
-Seeded slots (`flm`, `tts`, `rerank`, `utility`, `img`, `agent`, `brain`,
+Seeded slots (`flm`, `tts`, `rerank`, `memory`, `img`, `agent`, `brain`,
 `qwen3tts`, `coder`, `embed`) are protected: deleting one without
 `--force` is rejected. `hal0 slot delete <name> --force` (or
-`DELETE /api/slots/{name}?force=true`) deletes a seeded slot anyway — but
-an install or update reconcile may re-seed it later. Clearing the slot's
+`DELETE /api/slots/{name}?force=true`) deletes a seeded slot anyway, and an
+install or update does not create it again. For a slot that has a job switch
+(embeddings, reranking, speech, transcription, images), switching the job on
+creates it again. Clearing the slot's
 default model is the way to take it out of rotation without deleting it.
 </Aside>
 

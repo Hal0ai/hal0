@@ -995,7 +995,9 @@ known_issues:
       (2) Dispatcher.forward() passes upstream non-2xx bodies through verbatim by documented
       contract. hal0 has no capability/type gate at dispatch (model_fit.slot_type_mismatch is a
       bind-time check). Capability IS disclosed in /v1/models labels/recipe. With embed OFFLINE
-      (fresh-install default) the same request returns a clean typed 404. A typed 409/400
+      (slot exists, not serving) the same request returns a clean typed 404; with NO embed slot
+      at all (the fresh-install state since ADR-0064) it returns a clean typed 503
+      `capability_not_enabled` that names the job and how to switch it on. A typed 409/400
       capability-mismatch envelope is an enhancement request, filed as a minor — the ugly-error
       precondition is the NORMAL prod state (embed kept loaded), which is why it is worth fixing
       but not worth relitigating as a routing bug. Do NOT frame this under
@@ -1003,14 +1005,16 @@ known_issues:
       really served the request).
     still_report_if: >-
       A request naming a CHAT-capable model (labels contains "chat") is routed to a non-chat
-      slot; OR the 500 occurs with the embed slot OFFLINE (must be a clean 404 then); OR
+      slot; OR the 500 occurs with the embed slot OFFLINE (must be a clean 404 then) or ABSENT
+      (must be 503 `capability_not_enabled`, never a 404 and never a chat answer); OR
       /v1/models stops disclosing per-model labels/recipe; OR hal0 ships a typed
       capability-mismatch error and this path still leaks the raw upstream 500.
     v1_4_0_note: >-
       FIXED for the loaded case on v1.4.0-nightly.20261014214325: with embed loaded, chat naming
       an embed/rerank id returns typed 409 dispatch.capability_mismatch. Only the embed-OFFLINE
-      404 clause still applies. The reverse direction (embeddings/rerank naming a CHAT slot) leaks
-      a raw 501 and is filed as #2672.
+      404 clause still applies (an absent embed slot answers 503 `capability_not_enabled` since
+      ADR-0064; an existing but offline one keeps the 404). The reverse direction
+      (embeddings/rerank naming a CHAT slot) leaks a raw 501 and is filed as #2672.
     review_at: v1.1.0
     review_due: true
 

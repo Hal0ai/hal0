@@ -20,6 +20,13 @@ from __future__ import annotations
 from collections.abc import Callable, Iterable
 from typing import Any
 
+from hal0.capability_paths import (
+    EMBED_PATHS,
+    IMAGE_PATHS,
+    RERANK_PATHS,
+    STT_PATHS,
+    TTS_PATHS,
+)
 from hal0.errors import CapabilityMismatch, Hal0Error
 from hal0.slots._cfg_helpers import non_chat_signal
 from hal0.slots.activation import slot_model_id
@@ -47,7 +54,7 @@ _DEFAULT_MODEL = "agent"
 # Path fragments that pin a request to the embed slot regardless of model.
 # Mirrors haloai lib/proxy.py:51-58 (embeddings only; rerank split to its own
 # dedicated slot in Phase C — see _RERANK_PATHS below).
-_EMBED_PATHS = ("/embeddings",)
+_EMBED_PATHS = EMBED_PATHS
 
 # Path fragments that pin a request to the dedicated rerank slot (vulkan
 # llama-server with --reranking, port 8083, added Phase C task C5).
@@ -56,18 +63,18 @@ _EMBED_PATHS = ("/embeddings",)
 # _UPSTREAM_PATH_REWRITES to translate /v1/rerankings → /v1/rerank on the
 # outgoing upstream request (llama-server serves POST /rerank natively, not
 # /rerankings).
-_RERANK_PATHS = ("/rerankings", "/rerank")
+_RERANK_PATHS = RERANK_PATHS
 
 # Path fragments that pin a request to the TTS slot (kokoro container).
 # Model-id matching is unreliable — the kokoro container advertises "kokoro"
 # while clients send "kokoro-v1", "tts", etc. — so we route by path instead.
 # Only /audio/speech (synthesis); /audio/transcriptions is STT, not TTS.
-_TTS_PATHS = ("/audio/speech",)
+_TTS_PATHS = TTS_PATHS
 
 # Path fragments that pin a request to the image-gen slot (ComfyUI). The
 # OpenAI shape is `/v1/images/generations` — when that hits this step we don't
 # want it routed to the chat slot.
-_IMAGE_PATHS = ("/images/generations", "/images/edits", "/images/variations")
+_IMAGE_PATHS = IMAGE_PATHS
 
 # Substrings in the model name that pin to known slot roles.  Order matters:
 # the ":" (FLM tag-style id) check runs before the bare-name substring checks
@@ -75,7 +82,7 @@ _IMAGE_PATHS = ("/images/generations", "/images/edits", "/images/variations")
 _EMBED_NAME_HINTS = ("embed", "rerank")
 
 # Speech-to-text path (served by ``type = "transcription"`` slots).
-_STT_PATHS = ("/audio/transcriptions",)
+_STT_PATHS = STT_PATHS
 
 # Capability slot TYPES (a ``hal0.model_meta.SLOT_TYPES`` member) mapped to the
 # request-path fragments they serve.  The authority for both dispatch-time

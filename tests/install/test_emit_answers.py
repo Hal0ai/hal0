@@ -90,15 +90,13 @@ def test_round_trip_from_build_auto_selections(tmp_path):
     hw = _hw()
     sel = build_auto_selections(hw, storage_dir="/mnt/hal0-models")
 
-    # build_auto_selections also scaffolds embed/rerank/stt/tts/vision slots;
-    # the answer-file slots schema only supports chat/coder today (spec §3/§5)
-    # so dump_answers must warn-and-skip those rather than emit an invalid file.
-    # Both chat-capability slots survive — `agent` (the ADR-0023 anchor) and
-    # the steward's `brain` scaffold — so an --answers replay reproduces them.
-    with pytest.warns(UserWarning, match="does not yet support"):
-        doc = dump_answers(sel)
-    assert {s["capability"] for s in doc["slots"]} == {"chat", "coder"}
-    assert {s["name"] for s in doc["slots"]} == {"agent", "brain", "coder"}
+    # build_auto_selections scaffolds only the two chat-capability slots —
+    # `agent` (the ADR-0023 anchor) and the steward's `brain` — both of which
+    # the answer-file schema supports, so an --answers replay reproduces them
+    # and dump_answers has nothing to warn-and-skip.
+    doc = dump_answers(sel)
+    assert {s["capability"] for s in doc["slots"]} == {"chat"}
+    assert {s["name"] for s in doc["slots"]} == {"agent", "brain"}
 
     path = tmp_path / "hal0-setup.yaml"
     write_answers(sel, str(path))
@@ -108,7 +106,7 @@ def test_round_trip_from_build_auto_selections(tmp_path):
     assert loaded.npu_opt_in == sel.npu_opt_in
     assert loaded.extensions == sel.extensions
     assert loaded.image_models == sel.image_models
-    assert {s.capability for s in loaded.slots} == {"chat", "coder"}
+    assert {s.capability for s in loaded.slots} == {"chat"}
     orig_by_name = {s.slot_name: s for s in sel.slots if s.capability in ("chat", "coder")}
     assert {s.slot_name for s in loaded.slots} == set(orig_by_name)
     for s in loaded.slots:

@@ -63,6 +63,7 @@ from hal0.cli.doctor_verify import (
     gather_payloads,
 )
 from hal0.config import paths
+from hal0.jobs import not_set_up_detail
 from hal0.system.seam_check import REMEDIATION, SeamStatus, probe_seams
 
 if TYPE_CHECKING:
@@ -221,14 +222,16 @@ def check_openwebui_task_model(slots: list[dict[str, Any]] | None = None) -> Che
     # `hal0/<x>` is always a local lane (the prefix names a slot, never an
     # upstream model). A BARE value is a slot reference only when it is in
     # the slot vocabulary — the live slots, the seed names, and the
-    # retired `utility` seed. Anything else is an upstream model id
+    # retired `utility` seed (which boxes installed before it was retired may
+    # still name). Anything else is an upstream model id
     # (``TASK_MODEL_EXTERNAL`` may name one), which this row must not
     # warn about.
-    from hal0.install.static_seeds import STATIC_SEED_SLOTS
+    from hal0.install.static_seeds import SEED_TEMPLATES
 
     if target.startswith("hal0/"):
         name = target.removeprefix("hal0/")
-    elif target in names or target in STATIC_SEED_SLOTS or target == "utility":
+    # HAL0-SUNSET: v2.0.0  — the bare `utility` name an older or hand-edited Open WebUI env file may hold; delete the `target == "utility"` test once every supported box has moved off it.
+    elif target in names or target in SEED_TEMPLATES or target == "utility":
         name = target
     else:
         return Check(key, label, _PASS, f"task model {target} is not a slot reference")
@@ -1171,7 +1174,7 @@ def check_img_custom_nodes() -> Check:
     directory = paths.slots_config_dir()
     stem = resolve_slot_stem(directory, "img")
     if stem is None:
-        return Check(key, label, _PASS, "no img slot configured")
+        return Check(key, label, _PASS, not_set_up_detail("image"))
     try:
         cfg = tomllib.loads((directory / f"{stem}.toml").read_text())
     except ValueError:
