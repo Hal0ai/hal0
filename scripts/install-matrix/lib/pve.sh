@@ -7,9 +7,12 @@
 #
 # Ownership guard: ct_destroy, ct_apply_device_rules, ct_start, ct_exec,
 # ct_push and ct_pull act on a guest only after ct_owned passes (VMID inside
-# the harness range, tag hal0-matrix, hostname hal0-mx-*), and the same test
-# (ct_guard) is the first part of the remote command that acts, so the check
-# and the action are one ssh call. Nothing else here runs pct against a guest.
+# the harness range, tag hal0-matrix, hostname hal0-mx-*, and the description
+# `hal0-matrix run <nonce>` carrying THIS run's 16-hex nonce), and the same
+# test (ct_guard) is the first part of the remote command that acts, so the
+# check and the action are one ssh call. Without a well-formed nonce every
+# guard, and ct_create, refuses and sends nothing. Nothing else here runs pct
+# against a guest.
 #
 # Injection rule: pve_run hands ONE string to the remote shell. Every value
 # placed in that string is either checked against a strict pattern or passed
@@ -24,9 +27,9 @@ _PVE_HOST_PREFIX="hal0-mx-"
 # was created, so the caller must not clean anything up. A failed `pct create`
 # returns pct's own status instead.
 _CT_REFUSED=90
-# A run's nonce (16 hex characters), set by the caller. When set, ct_create
-# writes it into the guest's description and ct_destroy given the same nonce
-# destroys only a guest that carries it.
+# A run's nonce (16 hex characters), set by the caller before any call here.
+# ct_create writes it into the guest's description, and every guard acts only on
+# a guest that carries it. Unset or malformed: ct_create and every guard refuse.
 CT_NONCE=""
 
 # Quote one value for the remote shell. Plain words stay as they are so the
@@ -39,7 +42,17 @@ _pve_q() {
   fi
 }
 
-_pve_err() { printf '%s\n' "$*" >&2; }
+# A message that cannot be written is lost, never an error (a closed terminal
+# must not turn a refusal or a cleanup step into a different outcome).
+_pve_err() { printf '%s\n' "$*" >&2 || true; }
+
+# _pve_nonce_ok <nonce>: 0 for 16 lowercase hex characters; otherwise says so on
+# one line and returns 1, so the caller sends nothing to the host.
+_pve_nonce_ok() {
+  [[ "${1:-}" =~ ^[0-9a-f]{16}$ ]] && return 0
+  _pve_err "refusing: the run nonce is missing or malformed (16 hex characters needed)"
+  return 1
+}
 
 _pve_vmid_min() { printf '%s' "${HAL0_MATRIX_VMID_MIN:-170}"; }
 _pve_vmid_max() { printf '%s' "${HAL0_MATRIX_VMID_MAX:-189}"; }
@@ -362,16 +375,14 @@ _pve_desc_pattern() {
   printf '^description: %s(%%20| )run(%%20| )%s(%%0A)?$' "$_PVE_TAG" "$1"
 }
 
-# ct_owned <vmid> [nonce]: 0 only for a guest this harness created. With a
-# nonce the guest's description must also be `hal0-matrix run <nonce>`, which
-# proves it is the guest THIS run created.
+# ct_owned <vmid> <nonce>: 0 only for a guest this run created: the guest's
+# description must be `hal0-matrix run <nonce>`, besides the tag and hostname.
+# No nonce, no answer: it refuses.
 ct_owned() {
   local vmid="${1:-}" nonce="${2:-}" conf line tags="" host="" desc="" t found=1 _PVE_DEADLINE
   _PVE_DEADLINE="$(_pve_t READ 60)"
   _pve_in_range "$vmid" || return 1
-  if [[ -n "$nonce" ]]; then
-    [[ "$nonce" =~ ^[0-9a-f]{16}$ ]] || return 1
-  fi
+  _pve_nonce_ok "$nonce" || return 1
   conf="$(pve_run "pct config ${vmid}")" || return 1
   while IFS= read -r line; do
     case "$line" in
@@ -383,9 +394,7 @@ ct_owned() {
   host="${host// /}"
   tags="${tags// /}"
   [[ "$host" == "${_PVE_HOST_PREFIX}"* ]] || return 1
-  if [[ -n "$nonce" ]]; then
-    [[ "$(_pve_desc_nonce "$desc")" == "$nonce" ]] || return 1
-  fi
+  [[ "$(_pve_desc_nonce "$desc")" == "$nonce" ]] || return 1
   local IFS=';,'
   for t in $tags; do
     [[ "$t" == "$_PVE_TAG" ]] && found=0
@@ -429,9 +438,9 @@ ct_mark_state() {
   fi
 }
 
-# ct_guard <vmid> [nonce]: remote shell text that ends in `&& ` and succeeds
-# only for a guest this harness created: hostname hal0-mx-<vmid>, tag
-# hal0-matrix, and with a nonce the description `hal0-matrix run <nonce>`.
+# ct_guard <vmid> <nonce>: remote shell text that ends in `&& ` and succeeds
+# only for a guest this run created: hostname hal0-mx-<vmid>, tag hal0-matrix
+# and the description `hal0-matrix run <nonce>`.
 # Every state-changing remote command starts with it, so the check and the
 # action are one ssh call and one remote shell. Fixed text: only the VMID (a
 # checked number) and the nonce (checked hex) are placed in it. Prints nothing
@@ -439,12 +448,10 @@ ct_mark_state() {
 ct_guard() {
   local vmid="${1:-}" nonce="${2:-}" g
   _pve_in_range "$vmid" || return 1
-  [[ -z "$nonce" || "$nonce" =~ ^[0-9a-f]{16}$ ]] || return 1
+  _pve_nonce_ok "$nonce" || return 1
   g="{ pct config ${vmid} | grep -q '^hostname: ${_PVE_HOST_PREFIX}${vmid}\$'"
   g+=" && pct config ${vmid} | grep -Eq '^tags: ([^;,]*[;,])*${_PVE_TAG}([;,].*)?\$'"
-  if [[ -n "$nonce" ]]; then
-    g+=" && pct config ${vmid} | grep -Eq '$(_pve_desc_pattern "$nonce")'"
-  fi
+  g+=" && pct config ${vmid} | grep -Eq '$(_pve_desc_pattern "$nonce")'"
   printf '%s; } && ' "$g"
 }
 
@@ -467,7 +474,7 @@ ct_create() {
     _pve_err "cores, memory and disk must be integers"
     return "$_CT_REFUSED"
   fi
-  [[ -z "$CT_NONCE" || "$CT_NONCE" =~ ^[0-9a-f]{16}$ ]] || { _pve_err "bad run nonce"; return "$_CT_REFUSED"; }
+  _pve_nonce_ok "$CT_NONCE" || return "$_CT_REFUSED"
   [[ "$bridge" =~ ^[A-Za-z0-9_.-]+$ ]] || { _pve_err "bad HAL0_MATRIX_BRIDGE"; return "$_CT_REFUSED"; }
   for dev in "$@"; do
     [[ "$dev" =~ ^/dev/[A-Za-z0-9_-]+(/[A-Za-z0-9_-]+)*(,gid=[0-9]+)?$ ]] \
@@ -483,7 +490,7 @@ ct_create() {
   cmd="pct create $(_pve_q "$vmid") $(_pve_q "$volid")"
   cmd+=" --hostname $(_pve_q "${_PVE_HOST_PREFIX}${vmid}")"
   cmd+=" --tags $(_pve_q "$_PVE_TAG")"
-  [[ -z "$CT_NONCE" ]] || cmd+=" --description $(_pve_q "hal0-matrix run ${CT_NONCE}")"
+  cmd+=" --description $(_pve_q "hal0-matrix run ${CT_NONCE}")"
   cmd+=" --cores ${cores} --memory ${mem} --swap 0"
   cmd+=" --rootfs $(_pve_q "${storage}:${disk}")"
   cmd+=" --net0 $(_pve_q "name=eth0,bridge=${bridge},ip=dhcp")"
@@ -633,9 +640,8 @@ ct_pull() {
   fi
 }
 
-# ct_destroy <vmid> [nonce]: refuses unless ct_owned (with the nonce when one
-# is given), re-checked before each attempt. Without a nonce the rule is the
-# manual one: range, tag, hostname.
+# ct_destroy <vmid> <nonce>: refuses unless ct_owned (with the nonce),
+# re-checked before each attempt.
 # Sequence from scripts/fresh-test-ct.sh: SIGKILL the lxc-start monitor (a
 # privileged guest holding /dev/kfd hangs `lxc-stop --kill`), clear a stale
 # lock, purge-destroy, retry once. "Gone" means the config file is absent on

@@ -121,7 +121,9 @@ class Fake:
 
     def run(self, body: str, env: dict | None = None, strict: bool = False):
         pre = "set -euo pipefail\n" if strict else ""
-        script = f"{pre}source {shlex.quote(str(PVE_SH))}\n{body}\n"
+        # The library needs the run's nonce for every guarded call; a test that
+        # is about a missing or bad one sets CT_NONCE itself, after this line.
+        script = f"{pre}source {shlex.quote(str(PVE_SH))}\nCT_NONCE={NONCE}\n{body}\n"
         full = {
             "PATH": f"{self.bin}:/usr/bin:/bin",
             "HOME": str(self.dir),
@@ -441,7 +443,7 @@ def test_destroy_runs_under_a_deadline_and_reports_the_guest_still_there(fake):
     _owned_rules(fake, 172)
     fake.rule("test -e /etc/pve/lxc/172.conf", "present\n")
     r = _hangs_then_gives_up(
-        fake, "ct_destroy 172", "HAL0_MATRIX_TIMEOUT_DESTROY", [("pct destroy 172", HANG)]
+        fake, "ct_destroy 172 $CT_NONCE", "HAL0_MATRIX_TIMEOUT_DESTROY", [("pct destroy 172", HANG)]
     )
     assert "rc=1" in r.stdout and "still present" in r.stderr
 
@@ -616,7 +618,7 @@ ACTIONS = [
     ("ct_push 172 /etc/hostname /root/x", "pct exec 172 -- bash -c"),
     ("ct_pull 172 /root/x {tmp}", "pct exec 172 -- bash -c"),
     ("ct_apply_device_rules 172 0 226", "lxc.cgroup2.devices.allow"),
-    ("ct_destroy 172", "pct destroy 172 --force --purge"),
+    ("ct_destroy 172 $CT_NONCE", "pct destroy 172 --force --purge"),
 ]
 GUARD_HOST = "pct config 172 | grep -q '^hostname: hal0-mx-172$'"
 GUARD_TAG = "pct config 172 | grep -Eq '^tags: ([^;,]*[;,])*hal0-matrix([;,].*)?$'"
@@ -642,7 +644,7 @@ def test_the_guard_comes_before_the_pkill_of_a_destroy(fake):
     _owned_rules(fake, 172)
     fake.rule("pct destroy 172", "")
     fake.rule("test -e /etc/pve/lxc/172.conf", "absent\n")
-    fake.run("ct_destroy 172")
+    fake.run("ct_destroy 172 $CT_NONCE")
     call = next(c for c in fake.calls() if "pkill" in c)
     assert call.index(GUARD_TAG) < call.index("pkill")
     assert "{ pkill" in call  # the whole sequence sits behind the guard
@@ -663,7 +665,7 @@ def test_the_guard_decides_in_the_same_command_when_the_config_changes_under_us(
         )
         + f'echo "ran: $cmd" >> {shlex.quote(str(log))}; exit 0\n'
     )
-    for call in ("ct_start 172", "ct_exec 172 id", "ct_destroy 172"):
+    for call in ("ct_start 172", "ct_exec 172 id", "ct_destroy 172 $CT_NONCE"):
         r = fake.run(call)
         assert r.returncode != 0, call
     ran = log.read_text() if log.exists() else ""
@@ -676,7 +678,7 @@ def _with_desc(text: str, vmid: int = 172) -> str:
     return BARE_CONF.format(vmid=vmid) + "description: " + text + "\n"
 
 
-def _guard_verdict(fake, vmid, conf, nonce=""):
+def _guard_verdict(fake, vmid, conf, nonce=NONCE):
     """Run the guard text itself, with a `pct` that prints `conf`."""
     script = (
         f'g="$(ct_guard {vmid} {nonce})"\n'
@@ -691,15 +693,15 @@ def _guard_verdict(fake, vmid, conf, nonce=""):
 @pytest.mark.parametrize(
     "conf,vmid,nonce,expected",
     [
-        (TAGGED_CONF.format(vmid=172), 172, "", True),
-        (UNTAGGED_CONF.format(vmid=172), 172, "", False),
-        (WRONG_HOST_CONF, 172, "", False),
-        ("hostname: hal0-mx-173\ntags: hal0-matrix\n", 172, "", False),
-        ("hostname: hal0-mx-172x\ntags: hal0-matrix\n", 172, "", False),
-        ("hostname: hal0-mx-172\ntags: a;hal0-matrix\n", 172, "", True),
-        ("hostname: hal0-mx-172\ntags: hal0-matrix,b\n", 172, "", True),
-        ("hostname: hal0-mx-172\ntags: hal0-matrix-old;x\n", 172, "", False),
-        ("hostname: hal0-mx-172\ntags: xhal0-matrix\n", 172, "", False),
+        (TAGGED_CONF.format(vmid=172), 172, NONCE, True),
+        (UNTAGGED_CONF.format(vmid=172), 172, NONCE, False),
+        (WRONG_HOST_CONF, 172, NONCE, False),
+        ("hostname: hal0-mx-173\ntags: hal0-matrix\n", 172, NONCE, False),
+        ("hostname: hal0-mx-172x\ntags: hal0-matrix\n", 172, NONCE, False),
+        ("hostname: hal0-mx-172\ntags: a;hal0-matrix\n" + DESC_REAL, 172, NONCE, True),
+        ("hostname: hal0-mx-172\ntags: hal0-matrix,b\n" + DESC_REAL, 172, NONCE, True),
+        ("hostname: hal0-mx-172\ntags: hal0-matrix-old;x\n", 172, NONCE, False),
+        ("hostname: hal0-mx-172\ntags: xhal0-matrix\n", 172, NONCE, False),
         (NONCE_CONF.format(vmid=172), 172, NONCE, True),
         (BARE_CONF.format(vmid=172), 172, NONCE, False),
         (_with_desc("hal0-matrix run ffffffffffffffff%0A"), 172, NONCE, False),
@@ -777,10 +779,10 @@ BAD_RANGES = [
 def test_a_silly_range_refuses_everything_before_any_ssh(fake, lo, hi):
     env = {"HAL0_MATRIX_VMID_MIN": lo, "HAL0_MATRIX_VMID_MAX": hi}
     for call in (
-        "ct_destroy 175",
+        "ct_destroy 175 $CT_NONCE",
         "ct_start 175",
         "ct_exec 175 id",
-        "ct_owned 175",
+        "ct_owned 175 $CT_NONCE",
         "pve_pick_vmid",
         "ct_create 175 local:vztmpl/x.tar.zst 1 4 8192 40",
     ):
@@ -814,40 +816,40 @@ def _destroy_calls(fake):
 
 def test_destroy_refuses_out_of_range(fake):
     _owned_rules(fake, 105)
-    r = fake.run("ct_destroy 105")
+    r = fake.run("ct_destroy 105 $CT_NONCE")
     assert r.returncode == 1
     assert _destroy_calls(fake) == []
 
 
 def test_destroy_refuses_untagged_in_range(fake):
     _owned_rules(fake, 171, UNTAGGED_CONF)
-    r = fake.run("ct_destroy 171")
+    r = fake.run("ct_destroy 171 $CT_NONCE")
     assert r.returncode == 1
     assert _destroy_calls(fake) == []
 
 
 def test_destroy_refuses_wrong_hostname(fake):
     _owned_rules(fake, 171, WRONG_HOST_CONF)
-    r = fake.run("ct_destroy 171")
+    r = fake.run("ct_destroy 171 $CT_NONCE")
     assert r.returncode == 1
     assert _destroy_calls(fake) == []
 
 
 def test_destroy_refuses_when_config_unreadable(fake):
     fake.rule("pct config 171", "", 255)
-    r = fake.run("ct_destroy 171")
+    r = fake.run("ct_destroy 171 $CT_NONCE")
     assert r.returncode == 1
     assert _destroy_calls(fake) == []
 
 
 def test_tag_must_match_exactly(fake):
     _owned_rules(fake, 171, "hostname: hal0-mx-171\ntags: hal0-matrix-old;x\n")
-    assert fake.run("ct_owned 171").returncode == 1
+    assert fake.run("ct_owned 171 $CT_NONCE").returncode == 1
 
 
 def test_tag_among_several_is_owned(fake):
-    _owned_rules(fake, 171, "hostname: hal0-mx-171\ntags: a;hal0-matrix\n")
-    assert fake.run("ct_owned 171").returncode == 0
+    _owned_rules(fake, 171, "hostname: hal0-mx-171\ntags: a;hal0-matrix\n" + DESC_REAL)
+    assert fake.run("ct_owned 171 $CT_NONCE").returncode == 0
 
 
 @pytest.mark.parametrize(
@@ -863,7 +865,7 @@ def test_destroy_owned_calls_destroy_and_verifies(fake):
     _owned_rules(fake, 172)
     fake.rule("pct destroy 172 --force --purge", "")
     fake.rule("test -e /etc/pve/lxc/172.conf", "absent\n")
-    r = fake.run("ct_destroy 172; echo rc=$?")
+    r = fake.run("ct_destroy 172 $CT_NONCE; echo rc=$?")
     assert "rc=0" in r.stdout
     calls = fake.calls()
     kill = [c for c in calls if "pkill" in c]
@@ -877,7 +879,7 @@ def test_destroy_returns_1_when_guest_still_there(fake):
     _owned_rules(fake, 172)
     fake.rule("pct destroy 172", "")
     fake.rule("test -e /etc/pve/lxc/172.conf", "present\n")
-    r = fake.run("ct_destroy 172; echo rc=$?")
+    r = fake.run("ct_destroy 172 $CT_NONCE; echo rc=$?")
     assert "rc=1" in r.stdout
     assert len([c for c in fake.calls() if "pct destroy" in c]) == 2
 
@@ -886,7 +888,7 @@ def test_destroy_does_not_trust_a_dead_ssh_as_gone(fake):
     _owned_rules(fake, 172)
     fake.rule("pct destroy 172", "")
     fake.rule("test -e /etc/pve/lxc/172.conf", "", 255)
-    r = fake.run("ct_destroy 172; echo rc=$?")
+    r = fake.run("ct_destroy 172 $CT_NONCE; echo rc=$?")
     assert "rc=1" in r.stdout
 
 
@@ -910,7 +912,12 @@ def test_guest_actions_refuse_unowned(fake, call, conf):
 
 @pytest.mark.parametrize(
     "call",
-    ["ct_exec 105 id", "ct_start 105", "ct_apply_device_rules 105 0 226", "ct_destroy 105"],
+    [
+        "ct_exec 105 id",
+        "ct_start 105",
+        "ct_apply_device_rules 105 0 226",
+        "ct_destroy 105 $CT_NONCE",
+    ],
 )
 def test_guest_actions_refuse_out_of_range_without_ssh(fake, call):
     r = fake.run(call)
@@ -1029,11 +1036,46 @@ def test_destroy_with_nonce_destroys_the_guest_that_carries_it(fake):
     assert any("pct destroy 172" in c for c in fake.calls())
 
 
-def test_destroy_without_nonce_keeps_the_manual_rule(fake):
-    _owned_rules(fake, 172, BARE_CONF)
-    fake.rule("pct destroy 172 --force --purge", "")
-    fake.rule("test -e /etc/pve/lxc/172.conf", "absent\n")
-    assert fake.run("ct_destroy 172").returncode == 0
+# --- no nonce, no action: the older tag-and-hostname test is gone ------------
+# The library is only ever used with a run's nonce. Sourced by hand with none (or
+# a malformed one) every guard and ct_create refuse: no remote command is sent,
+# create returns the "refused" status, and one line says what is wrong.
+
+BAD_NONCES = ["", "12345", "0123456789ABCDEF", "x; id", "0123456789abcdef0"]
+NONCE_REFUSAL = "the run nonce is missing or malformed"
+NONCE_GUARDED = [
+    "ct_owned 172 {n}",
+    "ct_guard 172 {n}",
+    "ct_destroy 172 {n}",
+    "ct_start 172",
+    "ct_exec 172 id",
+    "ct_push 172 {src} /root/x",
+    "ct_pull 172 /root/x {dst}",
+    "ct_apply_device_rules 172 1 226",
+    "ct_wait_network 172 1",
+]
+
+
+@pytest.mark.parametrize("bad", BAD_NONCES, ids=lambda b: b or "empty")
+@pytest.mark.parametrize("call", NONCE_GUARDED)
+def test_a_guarded_call_without_a_good_nonce_sends_nothing(fake, tmp_path, call, bad):
+    src = tmp_path / "src.txt"
+    src.write_text("x")
+    _owned_rules(fake, 172)  # a guest that would pass the old tag-and-hostname test
+    q = shlex.quote(bad)
+    body = f"CT_NONCE={q}\n" + call.format(n=q, src=src, dst=tmp_path / "out")
+    r = fake.run(body)
+    assert r.returncode != 0
+    assert fake.calls() == [], fake.calls()
+    assert NONCE_REFUSAL in r.stderr
+
+
+@pytest.mark.parametrize("bad", BAD_NONCES, ids=lambda b: b or "empty")
+def test_create_without_a_good_nonce_refuses_and_sends_nothing(fake, bad):
+    r = fake.run(f"CT_NONCE={shlex.quote(bad)}; ct_create 172 local:vztmpl/x.tar.zst 0 4 8192 40")
+    assert r.returncode == 90
+    assert fake.calls() == []
+    assert NONCE_REFUSAL in r.stderr
 
 
 @pytest.mark.parametrize("bad", ["12345", "0123456789ABCDEF", "x; id", "0123456789abcde"])
@@ -1405,7 +1447,7 @@ def test_strict_destroy_of_gone_guest_continues(fake):
     _owned_rules(fake, 172)
     fake.rule("pct destroy 172", "")
     fake.rule("test -e /etc/pve/lxc/172.conf", "absent\n")
-    r = fake.run(f"ct_destroy 172\necho {MARK}", strict=True)
+    r = fake.run(f"ct_destroy 172 $CT_NONCE\necho {MARK}", strict=True)
     assert r.returncode == 0 and MARK in r.stdout, r.stderr
 
 
@@ -1413,7 +1455,7 @@ def test_strict_destroy_failure_reports_before_returning(fake):
     _owned_rules(fake, 172)
     fake.rule("pct destroy 172", "boom: storage busy\n", 5)
     fake.rule("test -e /etc/pve/lxc/172.conf", "present\n")
-    r = fake.run("ct_destroy 172", strict=True)
+    r = fake.run("ct_destroy 172 $CT_NONCE", strict=True)
     assert r.returncode == 1
     assert "still present" in r.stderr and "boom: storage busy" in r.stderr
 
@@ -1443,7 +1485,7 @@ def test_strict_create_success_continues(fake):
         ("pve_template_volid debian-12", [("pveam list local", TEMPLATES)]),
         ("pve_storage", [("pvesm status --content rootdir", STORAGE)]),
         ("pve_pick_vmid", [("pvesh get /cluster/resources", _guests((105, "")))]),
-        ("ct_owned 172", [("pct config 172", TAGGED_CONF.format(vmid=172))]),
+        ("ct_owned 172 $CT_NONCE", [("pct config 172", TAGGED_CONF.format(vmid=172))]),
         (
             "ct_start 172",
             [("pct config 172", TAGGED_CONF.format(vmid=172)), ("pct start", "")],
@@ -1475,8 +1517,8 @@ def test_strict_success_paths_continue(fake, body, rules):
         ("pve_require_headroom", [("free -g", _free(3))]),
         ("pve_template_volid nothing", [("pveam list local", TEMPLATES)]),
         ("pve_pick_vmid", [("pvesh get /cluster/resources", _guests((175, "hal0-matrix")))]),
-        ("ct_owned 172", [("pct config 172", UNTAGGED_CONF.format(vmid=172))]),
-        ("ct_owned 105", []),
+        ("ct_owned 172 $CT_NONCE", [("pct config 172", UNTAGGED_CONF.format(vmid=172))]),
+        ("ct_owned 105 $CT_NONCE", []),
     ],
 )
 def test_strict_failures_return_one_not_abort_elsewhere(fake, body, rules):
@@ -1540,7 +1582,7 @@ def test_pull_failure_keeps_an_existing_destination(fake, tmp_path):
 
 def test_destroy_shows_refusal_reason_and_destroy_output(fake):
     _owned_rules(fake, 171, UNTAGGED_CONF)
-    r = fake.run("ct_destroy 171")
+    r = fake.run("ct_destroy 171 $CT_NONCE")
     assert r.returncode == 1 and "not a harness-owned container" in r.stderr
 
 
@@ -1567,7 +1609,7 @@ def test_destroy_rechecks_ownership_on_second_attempt(fake, tmp_path):
         'if [[ "$cmd" == *"pct destroy 172"* ]]; then exit 0; fi\n'
         'echo "unexpected: $cmd" >&2; exit 97\n'
     )
-    r = fake.run("ct_destroy 172")
+    r = fake.run("ct_destroy 172 $CT_NONCE")
     assert r.returncode == 1
     assert len([x for x in fake.calls() if "pct destroy" in x]) == 1
     assert "not a harness-owned container" in r.stderr
@@ -1701,7 +1743,9 @@ def _running_ssh(fake: Fake) -> None:
         "#!/usr/bin/env bash\n"
         'cmd="${*: -1}"\n'
         'case "$cmd" in\n'
-        '  "pct config "*) printf "hostname: hal0-mx-172\\ntags: hal0-matrix\\n"; exit 0;;\n'
+        '  "pct config "*) printf "hostname: hal0-mx-172\\ntags: hal0-matrix\\ndescription: hal0-matrix run '
+        + NONCE
+        + '%%0A\\n"; exit 0;;\n'
         '  "{ pct config "*) cmd="${cmd#*; \\} && }";;\n'
         "esac\n"
         'pct() { shift 3; "$@"; }\n'
