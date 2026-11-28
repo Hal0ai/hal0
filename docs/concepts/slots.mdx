@@ -390,17 +390,19 @@ device. A profile's own `--spec-draft-*` flags override the bundle's values.
 
 ## Seeded slots and aliases
 
-Every install starts with a set of **seeded slots** so the common capabilities
-have a home before you create anything:
-
-`flm`, `tts`, `rerank`, `memory`, `img`, `agent`, `brain`, `qwen3tts`,
-`coder`, and `embed`.
+hal0 ships ten **seed templates**: `flm`, `tts`, `rerank`, `memory`, `img`,
+`agent`, `brain`, `qwen3tts`, `coder`, and `embed`. A fresh install creates
+three of them as slots: `agent`, `brain` and `memory`. The others are created
+from their template when the job is switched on (a capability switch, or an
+image-model install), with a free port when the template's port is taken. An
+upgraded box keeps every slot it has.
 
 When the NPU runtime (FastFlowLM) is present, two more shadow slots are
 seeded: `flm-stt` and `flm-embed`, riding the NPU chat anchor's own `flm`
-slot. Seeded slots are reserved — you can't create a conflicting name, and
-deleting one requires `--force` (see [Manage slots](/docs/guides/manage-slots)),
-which an install or update reconcile may later re-seed.
+slot. Seed names are reserved — you can't create a conflicting name, and
+deleting a seeded slot requires `--force` (see
+[Manage slots](/docs/guides/manage-slots)). A slot you delete is not created
+again on its own; switching its job on again creates it.
 
 Each seeded slot names a seed profile that carries its tune: `agent` runs
 `agent`, `memory` runs `memory`, `coder` runs `coding`, `brain` runs

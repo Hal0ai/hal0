@@ -151,9 +151,10 @@ curl -fsSL https://hal0.dev/install.sh | sudo HAL0_CHANNEL=preview bash
 2. **Code + venv** — a versioned tree under `/usr/lib/hal0/` with a `current`
    symlink and a shared venv.
 3. **Config** — `/etc/hal0/` with `hal0.toml`, `profiles.toml` (your own
-   profiles; the seeded ones live in code), the ten curated slot seeds
-   (`agent`, `brain`, `coder`, `embed`, `flm`, `img`, `memory`, `qwen3tts`,
-   `rerank`, `tts`), and `api.env`. Only `brain` gets a model by default.
+   profiles; the seeded ones live in code), the three slots a fresh install
+   starts with (`agent`, `brain`, `memory`), and `api.env`. Only `brain` gets
+   a model by default. The other seven slot templates (`coder`, `embed`,
+   `flm`, `img`, `qwen3tts`, `rerank`, `tts`) are used when a job is switched on.
 4. **Hardware probe** — writes `/etc/hal0/hardware.json` and prints the
    detected backends.
 5. **Brain steward model** — pulls the curated `lfm2.5-2.6b` (LiquidAI
@@ -569,11 +570,13 @@ content-addressed, host-redacted archive you can attach anywhere, and
 - **Slots** — each named target carries a `type`
   (`llm | embedding | reranking | transcription | tts | image`), a `device`
   (`gpu-rocm | gpu-vulkan | gpu-cuda | cpu | npu`), a `model`, plus
-  `autoload`, an eviction `priority` and an optional `default`. Ten curated
-  slots (`agent`, `brain`, `coder`, `embed`, `flm`, `img`, `memory`,
-  `qwen3tts`, `rerank`, `tts`) are seeded into `/etc/hal0/slots/<name>.toml`
-  on install and each gates on its own runtime validation at load time — the
-  `flm` NPU slot simply stays grey without FastFlowLM hardware. Add your own
+  `autoload`, an eviction `priority` and an optional `default`. A fresh install
+  seeds three slots (`agent`, `brain`, `memory`) into
+  `/etc/hal0/slots/<name>.toml`; the other seven curated templates (`coder`,
+  `embed`, `flm`, `img`, `qwen3tts`, `rerank`, `tts`) become slots when their
+  job is switched on, and each gates on its own runtime validation at load
+  time. A request for a job that is not set up gets
+  `503 capability_not_enabled`. Add your own
   with `hal0 slot create NAME --type TYPE --model MODEL`. A deliberate
   `hal0 slot delete` is tombstoned, so re-running the installer never
   resurrects it.

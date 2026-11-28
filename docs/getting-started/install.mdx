@@ -105,6 +105,22 @@ never clobbered, and a unit you disabled or masked (for example
 `hermes-gateway.service`) is left off on re-run; the installer prints the
 `systemctl` command to turn it back on.
 
+## Slots on new installs
+
+A new install creates three slots: `agent` (your main chat model, empty until
+you bind one), `brain` (the small model behind the dashboard's built-in chat)
+and `memory` (below). The other slots are created when their job is switched on:
+embeddings, reranking, speech and transcription from the dashboard's Slots page
+or `hal0 capabilities set`, and image generation when you install an image
+model. Until then a request for one of those jobs is refused with
+`503 capability_not_enabled`, and the message says how to turn it on. An
+existing install keeps every slot it has, and a slot you deleted is not
+created again unless you switch its job on.
+
+The installer does not yet create the image and voice slots itself during a
+Customize install, and it does not yet create the NPU slot. Switch those on
+afterwards as described above.
+
 ## Memory slot on new installs
 
 New installs include an empty `memory` LLM slot on port 8091 with the `memory`
