@@ -108,6 +108,9 @@ sudo systemctl restart hal0-api.service
 hal0 update component openwebui
 ```
 
+`hal0 doctor` reports the state in its `openwebui_memory_filter` row: not
+managed (no token), installed and current, or what is wrong and the next step.
+
 Without a token, import it once under **Admin → Functions** from this URL, keep
 the ID `hal0_hindsight_rag`, save it, and turn on both **Active** and **Global**:
 

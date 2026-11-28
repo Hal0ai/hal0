@@ -164,9 +164,55 @@ def reconcile_hindsight_rag_function(
         return {"status": "unavailable", "function_id": FUNCTION_ID}
 
 
+def inspect_hindsight_rag_function(
+    *,
+    token: str | None = None,
+    base_url: str | None = None,
+    requester: Requester | None = None,
+    timeout: float = 5.0,
+) -> dict[str, Any]:
+    """Report the bundled filter's state in Open WebUI without changing it.
+
+    The read-only counterpart of :func:`reconcile_hindsight_rag_function`,
+    for ``hal0 doctor`` (#4066): two GETs, never a create, update or toggle.
+    ``status`` is one of ``auth_required`` (no token to ask with),
+    ``auth_rejected``, ``unavailable``, ``absent``, ``conflict`` (the ID
+    belongs to a Function hal0 does not manage), ``outdated`` or
+    ``converged``; the last two carry ``active`` and ``global``.
+    """
+    token = token if token is not None else os.environ.get("HAL0_OPENWEBUI_ADMIN_TOKEN", "").strip()
+    if requester is None and not token:
+        return {"status": "auth_required", "function_id": FUNCTION_ID}
+    base_url = base_url or os.environ.get("HAL0_OPENWEBUI_INTERNAL_URL", _DEFAULT_BASE_URL)
+    request = requester or _http_requester(base_url, token or "", timeout)
+    try:
+        status, listed = request("GET", "/api/v1/functions/list", None)
+        if status in {401, 403}:
+            return {"status": "auth_rejected", "function_id": FUNCTION_ID}
+        if status < 200 or status >= 300 or not isinstance(listed, list):
+            return {"status": "unavailable", "function_id": FUNCTION_ID, "http_status": status}
+        if not any(isinstance(e, dict) and e.get("id") == FUNCTION_ID for e in listed):
+            return {"status": "absent", "function_id": FUNCTION_ID}
+        status, existing = request("GET", f"/api/v1/functions/id/{FUNCTION_ID}", None)
+        if status < 200 or status >= 300 or not isinstance(existing, dict):
+            return {"status": "unavailable", "function_id": FUNCTION_ID, "http_status": status}
+        if not _managed(existing):
+            return {"status": "conflict", "function_id": FUNCTION_ID}
+        current = hashlib.sha256(str(existing.get("content") or "").encode("utf-8")).hexdigest()
+        return {
+            "status": "converged" if current == bundled_source_hash() else "outdated",
+            "function_id": FUNCTION_ID,
+            "active": bool(existing.get("is_active")),
+            "global": bool(existing.get("is_global")),
+        }
+    except (OSError, TimeoutError, ValueError, json.JSONDecodeError):
+        return {"status": "unavailable", "function_id": FUNCTION_ID}
+
+
 __all__ = [
     "FUNCTION_ID",
     "bundled_source",
     "bundled_source_hash",
+    "inspect_hindsight_rag_function",
     "reconcile_hindsight_rag_function",
 ]

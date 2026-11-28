@@ -2532,6 +2532,92 @@ def _read_openwebui_client(db: Path) -> tuple[str, dict[str, Any] | None]:
     }
 
 
+@_report_unreadable("openwebui_memory_filter", "Open WebUI memory filter")
+def check_openwebui_memory_filter(
+    *,
+    unit_path: Path | None = None,
+    api_env: Path | None = None,
+    inspect: Callable[..., dict[str, Any]] | None = None,
+) -> Check:
+    """Whether the bundled filter that recalls shared memory into Open WebUI
+    chats is installed (#4066, ADR-0049).
+
+    Read-only: it lists Open WebUI's Functions with the admin token from
+    ``api.env`` and compares the stored source with the bundled one. It never
+    installs or updates the filter; ``hal0 update component openwebui`` does.
+
+    * Open WebUI unit not installed: PASS, nothing to report.
+    * No ``HAL0_OPENWEBUI_ADMIN_TOKEN``: PASS. Giving hal0 a token is an
+      operator choice (ADR-0049), so this is information, not a fault; the
+      detail says hal0 is not managing the filter and cannot see a hand import.
+    * Installed and current, active and global: PASS.
+    * Installed but switched off or not global, out of date, absent with a
+      token set, a token Open WebUI rejects, the ID taken by a Function hal0
+      does not manage, or Open WebUI not answering: WARN with the next step.
+
+    ADVISORY (never critical): chat works without recalled memory.
+    """
+    from hal0.openwebui import image_pin
+
+    key, label = "openwebui_memory_filter", "Open WebUI memory filter"
+    unit = unit_path if unit_path is not None else image_pin.installed_unit_path()
+    if not unit.exists():
+        return Check(key, label, _PASS, "Open WebUI is not installed")
+    env_path = api_env if api_env is not None else paths.api_env()
+    token = (_read_env_value(env_path, "HAL0_OPENWEBUI_ADMIN_TOKEN") or "").strip()
+    if not token:
+        return Check(
+            key,
+            label,
+            _PASS,
+            "not managed by hal0: no HAL0_OPENWEBUI_ADMIN_TOKEN in api.env, so memory is "
+            "recalled into chat only if the filter was imported by hand "
+            "(docs: guides/open-webui)",
+        )
+    if inspect is None:
+        from hal0.openwebui.function_sync import inspect_hindsight_rag_function as inspect
+    base_url = _read_env_value(env_path, "HAL0_OPENWEBUI_INTERNAL_URL")
+    state = inspect(token=token, base_url=base_url or None)
+    status = state.get("status")
+    converge = "run `hal0 update component openwebui`"
+    if status == "converged":
+        off = [
+            n
+            for n, on in (("active", state.get("active")), ("global", state.get("global")))
+            if not on
+        ]
+        if off:
+            return Check(
+                key,
+                label,
+                _WARN,
+                f"installed but not {' or '.join(off)}: it recalls nothing until both are "
+                "switched on under Admin > Functions in Open WebUI",
+            )
+        return Check(key, label, _PASS, "installed, current, active and global")
+    if status == "outdated":
+        return Check(key, label, _WARN, f"installed but older than this release; {converge}")
+    if status == "absent":
+        return Check(key, label, _WARN, f"not installed although a token is set; {converge}")
+    if status == "auth_rejected":
+        return Check(
+            key,
+            label,
+            _WARN,
+            "Open WebUI rejected HAL0_OPENWEBUI_ADMIN_TOKEN: replace it in api.env with a "
+            "current admin token and restart hal0-api",
+        )
+    if status == "conflict":
+        return Check(
+            key,
+            label,
+            _WARN,
+            "a Function with the ID hal0_hindsight_rag exists that hal0 does not manage; "
+            "hal0 will not overwrite it: rename or remove it in Open WebUI, then " + converge,
+        )
+    return Check(key, label, _WARN, "Open WebUI did not answer; start it and re-run hal0 doctor")
+
+
 @_report_unreadable("openwebui_mcp", "Open WebUI MCP tools")
 def check_openwebui_mcp(
     *,
@@ -4676,6 +4762,7 @@ def build_all_checks(base: str | None = None) -> list[Check]:
         check_bridge_store(api_running=payloads["health"] is not None),
         check_agent_bridge(base=base),
         check_openwebui_mcp(),
+        check_openwebui_memory_filter(),
         check_openwebui_task_model(slots_payload),
         check_hermes_generation_extras(),
         check_hermes_command_approvals(),
