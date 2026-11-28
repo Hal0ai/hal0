@@ -599,6 +599,35 @@ def clear_seed_tombstone(name: str, *, slots_dir: Path | None = None) -> None:
             log.warning("install.seed_tombstone_clear_failed", slot=name, error=str(exc))
 
 
+def _ensure_main(names: list[str], slots_dir: Path | None) -> int:
+    """The ``--ensure`` mode: one ``NAME created|exists`` line per name, exit 0.
+
+    Every name is checked against :data:`SEED_TEMPLATES` before any slot is
+    created, so an unknown name exits 2 with nothing written. A name whose
+    template file is missing exits 1 (after the lines already printed).
+    """
+    import contextlib
+    import sys
+
+    unknown = [n for n in names if n not in SEED_TEMPLATES]
+    if unknown:
+        print(f"not a seed template: {', '.join(unknown)}", file=sys.stderr)
+        return 2
+    status = 0
+    for name in names:
+        try:
+            # structlog's default logger prints to stdout; keep that stream to
+            # the one result line per name that install.sh reads.
+            with contextlib.redirect_stdout(sys.stderr):
+                result = ensure_seed_slot(name, slots_dir=slots_dir)
+        except (FileNotFoundError, OSError) as exc:
+            print(f"{name}: cannot create the slot ({exc})", file=sys.stderr)
+            status = 1
+            continue
+        print(f"{name} {'created' if result is SeedResult.CREATED else 'exists'}")
+    return status
+
+
 def _main(argv: list[str] | None = None) -> int:
     """``python -m hal0.install.static_seeds`` — install.sh's derivation pass.
 
@@ -621,8 +650,24 @@ def _main(argv: list[str] | None = None) -> int:
         default=None,
         help="Slot config dir (default: the platform slots config dir).",
     )
-    parser.add_argument("names", nargs="+", help="Freshly seeded slot names.")
+    parser.add_argument("names", nargs="*", help="Freshly seeded slot names.")
+    parser.add_argument(
+        "--ensure",
+        nargs="+",
+        metavar="NAME",
+        default=None,
+        help=(
+            "Create each named seed slot that is missing (an explicit ask: a "
+            "tombstone is cleared); print 'NAME created' or 'NAME exists'. "
+            "An unknown name exits 2 and creates nothing."
+        ),
+    )
     args = parser.parse_args(argv)
+
+    if args.ensure is not None:
+        return _ensure_main(args.ensure, args.slots_dir)
+    if not args.names:
+        parser.error("the following arguments are required: names")
 
     hw = _resolve_hardware_info()
     if hw is None:
