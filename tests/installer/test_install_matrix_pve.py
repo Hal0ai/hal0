@@ -160,6 +160,87 @@ def test_headroom_refuses_when_host_unreadable(fake):
     assert "rc=1" in r.stdout
 
 
+GIB = 1024**3
+
+
+def _gpu_rules(fake, avail: int, *cards: tuple[str, str]):
+    """One answer for the single read: free's table, then a `gpu USED TOTAL`
+    line per card the host reports."""
+    out = _free(avail) + "".join(f"gpu {u} {t}\n" for u, t in cards)
+    fake.rule("free -g", out)
+
+
+def test_headroom_prints_gpu_memory_when_reported(fake):
+    _gpu_rules(fake, 30, (str(3 * GIB), str(96 * GIB)))
+    r = fake.run("pve_require_headroom gpu 2>&1; echo rc=$?")
+    assert "rc=0" in r.stdout
+    assert "30 GB available" in r.stdout
+    assert "gpu memory: 3 GB used of 96 GB" in r.stdout
+    assert len(fake.calls()) == 1
+
+
+def test_headroom_without_gpu_files_is_not_an_error(fake):
+    fake.rule("free -g", _free(30))
+    r = fake.run("pve_require_headroom gpu 2>&1; echo rc=$?")
+    assert "rc=0" in r.stdout
+    assert "gpu memory: not reported" in r.stdout
+
+
+def test_gpu_shape_uses_the_higher_floor(fake):
+    _gpu_rules(fake, 16, (str(GIB), str(96 * GIB)))
+    ok = fake.run("pve_require_headroom none 2>&1; echo rc=$?")
+    assert "rc=0" in ok.stdout
+    for dev in ("gpu", "gpu+npu"):
+        bad = fake.run(f"pve_require_headroom {dev} 2>&1; echo rc=$?")
+        assert "rc=1" in bad.stdout
+        assert "host has 16 GB available, need 22" in bad.stdout
+    assert not any("pct create" in c for c in fake.calls())
+
+
+def test_floors_come_from_the_environment(fake):
+    _gpu_rules(fake, 16)
+    r = fake.run(
+        "pve_require_headroom 2>&1; echo rc=$?",
+        env={"HAL0_MATRIX_MIN_AVAILABLE_GB": "20"},
+    )
+    assert "need 20" in r.stdout and "rc=1" in r.stdout
+    r = fake.run(
+        "pve_require_headroom gpu 2>&1; echo rc=$?",
+        env={"HAL0_MATRIX_MIN_AVAILABLE_GB_GPU": "15"},
+    )
+    assert "rc=0" in r.stdout
+    r = fake.run(
+        "pve_require_headroom gpu 2>&1; echo rc=$?",
+        env={"HAL0_MATRIX_MIN_AVAILABLE_GB_GPU": "1; id"},
+    )
+    assert "rc=1" in r.stdout and "bad headroom floor" in r.stdout
+
+
+def test_garbage_gpu_value_is_not_reported(fake):
+    marker = fake.dir / "pwned"
+    fake.rule(
+        "free -g",
+        _free(30)
+        + f"gpu $(touch {marker}) 5\n"
+        + "gpu 1;2 99999999999999999999999999\n"
+        + "gpu -5 7\n",
+    )
+    r = fake.run("pve_require_headroom gpu 2>&1; echo rc=$?")
+    assert "rc=0" in r.stdout
+    assert "gpu memory: not reported" in r.stdout
+    assert not marker.exists()
+
+
+def test_headroom_sends_one_fixed_command(fake):
+    _gpu_rules(fake, 30)
+    fake.run("pve_require_headroom gpu", env={"HAL0_MATRIX_MIN_AVAILABLE_GB": "1"})
+    fake.run("pve_require_headroom")
+    first, second = fake.calls()[-2:]
+    assert first == second
+    assert "mem_info_gtt_used" in first and "mem_info_gtt_total" in first
+    assert "$(" not in first.replace("$(cat", "")  # no value from the caller inside
+
+
 def test_pve_run_passes_one_argument_with_batch_options(fake):
     fake.rule("echo hi", "hi\n")
     fake.run("pve_run 'echo hi; echo there'")

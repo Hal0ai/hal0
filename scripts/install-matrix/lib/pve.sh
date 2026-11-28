@@ -75,6 +75,13 @@ _ct_presence() {
   fi
 }
 
+# The one read the headroom guard makes. Fixed text: nothing from a shape or
+# the environment is in it. After free's table it prints one `gpu USED TOTAL`
+# line (bytes) for every card whose GTT counters exist; a host without them
+# prints none, which is not an error.
+# shellcheck disable=SC2016  # the remote shell expands these, not this one
+_PVE_HEADROOM_CMD='free -g; for d in /sys/class/drm/card*/device; do if [ -r "$d/mem_info_gtt_used" ] && [ -r "$d/mem_info_gtt_total" ]; then echo "gpu $(cat "$d/mem_info_gtt_used") $(cat "$d/mem_info_gtt_total")"; fi; done; true'
+
 # pve_mem_available_gb: integer from the "available" column of `free -g`.
 pve_mem_available_gb() {
   local out n
@@ -84,12 +91,42 @@ pve_mem_available_gb() {
   printf '%s\n' "$n"
 }
 
-# pve_require_headroom [floor_gb=12]
+# pve_require_headroom [devices]
+# devices is the shape's hardware value: gpu and gpu+npu use the GPU floor,
+# anything else (none, cpu, absent) the CPU-only one. The host's reply is
+# untrusted text: only lines that are exactly `Mem: ...` or `gpu <digits>
+# <digits>` are used, every number is digits-checked before arithmetic, and
+# nothing read is ever evaluated or put into a later command.
 pve_require_headroom() {
-  local floor="${1:-12}" have
-  _pve_uint_ok "$floor" || { _pve_err "bad headroom floor: $floor"; return 1; }
-  have="$(pve_mem_available_gb)" || { _pve_err "cannot read host memory"; return 1; }
-  if ((have < floor)); then
+  local devices="${1:-none}" floor floor_name out tag a b c f
+  local have="" gpu_used=0 gpu_total=0 gpu_seen=0 gpu_text
+  case "$devices" in
+    gpu | gpu+npu)
+      floor_name="HAL0_MATRIX_MIN_AVAILABLE_GB_GPU"
+      floor="${HAL0_MATRIX_MIN_AVAILABLE_GB_GPU:-22}" ;;
+    *)
+      floor_name="HAL0_MATRIX_MIN_AVAILABLE_GB"
+      floor="${HAL0_MATRIX_MIN_AVAILABLE_GB:-12}" ;;
+  esac
+  _pve_uint_ok "$floor" || { _pve_err "bad headroom floor: ${floor_name}"; return 1; }
+  out="$(_pve_ssh 0 "$_PVE_HEADROOM_CMD")" || { _pve_err "cannot read host memory"; return 1; }
+  while read -r tag a b c _ _ f; do
+    if [[ "$tag" == "Mem:" ]]; then
+      [[ -n "$have" || ! "$f" =~ ^[0-9]{1,9}$ ]] || have="$f"
+    elif [[ "$tag" == "gpu" && "$a" =~ ^[0-9]{1,15}$ && "$b" =~ ^[0-9]{1,15}$ && -z "$c" ]]; then
+      gpu_used=$((gpu_used + 10#$a))
+      gpu_total=$((gpu_total + 10#$b))
+      gpu_seen=1
+    fi
+  done <<<"$out"
+  [[ -n "$have" ]] || { _pve_err "cannot read host memory"; return 1; }
+  if ((gpu_seen)); then
+    gpu_text="gpu memory: $((gpu_used / 1073741824)) GB used of $((gpu_total / 1073741824)) GB"
+  else
+    gpu_text="gpu memory: not reported"
+  fi
+  _pve_err "host memory: ${have} GB available, ${gpu_text}"
+  if ((10#$have < 10#$floor)); then
     _pve_err "host has ${have} GB available, need ${floor}"
     return 1
   fi

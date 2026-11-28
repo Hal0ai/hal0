@@ -130,7 +130,7 @@ if [[ "$DRY_RUN" == "1" ]]; then
     [[ "$feed" == "0" ]] || cat >/dev/null
     printf '[dry-run] ssh %s\n' "$cmd" >&9
     case "$cmd" in
-      "free -g") printf 'Mem: 125 20 60 1 45 100\n' ;;
+      "free -g"*) printf 'Mem: 125 20 60 1 45 100\n' ;;
       "pveam list local") printf 'Volume Size\nlocal:vztmpl/%s_amd64.tar.zst 1\n' "$SHAPE_TEMPLATE" ;;
       "pvesm status"*) printf 'Name Type Status\nlocal dir active\n' ;;
       "pvesh get"*) printf '[]\n' ;;
@@ -332,7 +332,7 @@ on_signal() {
 }
 
 # ── step 2: host headroom and the VMID ───────────────────────────────────────
-pve_require_headroom || die2 "refusing: the Proxmox host does not have enough free memory"
+pve_require_headroom "$SHAPE_HARDWARE" || die2 "refusing: the Proxmox host does not have enough free memory"
 picked="$(pve_pick_vmid)" || die2 "refusing: no usable VMID (see above)"
 if [[ -n "$VMID" ]]; then
   _pve_in_range "$VMID" || die2 "refusing: VMID ${VMID} is outside the harness range"

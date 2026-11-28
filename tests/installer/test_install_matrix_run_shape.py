@@ -30,8 +30,9 @@ cmd="${*: -1}"
 plain="${cmd//\\/}"
 [[ " $* " == *" -n "* || " $* " == *" -tt "* ]] || cat > "$FAKE_STATE/stdin.dump"
 case "$cmd" in
-  "free -g")
+  "free -g"*)
     printf '              total used free shared buff/cache available\nMem: 125 20 60 1 45 %s\n' "${FAKE_MEM:-100}"
+    [[ -z "${FAKE_GPU_MEM:-}" ]] || printf 'gpu %s\n' "$FAKE_GPU_MEM"
     exit 0 ;;
   "pveam list local")
     printf 'Volume Size\nlocal:vztmpl/ubuntu-26.04-standard_26.04-1_amd64.tar.zst 1\nlocal:vztmpl/ubuntu-24.04-standard_24.04-1_amd64.tar.zst 1\n'
@@ -169,6 +170,17 @@ def test_refuses_when_host_low_on_memory(host):
     assert "5 GB" in r.stderr
     assert not any("pct create" in c for c in host.calls())
     assert not host.out.exists()
+
+
+def test_run_shape_passes_devices_to_the_guard(host):
+    gpu_mem = f"{2 * 1024**3} {96 * 1024**3}"
+    r = host.run("u2604-gpu", "--out", str(host.out), FAKE_MEM="16", FAKE_GPU_MEM=gpu_mem)
+    assert r.returncode == 2
+    assert "16 GB available, need 22" in r.stderr
+    assert "gpu memory: 2 GB used of 96 GB" in r.stderr
+    assert not any("pct create" in c for c in host.calls())
+    cpu = host.run("u2404-cpu", "--dry-run", "--out", str(host.out), FAKE_MEM="16")
+    assert cpu.returncode == 0, cpu.stderr
 
 
 def test_refuses_a_vmid_that_already_exists(host):
