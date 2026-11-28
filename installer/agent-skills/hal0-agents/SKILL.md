@@ -16,20 +16,23 @@ description: >
 Remote (auth required): `https://<hal0-host>/mcp/agents/mcp`
 Auth: Bearer token (set `HAL0_MCP_TOKEN` env var)
 
+Only Hermes can be run: `agent` is `hermes` (its default profile) or `hermes/<profile>`;
+any other id, Pi included, is refused with `bridge.unknown_agent`.
+
 ## Available Tools
 
 ### Agent Lifecycle
 | Tool | Description |
 |------|-------------|
-| `agents_list` | List all registered agents with status |
-| `agent_run` | Launch an agent (async), returns run ID |
-| `agent_run_wait` | Launch and wait for completion (sync) |
-| `agent_run_status` | Poll one run's state |
-| `agent_run_events` | Stream events for a run |
-| `agent_run_answer` | Get the final answer/message from a run |
-| `agent_run_steer` | Send a steering message to a running agent |
-| `agent_run_stop` | Stop a running agent |
-| `agent_runs_list` | List past runs for an agent or globally |
+| `agents_list` | List the agents hal0 can run, each Hermes profile's health, and whether an agent is runnable |
+| `agent_run` | Start a run on a Hermes profile; returns its view with `run_id`. `wait_s` above 0 also waits |
+| `agent_run_wait` | Block on an existing run until it ends, asks a question, or `timeout_s` passes |
+| `agent_run_status` | A run's current view: status, output so far, error, and what it waits on |
+| `agent_run_events` | A run's stored events after `since_seq`, oldest first |
+| `agent_run_answer` | Answer the clarification question a run is waiting on |
+| `agent_run_steer` | Add guidance to a run that is still running |
+| `agent_run_stop` | Ask Hermes to stop a run |
+| `agent_runs_list` | Your runs, newest first; filter with `status` |
 
 ### Agent Memory
 | Tool | Description |
@@ -40,53 +43,69 @@ Auth: Bearer token (set `HAL0_MCP_TOKEN` env var)
 ### Skills Management
 | Tool | Description |
 |------|-------------|
-| `agent_skills_list` | List skills for an agent |
-| `agent_skill_get` | Get a skill's full content |
-| `agent_skill_put` | Create or update a skill |
-| `agent_skill_delete` | Delete an agent skill |
+| `agent_skills_list` | List the skills Hermes loads (shipped, read-only; and operator drop-ins) |
+| `agent_skill_get` | Get a skill's `SKILL.md` text and file names |
+| `agent_skill_put` | Propose a drop-in skill; queued until the operator approves it |
+| `agent_skill_delete` | Propose removing a drop-in skill; queued until the operator approves it |
 
 ### Capabilities
 | Tool | Description |
 |------|-------------|
-| `agent_capabilities` | List agent capabilities (providers, tools, models) |
+| `agent_capabilities` | What a Hermes agent can do now: models, toolsets, MCP server names, approvals mode |
 
 ## Common Patterns
 
 ### List all agents
 ```
 → agents_list
-  Returns: [{name, status, type, last_run, ...}]
+  ← {agents: [{id, kind, runnable, profiles}]}
 ```
 
-### Launch an agent with a prompt
-```
-→ agent_run_wait
-  agent_id: "hermes"
-  prompt: "Summarize the hal0 slot status"
-  → Returns final answer
-```
-
-### Launch agent async and poll
+### Run an agent and wait for the result
 ```
 → agent_run
-  agent_id: "pi-agent"
-  prompt: "Refactor the login module"
-  → Returns {run_id: "run-abc123"}
+  agent: "hermes"
+  input: "Summarize the hal0 slot status"
+  wait_s: 120
+  ← run view; status is "completed" when it finished, output holds the answer
+```
+If the view says `timed_out`, the run is still going: call `agent_run_wait` again.
+
+### Run async and poll
+```
+→ agent_run
+  agent: "hermes"
+  input: "Refactor the login module"
+  ← {run_id: "run-abc123", status: ...}
 
 → agent_run_status
   run_id: "run-abc123"
-  → {state: "running" | "completed" | "failed" | "stopped"}
+  ← {status, output, error, pending, ...}
 
+→ agent_run_wait
+  run_id: "run-abc123"
+  timeout_s: 300
+  ← run view, events_tail, timed_out
+```
+Long output comes in 16 KiB windows: read the next one with `agent_run_status`
+and `offset` set to the view's `next_offset`.
+
+### Answer a run's question
+A run waiting on a clarification has `status: "waiting_for_clarification"`, and its
+`pending` field holds the question and a `request_id`.
+```
 → agent_run_answer
   run_id: "run-abc123"
-  → Final message from agent
+  request_id: "<request_id from pending>"
+  answer: "Use the staging database"
 ```
+A run waiting on an approval is the operator's to approve in the hal0 inbox.
 
 ### Check what an agent is doing
 ```
-→ agents_list → shows active runs per agent
-→ agent_runs_list agent_id: "hermes" → recent runs
-→ agent_run_events run_id: "..." → live event stream
+→ agents_list → each profile's health
+→ agent_runs_list status: "running" → your runs that are running
+→ agent_run_events run_id: "run-abc123" since_seq: 0 → the run's events
 ```
 
 ### Stop a runaway agent
@@ -94,45 +113,37 @@ Auth: Bearer token (set `HAL0_MCP_TOKEN` env var)
 → agent_run_stop run_id: "run-abc123"
 ```
 
-### Store agent-scoped memory
+### Store a note in shared memory
 ```
 → agent_memory_add
-  agent_id: "hermes"
+  agent: "hermes"
   text: "Completed hal0 setup — 3 MCP servers configured"
   tags: ["setup", "hal0", "mcp"]
 ```
 
-### Search agent memory
+### Search shared memory
 ```
 → agent_memory_search
-  agent_id: "hermes"
+  agent: "hermes"
   query: "hal0 setup"
   limit: 5
 ```
 
 ### Manage agent skills
 ```
-→ agent_skills_list agent_id: "hermes"
-→ agent_skill_get agent_id: "hermes" skill_name: "minimax-swarm"
-→ agent_skill_put agent_id: "hermes" skill_name: "my-skill" content: "..."
-→ agent_skill_delete agent_id: "hermes" skill_name: "old-skill"
+→ agent_skills_list
+→ agent_skill_get name: "hal0-bridge"
+→ agent_skill_put name: "my-skill" skill_md: "---\nname: my-skill\ndescription: ...\n---\n..."
+→ agent_skill_delete name: "old-skill"
 ```
+`agent_skill_put` and `agent_skill_delete` return `{status: "pending_approval", approval_id, name}`
+and change nothing until the operator approves the row in the hal0 inbox.
 
 ## Rules
 
-1. **Always check agents_list first** before launching new agents — avoid duplicates
-2. **Use agent_run_wait for quick queries**, `agent_run` + poll for long-running tasks
+1. **Check `agent_runs_list` with `status: "running"` first** before starting a run — avoid duplicates
+2. **Use `agent_run` with `wait_s` for quick queries**, `agent_run` then `agent_run_wait` or `agent_run_status` for long-running tasks
 3. **Stop agents** that appear stuck or idle for too long
-4. **Prefer agent_memory** over hal0-memory for agent-scoped facts
+4. **Use `agent_memory_add` and `agent_memory_search`** for notes about agents; they use the box's shared memory, not a Hermes agent's private memory
 5. **Never store secrets** in agent memory or skills
-6. **agent_skill_put overwrites** — use `agent_skill_get` first to read before modifying
-
-## Skill Triggers for Pi
-
-When a user says any of these, read this skill and use the hal0-agents MCP:
-- "list agents" / "what agents are running"
-- "run agent X" / "spawn a worker" / "start agent"
-- "check agent status" / "what is X doing"
-- "stop agent X" / "kill the agent"
-- "agent skills" / "add a skill to X"
-- "agent memory" / "remember this for agent X"
+6. **A skill put is a proposal** — it is not live until the operator approves it, and a shipped skill cannot be changed; use `agent_skill_get` first to read before proposing a change
