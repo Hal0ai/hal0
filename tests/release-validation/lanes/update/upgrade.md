@@ -130,6 +130,10 @@ the fact otherwise:
    and that `slot.unconverted` and `*_migration_failed` are absent from the hal0-api journal. If
    pending components print no `hal0 update component <id>` line, that is
    `update-components-pending-no-guidance`.
+   A row with status `broken` (#4065: nothing installed while the component's unit is enabled)
+   also makes `hal0 update status` exit 2. That is a finding about the box, not about the update:
+   record it and the row's remedy. A broken row prints its own reinstall remedy and, by design, no
+   `hal0 update component <id>` line, so it is not `update-components-pending-no-guidance`.
 10. **Rollback timing and TOML diffs.** `time hal0 update --rollback --yes` and compare the CLI exit
    code with `updater.rollback_ok` in the journal (re-pip takes ~15 s against the CLI's 10 s cap:
    `update-rollback-cli-timeout`, #2661); never run it twice (the real rollback on this 32-core box takes ~8 s, under the old 10 s cap, so only a stub that sleeps 13 s and answers `HEAD /api/status` plus `POST /api/updates/rollback` discriminates #2661: that belongs in a unit test; the live run only proves the restart panel prints). Diff `/etc/hal0/slots/*.toml`
