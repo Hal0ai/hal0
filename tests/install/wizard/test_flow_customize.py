@@ -790,3 +790,23 @@ def test_a_token_with_surrounding_spaces_is_kept_trimmed(
     keys = ["SPACE", *"hf_abc", "SPACE", "SPACE"]
     s = run(_token_field(ladder_catalog, big_pool_facts), *keys, "ENTER")
     assert (view(s).screen, secret(s)) == (Screen.STORAGE, "hf_abc")
+
+
+def test_keys_on_a_screen_with_no_rows_change_nothing(
+    catalog: Catalog, usable_facts: Facts
+) -> None:
+    s = custom(replace(catalog, components=()), usable_facts)
+    assert view(s).screen is Screen.JOBS and view(s).rows == ()
+    for key in ("UP", "DOWN", "SPACE"):
+        assert press(s, key) == s
+    assert view(press(s, "ENTER")).screen is Screen.MODELS
+
+
+def test_a_choice_screen_with_nothing_to_choose_changes_nothing(
+    catalog: Catalog, usable_facts: Facts
+) -> None:
+    bare = replace(catalog.questions["setup_type"], options=())
+    s = start(replace(catalog, questions={**catalog.questions, "setup_type": bare}), usable_facts)
+    assert view(s).screen is Screen.TYPE and view(s).rows == ()
+    for key in ("UP", "DOWN", "SPACE", "ENTER"):
+        assert press(s, key) == s

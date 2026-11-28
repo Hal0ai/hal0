@@ -4,7 +4,8 @@ It opens a terminal device by path (normally ``/dev/tty``, so the wizard works
 when standard input is a pipe), reads keys in raw mode, redraws a block of
 lines in place and offers a plain line reader. The terminal is put back the way
 it was on every way out, and a terminal that has gone away never raises out of
-a write. Signal handling is the caller's job.
+a write. Signal handling is the caller's job; only while the terminal is put
+back are SIGINT, SIGTERM and SIGHUP held, so a signal cannot cut the restore short.
 """
 
 from __future__ import annotations
@@ -12,9 +13,10 @@ from __future__ import annotations
 import contextlib
 import os
 import select
+import signal
 import termios
 import tty
-from collections.abc import Sequence
+from collections.abc import Callable, Iterator, Sequence
 from types import TracebackType
 from typing import Any, Self
 
@@ -26,10 +28,40 @@ _FALLBACK_WIDTH = 80
 _FALLBACK_HEIGHT = 24
 
 _ARROWS = {ord("A"): "UP", ord("B"): "DOWN"}
+_CLOSE_SIGNALS = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
 
 
 class TerminalUnavailable(RuntimeError):
     """The terminal device cannot be opened, or is not a terminal."""
+
+
+def in_foreground(
+    fd: int,
+    *,
+    tcgetpgrp: Callable[[int], int] | None = None,
+    getpgrp: Callable[[], int] | None = None,
+) -> bool:
+    """Whether job control lets this process use the terminal on ``fd``.
+
+    A run started in the background of an interactive shell would be stopped by
+    SIGTTOU or SIGTTIN on its first terminal call, so it is not usable. When the
+    terminal is not this process's controlling terminal (``tcgetpgrp`` fails),
+    job control cannot stop the process on it, so it is.
+    """
+    try:
+        group = (tcgetpgrp or os.tcgetpgrp)(fd)
+    except OSError:
+        return True
+    return group == (getpgrp or os.getpgrp)()
+
+
+def _unusable(fd: int, path: str) -> str | None:
+    """Why the terminal on ``fd`` cannot be used, or None when it can."""
+    if not os.isatty(fd):
+        return f"{path} is not a terminal"
+    if not in_foreground(fd):
+        return f"{path} belongs to another job: this run is in the background"
+    return None
 
 
 def can_open(path: str = "/dev/tty") -> bool:
@@ -38,9 +70,28 @@ def can_open(path: str = "/dev/tty") -> bool:
     except OSError:
         return False
     try:
-        return os.isatty(fd)
+        return _unusable(fd, path) is None
     finally:
         os.close(fd)
+
+
+@contextlib.contextmanager
+def _signals_held() -> Iterator[None]:
+    """Hold SIGINT, SIGTERM and SIGHUP back while the terminal is put back.
+
+    A held signal is delivered when the old mask returns. Without
+    ``pthread_sigmask`` (or when it fails) the restore runs unprotected.
+    """
+    try:
+        previous = signal.pthread_sigmask(signal.SIG_BLOCK, _CLOSE_SIGNALS)
+    except (AttributeError, OSError, ValueError):
+        previous = None
+    try:
+        yield
+    finally:
+        if previous is not None:
+            with contextlib.suppress(OSError, ValueError):
+                signal.pthread_sigmask(signal.SIG_SETMASK, previous)
 
 
 def _utf8_length(lead: int) -> int:
@@ -156,8 +207,9 @@ class Terminal:
         except OSError as exc:
             raise TerminalUnavailable(f"cannot open {self._path}: {exc}") from exc
         try:
-            if not os.isatty(self._fd):
-                raise TerminalUnavailable(f"{self._path} is not a terminal")
+            reason = _unusable(self._fd, self._path)
+            if reason is not None:
+                raise TerminalUnavailable(reason)
             if self._raw:
                 try:
                     self._saved = termios.tcgetattr(self._fd)
@@ -180,6 +232,10 @@ class Terminal:
         self._close()
 
     def _close(self) -> None:
+        with _signals_held():
+            self._restore()
+
+    def _restore(self) -> None:
         fd, self._fd = self._fd, -1
         if fd < 0:
             return

@@ -259,17 +259,21 @@ def press(state: State, key: str) -> State:
         return _back(s)
     if key == "s" and s.screen is Screen.REVIEW:
         return replace(s, editing="", field="save")
+    if key not in ("SPACE", "UP", "DOWN", "ENTER"):
+        return s
+    spec = _SCREENS[s.screen]
+    rows = spec.rows(s)
+    # Nothing to move to, act on or choose: the key changes nothing.
+    if not rows and (key != "ENTER" or s.screen in _CHOICE_SCREENS):
+        return s
     if key == "SPACE":
-        return _SCREENS[s.screen].space(s)
+        return spec.space(s)
     if key in ("UP", "DOWN"):
-        rows = _SCREENS[s.screen].rows(s)
         if all(r.kind == "choice" and r.state == "fixed" for r in rows):
             return s
         last = len(rows) - 1
         return replace(s, cursor=min(last, max(0, s.cursor + (1 if key == "DOWN" else -1))))
-    if key == "ENTER":
-        return _settle(_SCREENS[s.screen].enter(s))
-    return s
+    return _settle(spec.enter(s))
 
 
 def _position(state: State) -> str:

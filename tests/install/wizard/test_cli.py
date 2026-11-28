@@ -1144,3 +1144,68 @@ def test_the_plain_form_can_type_another_folder(
     screens.answer("Ready to install", "")
     assert wait_exit(p, master)[0] == 0
     assert json.loads(out.read_text())["model_store"]["path"] == str(folder)
+
+
+def test_a_background_run_goes_headless_and_never_touches_the_terminal(
+    catalog_path: Path,
+    tmp_path: Path,
+    pty_pair: tuple[int, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    master, slave = pty_pair
+    before = _tty_attrs(slave)
+    monkeypatch.setattr(os, "tcgetpgrp", lambda fd: os.getpgrp() + 1)
+    out = tmp_path / "a.json"
+    code = cli.main(
+        ["--catalog", str(catalog_path), "--out", str(out), "--tty", slave],
+        environ={"TERM": "xterm"},
+    )
+    assert code == 0 and out.exists()
+    assert read_all(master) == b"" and _tty_attrs(slave) == before
+
+
+@pytest.mark.parametrize("plain", [False, True])
+def test_an_internal_error_is_one_line_exit_70_and_writes_nothing(
+    catalog_path: Path,
+    tmp_path: Path,
+    pty_pair: tuple[int, str],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    plain: bool,
+) -> None:
+    from hal0.install.wizard import session
+
+    _, slave = pty_pair
+    before = _tty_attrs(slave)
+
+    def broken(*args: object, **kwargs: object) -> list[str]:
+        raise LookupError("a latent bug")
+
+    monkeypatch.setattr(session, "render", broken)
+    out, sec = tmp_path / "a.json", tmp_path / "s"
+    argv = ["--catalog", str(catalog_path), "--out", str(out), "--secret-out", str(sec)]
+    env = {"TERM": "xterm", **({"HAL0_PLAIN": "1"} if plain else {})}
+    code = cli.main([*argv, "--tty", slave], environ=env)
+    captured = capsys.readouterr()
+    assert code == cli.EXIT_INTERNAL == 70
+    assert captured.err == "hal0 setup: internal error (LookupError)\n"
+    assert captured.out == ""
+    assert not out.exists() and not sec.exists()
+    assert _tty_attrs(slave) == before
+
+
+def test_a_keyboard_interrupt_inside_the_screens_is_still_130(
+    catalog_path: Path,
+    tmp_path: Path,
+    pty_pair: tuple[int, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from hal0.install.wizard import session
+
+    def interrupted(*args: object, **kwargs: object) -> list[str]:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(session, "render", interrupted)
+    out = tmp_path / "a.json"
+    argv = ["--catalog", str(catalog_path), "--out", str(out), "--tty", pty_pair[1]]
+    assert cli.main(argv, environ={"TERM": "xterm"}) == 130 and not out.exists()

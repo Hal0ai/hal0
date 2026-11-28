@@ -39,6 +39,7 @@ EXIT_OK = 0
 EXIT_USAGE = 2
 EXIT_QUIT = 10
 EXIT_STOPPED = 11
+EXIT_INTERNAL = 70
 EXIT_INTERRUPTED = 130
 
 VERSION_TEXT = "hal0 setup wizard 1"
@@ -252,3 +253,8 @@ def main(
     except SystemExit as exc:
         # argparse exits for --help (code 0); every usage error is raised as _Usage.
         return EXIT_OK if exc.code in (0, None) else EXIT_USAGE
+    except Exception as exc:
+        # Last resort: a bug reaches the person as one line, never a traceback. The
+        # terminal is already put back: the screens' context manager has closed.
+        print(f"hal0 setup: internal error ({type(exc).__name__})", file=sys.stderr)
+        return EXIT_INTERNAL

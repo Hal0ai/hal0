@@ -11,7 +11,13 @@ from types import FrameType
 
 import pytest
 
-from hal0.install.wizard.term import Terminal, TerminalUnavailable, can_open, decode_keys
+from hal0.install.wizard.term import (
+    Terminal,
+    TerminalUnavailable,
+    can_open,
+    decode_keys,
+    in_foreground,
+)
 
 from .conftest import read_all, set_winsize
 
@@ -307,3 +313,89 @@ def test_a_block_as_tall_as_the_window_clears_instead_of_climbing(
     out = read_all(master)
     assert b"\x1b[2J" in out
     assert b"\x1b[8A" not in out
+
+
+def _group(value: int):  # type: ignore[no-untyped-def]
+    def tcgetpgrp(fd: int) -> int:
+        return value
+
+    return tcgetpgrp
+
+
+def _not_controlling(fd: int) -> int:
+    raise OSError(25, "Inappropriate ioctl for device")
+
+
+def test_a_terminal_in_the_foreground_is_usable() -> None:
+    assert in_foreground(0, tcgetpgrp=_group(41), getpgrp=lambda: 41) is True
+
+
+def test_a_terminal_whose_foreground_is_another_job_is_not_usable() -> None:
+    assert in_foreground(0, tcgetpgrp=_group(42), getpgrp=lambda: 41) is False
+
+
+def test_a_terminal_this_process_does_not_control_is_usable() -> None:
+    assert in_foreground(0, tcgetpgrp=_not_controlling, getpgrp=lambda: 41) is True
+
+
+def test_a_background_job_neither_opens_nor_touches_the_terminal(
+    pty_pair: tuple[int, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    master, slave_path = pty_pair
+    before = _attrs(slave_path)
+    monkeypatch.setattr(os, "tcgetpgrp", _group(os.getpgrp() + 1))
+    assert can_open(slave_path) is False
+    with pytest.raises(TerminalUnavailable):
+        Terminal(slave_path, raw=True).__enter__()
+    assert _attrs(slave_path) == before
+    assert read_all(master) == b""
+
+
+class _Boom(Exception):
+    pass
+
+
+def test_a_signal_while_closing_still_restores_the_terminal(
+    pty_pair: tuple[int, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, slave_path = pty_pair
+    before = _attrs(slave_path)
+    real = termios.tcsetattr
+    armed: list[bool] = []
+
+    def signal_first(fd: int, when: int, attrs: list[object]) -> None:
+        if armed:
+            armed.clear()
+            os.kill(os.getpid(), signal.SIGTERM)  # lands just before the restore
+        real(fd, when, attrs)
+
+    def raise_boom(signum: int, frame: FrameType | None) -> None:
+        raise _Boom
+
+    previous = signal.signal(signal.SIGTERM, raise_boom)
+    try:
+        monkeypatch.setattr(termios, "tcsetattr", signal_first)
+        with pytest.raises(_Boom), Terminal(slave_path, raw=True):
+            armed.append(True)
+    finally:
+        signal.signal(signal.SIGTERM, previous)
+    assert _attrs(slave_path) == before
+
+
+@pytest.mark.parametrize("missing", [True, False])
+def test_closing_carries_on_without_a_signal_mask(
+    pty_pair: tuple[int, str], monkeypatch: pytest.MonkeyPatch, missing: bool
+) -> None:
+    _, slave_path = pty_pair
+    before = _attrs(slave_path)
+
+    def refuse(how: int, mask: object) -> set[signal.Signals]:
+        raise OSError("no signal mask here")
+
+    if missing:
+        monkeypatch.delattr(signal, "pthread_sigmask")
+    else:
+        monkeypatch.setattr(signal, "pthread_sigmask", refuse)
+    with Terminal(slave_path, raw=True):
+        assert _attrs(slave_path) != before
+    assert _attrs(slave_path) == before
