@@ -154,7 +154,10 @@ curl -fsSL https://hal0.dev/install.sh | sudo HAL0_CHANNEL=preview bash
    profiles; the seeded ones live in code), the three slots a fresh install
    starts with (`agent`, `brain`, `memory`), and `api.env`. Only `brain` gets
    a model by default. The other seven slot templates (`coder`, `embed`,
-   `flm`, `img`, `qwen3tts`, `rerank`, `tts`) are used when a job is switched on.
+   `flm`, `img`, `qwen3tts`, `rerank`, `tts`) are not created at install: hal0
+   creates `embed`, `rerank`, `tts` and `img` from theirs when you switch the
+   job on, and a fresh install does not create the NPU `flm` slot in this
+   version.
 4. **Hardware probe** — writes `/etc/hal0/hardware.json` and prints the
    detected backends.
 5. **Brain steward model** — pulls the curated `lfm2.5-2.6b` (LiquidAI
@@ -504,9 +507,11 @@ warnings size against the real unified pool, not a BAR carve-out.
 installed, a single FLM process inside the `hal0-runner-flm` container
 hosts chat + transcription + embedding concurrently on one AMDXDNA hardware
 context — ~2 GB NPU memory, gemma3:1b at ~38.6 tok/s + Whisper-V3-Turbo +
-Embedding-Gemma all coresident. hal0 exposes this as one seeded `flm` slot
+Embedding-Gemma all coresident. hal0 exposes this as one `flm` slot
 (chat-first) whose `[npu]` table — or the dashboard's NPU drawer — toggles
-ASR and embed on the running `flm serve`. The host-side FLM `.deb` is
+ASR and embed on the running `flm serve`. A fresh install does not create
+that slot in this version, and nothing switches it on yet; a box upgraded
+from an earlier version keeps its own. The host-side FLM `.deb` is
 installed for device-sanity probes only; inference runs in the container.
 See [docs/concepts/strix-halo.mdx](./docs/concepts/strix-halo.mdx).
 
@@ -572,12 +577,13 @@ content-addressed, host-redacted archive you can attach anywhere, and
   (`gpu-rocm | gpu-vulkan | gpu-cuda | cpu | npu`), a `model`, plus
   `autoload`, an eviction `priority` and an optional `default`. A fresh install
   seeds three slots (`agent`, `brain`, `memory`) into
-  `/etc/hal0/slots/<name>.toml`; the other seven curated templates (`coder`,
-  `embed`, `flm`, `img`, `qwen3tts`, `rerank`, `tts`) become slots when their
-  job is switched on, and each gates on its own runtime validation at load
-  time. A request for a job that is not set up gets
-  `503 capability_not_enabled`. Add your own
-  with `hal0 slot create NAME --type TYPE --model MODEL`. A deliberate
+  `/etc/hal0/slots/<name>.toml`; `embed`, `rerank`, `tts` and `img` become
+  slots from their curated templates when their job is switched on, and each
+  slot gates on its own runtime validation at load time. The NPU `flm` slot
+  is not created on a fresh install in this version, and nothing switches it
+  on yet; a box upgraded from an earlier version keeps the one it has. A
+  request for a job that is not set up gets `503 capability_not_enabled`.
+  Add your own with `hal0 slot create NAME --type TYPE --model MODEL`. A deliberate
   `hal0 slot delete` is tombstoned, so re-running the installer never
   resurrects it.
 - **Profile owns the tune** — a *profile* is the whole launch tune (llama-server
@@ -647,8 +653,10 @@ content-addressed, host-redacted archive you can attach anywhere, and
 - **Image generation, day one** — `POST /v1/images/generations` via ComfyUI
   in the `img` slot container (ROCm), from a catalog of image models you
   install from the dashboard, `hal0 comfyui models install` or the installer.
-  The installer seeds the `img` slot; the ComfyUI provider creates its model
-  tree under the model store when the slot starts.
+  On a box that can run ComfyUI the installer offers starter image models;
+  the first one that downloads creates the `img` slot and starts it, and a
+  skipped offer leaves no `img` slot until you install a model. The ComfyUI
+  provider creates its model tree under the model store when the slot starts.
 - **Atomic self-update with rollback** — `hal0 update --channel
   stable|preview|nightly`. Cosign-verified tarballs swap a
   `/usr/lib/hal0/current` symlink; `--rollback` reverts. Staging happens in
@@ -795,8 +803,10 @@ own `defaults.extra_args`.
 The NPU path is opt-in: the installer places a FastFlowLM `.deb` on the host
 (SHA-pinned per distro — Ubuntu 24.04/25.10/26.04 and Debian 13) for
 device-sanity probes (`flm validate`); inference runs inside the
-`hal0-runner-flm` container. With FLM present the installer seeds the `flm`
-slot, and the NPU trio activates once `flm validate` passes. The optional
+`hal0-runner-flm` container. A fresh install does not create the `flm`
+slot in this version, and nothing switches it on yet; a box upgraded from an
+earlier version keeps its `flm` slot, and the NPU trio activates once
+`flm validate` passes. The optional
 `xdna` runner runs plain GGUF models on the same NPU instead of FLM's curated
 list; the two share the hardware, and the NPU tab asks before it swaps one for
 the other ([Run the NPU](./docs/guides/run-xdna-npu.mdx)).

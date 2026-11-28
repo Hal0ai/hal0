@@ -25,11 +25,9 @@ staged. The ten-slot list itself was never revisited.
 
 ## Decision
 
-1. **A fresh install creates three slots: `agent`, `brain` and `memory`.** Under
-   the installer's Customize path, each job the operator picks (images, the
-   NPU, voice once the installer offers it) creates its own slot during the
-   install. The NPU slot is also created on the recommended path when an NPU is
-   found and passes its check. Nothing else is created.
+1. **A fresh install creates three slots: `agent`, `brain` and `memory`.**
+   The installer's copy step creates nothing else. A job the operator turns on
+   gets its own slot then (decision 4).
 
 2. **Two lists in `src/hal0/install/static_seeds.py` hold the two meanings.**
    - `SEED_TEMPLATES` is the ten seed files that exist under
@@ -37,9 +35,12 @@ staged. The ten-slot list itself was never revisited.
      (`is_seed`, the delete tombstone, the doctor's targets) and which slots a
      job may be created from.
    - `FRESH_INSTALL_SEEDS` is the three names a fresh install creates. It drives
-     the boot-time seeding step, the installer's copy loop in
-     `installer/install.sh`, and the scaffold in `hal0 setup --auto`. A test
-     fails when the three places stop agreeing.
+     the boot-time seeding step. The installer's copy loop in
+     `installer/install.sh` spells the same three names out, and a test fails
+     when the loop and the list stop agreeing. The scaffold in
+     `hal0 setup --auto` is a separate hard-coded list (`agent` and `brain`;
+     `memory` comes from its seed file), and a test checks that those names are
+     in `FRESH_INSTALL_SEEDS`.
 
 3. **An upgraded box keeps every slot it has, and a slot the operator deleted
    does not come back.** The boot step only copies a name that is absent and
@@ -48,10 +49,17 @@ staged. The ten-slot list itself was never revisited.
 
 4. **A job's slot is created from its seed when the job is switched on.**
    `ensure_seed_slot` copies the template for that name, gives a llama.cpp seed
-   the device and context window derived from the box's hardware (so a box with
-   no GPU gets `device = "cpu"`), and registers the slot with the manager. The
-   same step runs when a job is switched on through the capability switch and
-   when an image model is installed. If the seed's port is taken it takes a free
+   (`agent`, `brain`, `memory`, `coder`, `embed`, `rerank`) the device and
+   context window derived from the box's hardware (so a box with no GPU gets
+   `device = "cpu"` on `embed` and `rerank`), and registers the slot with the
+   manager. The speech seed `tts` ships `cpu`, and the image seed `img` ships
+   its ROCm device unchanged on every box. The transcription slot has no seed:
+   it is built from the selection. The same step runs when a job is switched on
+   through the capability switch and when an image model is installed. The
+   installer's starter image step installs an image model, so it creates `img`
+   too: only when a starter model is chosen and finishes downloading, the box
+   has a ComfyUI lane and no image model is selected yet. Skipping the step
+   creates no `img` slot. If the seed's port is taken it takes a free
    one. A name the operator deleted on purpose is created again only by that
    explicit ask, which also clears the tombstone; boot never does it.
 
@@ -100,11 +108,15 @@ staged. The ten-slot list itself was never revisited.
   code `capability_not_enabled`. A client that keyed on `dispatch.no_route` for
   those jobs must key on the new code. The release-validation expectations were
   changed to match.
-- Not done yet, and not to be described as working: the installer's own
-  creation of the image and voice slots during a Customize install. The entry
-  points exist (`python -m hal0.install.static_seeds --ensure <name>` and
-  `python -m hal0.install.voice`) but `installer/install.sh` does not call them.
-  The NPU slot at install is a later change; until then no install path creates
-  `flm` on its own.
+- Not done yet, and not to be described as working: the installer does not set
+  up the voice slots. The entry point `python -m hal0.install.voice` exists, but
+  `installer/install.sh` does not call it. The installer does not create the NPU
+  slot either, and no switch does: the orchestrator leaves `flm` out of
+  on-demand creation and the NPU job has no command. Both belong to
+  the NPU setup change. Until it lands, a fresh install has no `flm` slot, and a
+  box upgraded from an earlier version keeps the one it has.
+- The installer does create `img` today, through the starter image step and not
+  through the copy step, when a model is chosen, finishes downloading and no
+  image model is selected yet.
 - The `utility` compatibility paths stay until v2.0.0 and are removed with the
   markers.

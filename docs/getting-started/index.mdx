@@ -27,8 +27,11 @@ OpenAI-compatible `/v1/*` requests to the right slot, and serves the
 dashboard. There is no shared inference daemon to babysit.
 
 A fresh install creates three slots, `agent`, `brain` and `memory`; the slots
-for embeddings, reranking, speech, images and the NPU are created when you
-switch that job on. Each runs in its own dedicated podman container. The slot name is the
+for embeddings, reranking and speech are created when you switch that job on,
+and the image slot when you install an image model. A fresh install does not
+create the NPU slot in this version, and there is no switch for it yet; a box
+upgraded from an earlier version keeps its NPU slot. Each slot runs in its own
+dedicated podman container. The slot name is the
 routing key (`hal0/<slot>`). `agent` is the capable default/fallback anchor,
 `brain` backs the dashboard's steward chat, and `memory` is the extraction
 slot for the memory engine. No chat model is chosen for you: only the small

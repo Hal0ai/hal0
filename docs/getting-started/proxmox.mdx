@@ -410,7 +410,9 @@ flm validate       # → "flm validate ok — NPU runtime reachable"
 hal0 doctor        # re-runs preflight; hardware probe records the NPU
 ```
 
-The seeded `flm` slot serves a chat model on port `8088`. The trio's
+The `flm` slot serves a chat model on port `8088`. A fresh install does not
+create that slot in this version, and there is no switch for it yet; a box
+upgraded from an earlier version keeps its `flm` slot. The trio's
 embedding and STT passengers are **opt-in** — enable them per slot (the
 `asr` / `embed` keys on the slot's `[npu]` table) once the chat slot is
 loaded. See [Voice (STT/TTS)](/docs/guides/voice-stt-tts/) and

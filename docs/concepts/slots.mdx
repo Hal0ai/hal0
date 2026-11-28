@@ -392,14 +392,16 @@ device. A profile's own `--spec-draft-*` flags override the bundle's values.
 
 hal0 ships ten **seed templates**: `flm`, `tts`, `rerank`, `memory`, `img`,
 `agent`, `brain`, `qwen3tts`, `coder`, and `embed`. A fresh install creates
-three of them as slots: `agent`, `brain` and `memory`. The others are created
-from their template when the job is switched on (a capability switch, or an
-image-model install), with a free port when the template's port is taken. An
-upgraded box keeps every slot it has.
+three of them as slots: `agent`, `brain` and `memory`. The embedding, reranking,
+speech and image slots are created when the job is switched on (a capability
+switch, or an image-model install), from the job's template where it has one,
+with a free port when the template's port is taken. The NPU `flm` slot is not
+created on a fresh install in this version, and there is no switch for it yet.
+An upgraded box keeps every slot it has.
 
-When the NPU runtime (FastFlowLM) is present, two more shadow slots are
-seeded: `flm-stt` and `flm-embed`, riding the NPU chat anchor's own `flm`
-slot. Seed names are reserved — you can't create a conflicting name, and
+On a box that has the NPU `flm` slot, two more shadow slots are seeded:
+`flm-stt` and `flm-embed`, riding that NPU chat anchor. Seed names are
+reserved — you can't create a conflicting name, and
 deleting a seeded slot requires `--force` (see
 [Manage slots](/docs/guides/manage-slots)). A slot you delete is not created
 again on its own; switching its job on again creates it.

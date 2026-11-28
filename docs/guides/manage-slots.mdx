@@ -435,8 +435,9 @@ Seeded slots (`flm`, `tts`, `rerank`, `memory`, `img`, `agent`, `brain`,
 `qwen3tts`, `coder`, `embed`) are protected: deleting one without
 `--force` is rejected. `hal0 slot delete <name> --force` (or
 `DELETE /api/slots/{name}?force=true`) deletes a seeded slot anyway, and an
-install or update does not create it again; switching its job on does.
-Clearing the slot's
+install or update does not create it again. For a slot that has a job switch
+(embeddings, reranking, speech, transcription, images), switching the job on
+creates it again. Clearing the slot's
 default model is the way to take it out of rotation without deleting it.
 </Aside>
 

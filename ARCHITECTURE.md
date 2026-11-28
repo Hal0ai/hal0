@@ -653,7 +653,8 @@ the whole `capabilities.toml`. The `group` is a field on the slot's
 selection, used purely for dashboard rollup. `embed` and `rerank` are two
 separate slots filed under the `embed` group; same for `stt`/`tts` under
 `voice`. The canonical chat roles are `agent` (default anchor) and
-`utility` (seeded helper); the pre-existing `chat`/`primary` names are
+`memory` (the memory extraction slot; a box upgraded from before the `memory`
+seed keeps its own `utility` slot); the pre-existing `chat`/`primary` names are
 retired (a lingering operator-custom `chat` slot is reachable by its own
 name via generalized `hal0/<slot>` resolution, not an alias). The only
 surviving back-compat alias in `SlotManager.SLOT_ALIASES` is
@@ -664,24 +665,27 @@ Migration note: the v0.1.x `capabilities.toml` shape
 path. The same TOML path is kept for back-compat but the canonical
 identity in code is the bare slot name.
 
-The seeded set is `SlotManager.SEEDED_SLOTS = (utility, embed, rerank,
-stt, tts, img, vision, agent)`; the NPU shadow slots `(stt-npu,
-embed-npu)` (`NPU_SEEDED_SLOTS`) seed only when the FastFlowLM `.deb` is
-installed.
+The seed vocabulary is `hal0.slots.routing.SEEDED_SLOTS`, the ten templates in
+`hal0.install.static_seeds.SEED_TEMPLATES`; a fresh install creates three of
+them (`FRESH_INSTALL_SEEDS`: `agent`, `brain`, `memory`), see
+[ADR-0064](./docs/adr/0064-fresh-installs-seed-three-slots.md). The NPU shadow
+slots `(flm-stt, flm-embed)` (`NPU_SEEDED_SLOTS`) exist only beside an `flm`
+NPU slot, which a fresh install does not create in this version.
 
 | Slot | type | UI group | Default at install |
 |---|---|---|---|
 | `agent` | `llm` | chat | seeded, empty (default chat anchor — GPU MoE) |
-| `utility` | `llm` | chat | seeded, empty (seeded helper role) |
-| `embed` | `embedding` | embed | seeded, empty |
-| `rerank` | `reranking` | embed | seeded, empty |
-| `stt` | `transcription` | voice | seeded, empty |
-| `tts` | `tts` | voice | seeded, empty (tts container) |
-| `img` | `image` | img | seeded, empty (ComfyUI container) |
-| `vision` | `llm` | chat | seeded, empty |
+| `utility` | `llm` | chat | not created on a fresh install; an upgraded box keeps the one it has |
+| `embed` | `embedding` | embed | not created at install; created when the job is switched on |
+| `rerank` | `reranking` | embed | not created at install; created when the job is switched on |
+| `stt` | `transcription` | voice | not created at install; built from the selection when the job is switched on |
+| `tts` | `tts` | voice | not created at install; created when the job is switched on (tts container) |
+| `img` | `image` | img | not created at install; created when an image model is installed (ComfyUI container) |
+| `vision` | `llm` | chat | no seed template exists |
 
-The seeded slots are a **catalog**, not a stack — every selection is empty
-(`enabled = false`, `model = ""`) until the user picks. The platform does
+A fresh install also creates `memory` (the memory extraction slot, which
+replaces `utility`) and `brain`. The slots are a **catalog**, not a stack —
+every selection is empty (`enabled = false`, `model = ""`) until the user picks. The platform does
 not prescribe a model stack at install.
 
 #### group

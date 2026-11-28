@@ -112,14 +112,16 @@ you bind one), `brain` (the small model behind the dashboard's built-in chat)
 and `memory` (below). The other slots are created when their job is switched on:
 embeddings, reranking, speech and transcription from the dashboard's Slots page
 or `hal0 capabilities set`, and image generation when you install an image
-model. Until then a request for one of those jobs is refused with
+model, including the starter image model the installer offers (see
+[Starter image model](#starter-image-model)). Until then a request for one of those jobs is refused with
 `503 capability_not_enabled`, and the message says how to turn it on. An
 existing install keeps every slot it has, and a slot you deleted is not
 created again unless you switch its job on.
 
-The installer does not yet create the image and voice slots itself during a
-Customize install, and it does not yet create the NPU slot. Switch those on
-afterwards as described above.
+The installer does not set up voice yet, so the speech and transcription slots
+wait until you switch them on. A fresh install does not create the NPU slot in
+this version, and there is no switch for it yet: it arrives with the NPU setup
+change. A box upgraded from an earlier version keeps its NPU slot.
 
 ## Memory slot on new installs
 
@@ -164,6 +166,11 @@ since it starts the image slot, and the installer prints how to do it later. A
 failed download is reported and the install carries on; install a model later
 with `hal0 comfyui models install <id>` or from the dashboard.
 
+This step is also what creates the `img` slot on a new install. When a model
+finishes downloading and none is selected yet, the slot is created and started;
+when the step is skipped or you answer nothing, no `img` slot exists until you
+install an image model later.
+
 An unattended install (no terminal, or `HAL0_NONINTERACTIVE=1`) downloads
 nothing unless `HAL0_IMAGE_MODELS` is set. Set it to `recommended` or a list of
 ids to opt in, and to `none` to skip even on a terminal; see
@@ -182,7 +189,7 @@ curl -fsSL https://hal0.dev/install.sh | sudo bash -s -- --no-start --models-dir
 | `--models-dir=PATH` | Absolute path where Hugging Face pulls land (same as `HAL0_MODELS_DIR`) |
 | `--summary-json=PATH` | Write a versioned, machine-readable install summary to `PATH` once the install finishes (see below) |
 | `--no-owui` | Skip Open WebUI (same as `HAL0_SKIP_OPENWEBUI=1`) |
-| `--no-comfyui` | Skip the starter image models (same as `HAL0_IMAGE_MODELS=none`); the `img` slot still exists, parked. Left on, the installer offers the starter image-model menu, whose default is none, so Enter downloads nothing |
+| `--no-comfyui` | Skip the starter image models (same as `HAL0_IMAGE_MODELS=none`); no `img` slot is created until you install an image model. Left on, the installer offers the starter image-model menu, whose default is none, so Enter downloads nothing |
 | `--no-hermes` | Skip the Hermes agent and the Operator Board that goes with it (same as `HAL0_SKIP_HERMES=1`) |
 | `--no-pi` | Skip the Pi agent (same as `HAL0_SKIP_PI=1`) |
 | `--no-agents` | Skip both agents; same as `--no-hermes --no-pi` |

@@ -101,8 +101,10 @@ flm validate       # → "flm validate ok — NPU runtime reachable"
 ```
 
 A single `flm serve` process backs the **NPU trio** — a chat model plus
-opt-in embedding and speech-to-text passengers on the seeded `flm` slot
-(port `8088`). On non-apt distros the NPU path is skipped and you install
+opt-in embedding and speech-to-text passengers on the `flm` slot (port `8088`).
+A fresh install does not create that slot in this version, and there is no
+switch for it yet; a box upgraded from an earlier version keeps its `flm` slot.
+On non-apt distros the NPU path is skipped and you install
 FastFlowLM manually; the GPU and CPU paths are unaffected. On a box with an
 NPU the dashboard adds **Slots → NPU**, which shows the FLM and GGML lanes with
 live activity. To run plain GGUF models on the NPU with the optional `xdna`
