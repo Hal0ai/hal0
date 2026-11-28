@@ -108,17 +108,20 @@ def test_default_path_never_brings_back_a_tombstoned_fresh_seed(tmp_path: Path) 
     assert read_seed_tombstones(slots_dir=dest) == frozenset()
 
 
-@pytest.mark.parametrize("name", ["embed", "tts"])
+@pytest.mark.parametrize("name", ["embed", "rerank"])
 def test_cpu_only_hardware_gets_cpu_device(tmp_path: Path, name: str) -> None:
     dest = tmp_path / "slots"
-    root = _root(tmp_path)
-    if name == "tts":
-        # The real tts seed ships cpu (kokoro); mirror that in the fake tree.
-        (root / "installer/etc-hal0/slots/tts.toml").write_text(
-            'name = "tts"\ndevice = "cpu"\n', encoding="utf-8"
-        )
-    ensure_seed_slot(name, installer_root=root, slots_dir=dest, hw=HardwareInfo(gpus=[]))
+    ensure_seed_slot(name, installer_root=_root(tmp_path), slots_dir=dest, hw=HardwareInfo(gpus=[]))
     assert _device(dest / f"{name}.toml") == "cpu"
+
+
+def test_non_llama_seed_keeps_its_template_device(tmp_path: Path) -> None:
+    root = _root(tmp_path)
+    tmpl = root / "installer/etc-hal0/slots/tts.toml"
+    tmpl.write_text('name = "tts"\ndevice = "cpu"\n', encoding="utf-8")
+    dest = tmp_path / "slots"
+    ensure_seed_slot("tts", installer_root=root, slots_dir=dest, hw=HardwareInfo(gpus=[]))
+    assert (dest / "tts.toml").read_bytes() == tmpl.read_bytes()
 
 
 def test_unknown_name_raises(tmp_path: Path) -> None:
@@ -139,3 +142,70 @@ def test_seed_static_slots_uses_the_same_copy_path(tmp_path: Path) -> None:
     seed_static_slots(installer_root=root, slots_dir=many, hw=hw, names=["memory"])
     assert (one / "memory.toml").read_bytes() == (many / "memory.toml").read_bytes()
     assert _device(one / "memory.toml") == "cpu"
+
+
+def test_file_created_before_publish_is_not_replaced(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import os
+
+    dest = tmp_path / "slots"
+    root = _root(tmp_path)
+    real_link = os.link
+
+    def racing_link(src: object, dst: object, *a: object, **k: object) -> None:
+        Path(str(dst)).write_bytes(b"winner\n")  # a concurrent creator got there first
+        real_link(src, dst, *a, **k)  # type: ignore[arg-type]
+
+    monkeypatch.setattr("hal0.install.static_seeds.os.link", racing_link)
+    result = ensure_seed_slot(
+        "embed", installer_root=root, slots_dir=dest, hw=HardwareInfo(gpus=[])
+    )
+    assert result is SeedResult.EXISTS
+    assert (dest / "embed.toml").read_bytes() == b"winner\n"
+    assert [p.name for p in dest.iterdir()] == ["embed.toml"]
+
+
+def test_published_file_already_carries_the_derived_device(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import os
+
+    dest = tmp_path / "slots"
+    seen: list[str] = []
+    real_link = os.link
+
+    def spying_link(src: object, dst: object, *a: object, **k: object) -> None:
+        seen.append(_device(Path(str(src))))
+        real_link(src, dst, *a, **k)  # type: ignore[arg-type]
+
+    monkeypatch.setattr("hal0.install.static_seeds.os.link", spying_link)
+    ensure_seed_slot(
+        "embed", installer_root=_root(tmp_path), slots_dir=dest, hw=HardwareInfo(gpus=[])
+    )
+    assert seen == ["cpu"]  # derived before publication, never the template's gpu-rocm
+    assert _device(dest / "embed.toml") == "cpu"
+
+
+def test_no_temp_file_left_after_success(tmp_path: Path) -> None:
+    dest = tmp_path / "slots"
+    ensure_seed_slot(
+        "embed", installer_root=_root(tmp_path), slots_dir=dest, hw=HardwareInfo(gpus=[])
+    )
+    assert [p.name for p in dest.iterdir()] == ["embed.toml"]
+
+
+def test_no_temp_file_left_after_derive_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dest = tmp_path / "slots"
+
+    def boom(*a: object, **k: object) -> None:
+        raise RuntimeError("derive failed")
+
+    monkeypatch.setattr("hal0.install.static_seeds.apply_derived_seed_devices", boom)
+    with pytest.raises(RuntimeError, match="derive failed"):
+        ensure_seed_slot(
+            "embed", installer_root=_root(tmp_path), slots_dir=dest, hw=HardwareInfo(gpus=[])
+        )
+    assert list(dest.iterdir()) == []

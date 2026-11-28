@@ -22,8 +22,10 @@ drift.
 from __future__ import annotations
 
 import enum
+import os
 import re
 import shutil
+import tempfile
 from collections.abc import Collection, Iterable
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -485,31 +487,49 @@ def ensure_seed_slot(
         from hal0.agents.hermes_provision import REPO_ROOT_FOR_INSTALLER
 
         installer_root = REPO_ROOT_FOR_INSTALLER
+    from hal0.slot_config import slot_write_lock
+
     dest_dir = slots_dir if slots_dir is not None else paths.slots_config_dir()
     dest = dest_dir / f"{name}.toml"
-    # "Already known" = the identity store tracks it (id-keyed, no <name>.toml)
-    # OR a name-keyed file still exists (pre-migration box).
-    if name in existing_names or dest.exists():
-        return SeedResult.EXISTS
-    tombstoned = name in read_seed_tombstones(slots_dir=dest_dir)
-    if tombstoned and not clear_tombstone:
-        return SeedResult.TOMBSTONED
     src = installer_root / "installer" / "etc-hal0" / "slots" / f"{name}.toml"
-    if not src.is_file():
-        log.warning("install.static_seed_missing", slot=name, src=str(src))
-        raise FileNotFoundError(str(src))
-    dest_dir.mkdir(parents=True, exist_ok=True)
-    shutil.copyfile(src, dest)
-    dest.chmod(0o644)
-    log.info("install.static_seed_applied", slot=name, dest=str(dest))
-    if tombstoned:
-        clear_seed_tombstone(name, slots_dir=dest_dir)
-    # #2023: the copy carries the reference platform's device verbatim; derive
-    # the one this host can load. #1868: clamp the window to the memory envelope.
-    # Only this freshly copied file is touched.
-    apply_derived_seed_devices([name], slots_dir=dest_dir, hw=hw)
-    apply_context_size_envelope([name], slots_dir=dest_dir, hw=hw)
-    return SeedResult.CREATED
+    # Check, build, publish and tombstone clear all happen under the cross-process
+    # slot-TOML lock (synchronous on purpose: never await while holding it).
+    with slot_write_lock():
+        # "Already known" = the identity store tracks it (id-keyed, no
+        # <name>.toml) OR a name-keyed file still exists (pre-migration box).
+        if name in existing_names or dest.exists():
+            return SeedResult.EXISTS
+        tombstoned = name in read_seed_tombstones(slots_dir=dest_dir)
+        if tombstoned and not clear_tombstone:
+            return SeedResult.TOMBSTONED
+        if not src.is_file():
+            log.warning("install.static_seed_missing", slot=name, src=str(src))
+            raise FileNotFoundError(str(src))
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        # Build the final content in a private hidden directory beside the
+        # destination (same filesystem, invisible to ``*.toml`` readers), then
+        # publish it with a hard link: the file appears under its final name only
+        # with its final content, and an existing file is never replaced.
+        staging = Path(tempfile.mkdtemp(prefix=".seed-", dir=dest_dir))
+        try:
+            staged = staging / f"{name}.toml"
+            shutil.copyfile(src, staged)
+            staged.chmod(0o644)
+            # #2023: the template carries the reference platform's device
+            # verbatim; derive the one this host can load. #1868: clamp the
+            # window to the memory envelope. Both act on the staged copy only.
+            apply_derived_seed_devices([name], slots_dir=staging, hw=hw)
+            apply_context_size_envelope([name], slots_dir=staging, hw=hw)
+            try:
+                os.link(staged, dest)
+            except FileExistsError:
+                return SeedResult.EXISTS
+        finally:
+            shutil.rmtree(staging, ignore_errors=True)
+        log.info("install.static_seed_applied", slot=name, dest=str(dest))
+        if tombstoned:
+            clear_seed_tombstone(name, slots_dir=dest_dir)
+        return SeedResult.CREATED
 
 
 # ── Seed tombstones — "the operator deleted this seed on purpose" ────────────
