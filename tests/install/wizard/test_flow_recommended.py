@@ -229,7 +229,7 @@ def test_a_ladder_with_sizes_gives_the_download_line_total_and_minutes(
     rows = {r.id: r for r in view(run(start(ladder_catalog, facts), "ENTER", "ENTER")).rows}
     assert rows["downloads"].detail == "Small (2 GB)"
     assert rows["total"].detail == "2 GB, about 3 min on a 100 Mbit/s line"
-    assert rows["model"].detail == "Small (picked for this box)"
+    assert rows["model"].detail == "Small, picked for this box"
     given: dict[str, object] = {"models": {"starter": "big-1"}}
     chosen_rows = view(run(start(ladder_catalog, facts, given=given), "ENTER", "ENTER")).rows
     rows = {r.id: r for r in chosen_rows}
@@ -338,3 +338,39 @@ def test_the_preset_folder_stays_in_the_list_after_picking_another_disk(
     values = [r.value for r in view(s).rows]
     assert values[0] == "/data/hal0/models"
     assert "/var/lib/hal0/models" in values
+
+
+def _model_line(catalog: Catalog, facts: Facts, starter: str | None) -> str:
+    given: dict[str, object] = {} if starter is None else {"models": {"starter": starter}}
+    rows = view(run(start(catalog, facts, given=given), "ENTER", "ENTER")).rows
+    return next(r for r in rows if r.id == "model").detail
+
+
+def test_review_model_line_for_none(ladder_catalog: Catalog, usable_facts: Facts) -> None:
+    assert _model_line(ladder_catalog, usable_facts, "none") == "none"
+
+
+def test_review_model_line_for_auto_with_an_empty_ladder(
+    catalog: Catalog, usable_facts: Facts
+) -> None:
+    assert _model_line(catalog, usable_facts, "auto") == "added after install"
+
+
+def test_review_model_line_for_auto_with_a_row_that_fits(
+    ladder_catalog: Catalog, usable_facts: Facts
+) -> None:
+    facts = Facts(**{**usable_facts.__dict__, "gpu_pool_gb": 32.0})
+    assert _model_line(ladder_catalog, facts, "auto") == "Small, picked for this box"
+
+
+def test_review_model_line_for_auto_with_no_row_that_fits(
+    ladder_catalog: Catalog, usable_facts: Facts
+) -> None:
+    facts = Facts(**{**usable_facts.__dict__, "gpu_pool_gb": None, "ram_gb": None})
+    assert _model_line(ladder_catalog, facts, "auto") == (
+        "picked for this box once hal0 has checked it"
+    )
+
+
+def test_review_model_line_for_a_model_id(ladder_catalog: Catalog, usable_facts: Facts) -> None:
+    assert _model_line(ladder_catalog, usable_facts, "big-1") == "Big"

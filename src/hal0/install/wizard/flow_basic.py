@@ -15,7 +15,9 @@ from .facts import Disk, Facts
 from .flow_model import (
     DEFAULT_HOST,
     DEFAULT_PORT,
+    SIZED_MODEL,
     Outcome,
+    Pick,
     Row,
     State,
     current_type,
@@ -268,13 +270,25 @@ def review_rows(s: State) -> tuple[Row, ...]:
             )
         )
     rows.append(make_row("folder", "Model folder", _folder_text(s, doc)))
-    model = "none" if pick is None else pick.label + (" (picked for this box)" if pick.auto else "")
-    rows.append(make_row("model", "Chat model", model))
+    rows.append(make_row("model", "Chat model", _model_text(s, doc, pick)))
     if s.facts.npu_device is True and any(c.id == _NPU_JOB for c in jobs):
         rows.append(make_row("npu", "NPU", "set up if it passes its check"))
     rows.extend(_access_rows(s, doc))
     rows.extend(make_row("warning", "Warning", w) for w in _skipped(s, doc) + _warnings(s, doc))
     return tuple(rows)
+
+
+def _model_text(s: State, doc: Document, pick: Pick | None) -> str:
+    """What the review says about the chat model, for each way it can be set."""
+    if pick is not None:
+        if pick.auto:
+            return f"{pick.label}, picked for this box"
+        if pick.label == SIZED_MODEL:
+            return "picked for this box once hal0 has checked it"
+        return pick.label
+    if maybe_value(s, doc, "starter_model") == "auto":
+        return "added after install"
+    return "none"
 
 
 def _folder_text(s: State, doc: Document) -> str:
