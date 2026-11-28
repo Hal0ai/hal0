@@ -1069,9 +1069,6 @@ class Dispatcher:
             raise not_enabled.error
 
         # ── Step 4: capability/path routing ──────────────────────────────
-        # A transcription request is not path-pinned below, so with no
-        # transcription slot it would end at the ``agent`` chat slot.
-        await self._refuse_absent_job(path, None, only="stt")
         try:  # TIER1 — narrow exception handling; log + re-raise typed errors
             slot_upstream = resolve_by_capability(
                 path,
@@ -1127,6 +1124,14 @@ class Dispatcher:
                 f"model {model_id!r}: legacy slot resolution raised {type(exc).__name__}",
                 details={"model": model_id, "path": path, "error": str(exc)},
             ) from exc
+
+        # A transcription request is not path-pinned above, so with no transcription
+        # slot it would end at the ``agent`` chat slot (or an embed slot, by its model
+        # name). Refuse it here, after the routes that can serve it: rule 5 sends a
+        # ``name:tag`` model (``whisper-v3:turbo``) to the ``flm`` slot, which transcribes
+        # natively, and that request must still get through.
+        if job_for_slot_name(_slot_name_of(slot_upstream) or "") != "npu":
+            await self._refuse_absent_job(path, None, only="stt")
 
         call = UpstreamCall(
             upstream_name=slot_upstream.name,

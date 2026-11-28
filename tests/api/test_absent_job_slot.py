@@ -83,9 +83,11 @@ class _Calls:
 
     def __init__(self) -> None:
         self.paths: list[str] = []
+        self.ports: list[int | None] = []
 
     def handler(self, request: httpx.Request) -> httpx.Response:
         self.paths.append(request.url.path)
+        self.ports.append(request.url.port)
         return httpx.Response(
             200,
             json={
@@ -173,6 +175,88 @@ def test_transcription_without_stt_slot_is_503_capability_not_enabled(
         data={"model": "whisper-1"},
     )
     _assert_refusal(response, "stt")
+
+
+def _register_ready_slot(client: TestClient, name: str, port: int) -> None:
+    """Register ``name`` as a live slot upstream on ``port`` and pin it READY."""
+    client.app.state.upstreams.upsert(
+        Upstream(
+            name=name,
+            kind="slot",
+            url=f"http://127.0.0.1:{port}/v1",
+            slot_name=name,
+            auth_style="none",
+        )
+    )
+    manager = client.app.state.dispatcher._slot_manager
+    manager._states[manager._key(name)] = SlotStateRecord(
+        name=name,
+        state=SlotState.READY,
+        model_id="m",
+        port=0,
+        updated_at=0.0,
+        message="pinned by test",
+        extra={},
+    )
+
+
+def _transcribe(client: TestClient, model: str) -> Any:
+    return client.post(
+        "/v1/audio/transcriptions",
+        files={"file": ("a.wav", b"RIFF0000WAVE", "audio/wav")},
+        data={"model": model},
+    )
+
+
+def test_flm_tag_model_transcription_still_reaches_the_flm_slot(
+    three_slot_client: tuple[TestClient, _Calls], tmp_hal0_home: str
+) -> None:
+    """A box with an ``flm`` slot but no ``stt``/transcription slot: ``name:tag`` goes to flm.
+
+    FLM transcribes natively; the dispatcher's ``name:tag`` rule sends the model there, so
+    the "not set up" refusal must not run ahead of it.
+    """
+    client, calls = three_slot_client
+    shutil.copy(_SEEDS / "flm.toml", _slots_dir(tmp_hal0_home) / "flm.toml")
+    _register_ready_slot(client, "flm", 8098)
+    response = _transcribe(client, "whisper-v3:turbo")
+    assert response.status_code == 200, response.text
+    assert calls.paths == ["/v1/audio/transcriptions"]
+    assert calls.ports == [8098]
+
+
+def test_flm_tag_model_transcription_on_a_three_slot_box_is_refused(
+    three_slot_client: tuple[TestClient, _Calls],
+) -> None:
+    """The same request with no ``flm`` slot is the 503, and ``agent`` is never called."""
+    client, calls = three_slot_client
+    _assert_refusal(_transcribe(client, "whisper-v3:turbo"), "stt")
+    assert calls.paths == []
+
+
+def test_transcription_slot_keeps_its_path(
+    three_slot_client: tuple[TestClient, _Calls], tmp_hal0_home: str
+) -> None:
+    """With a transcription-typed slot the request is routed to it, as before."""
+    client, calls = three_slot_client
+    (_slots_dir(tmp_hal0_home) / "stt-x.toml").write_text(
+        'name = "stt-x"\nport = 8097\ntype = "transcription"\nruntime = "container"\n'
+    )
+    _register_ready_slot(client, "stt-x", 8097)
+    response = _transcribe(client, "stt-x")
+    assert response.status_code == 200, response.text
+    assert calls.ports == [8097]
+
+
+def test_embed_named_transcription_model_does_not_reach_an_embed_slot(
+    three_slot_client: tuple[TestClient, _Calls], tmp_hal0_home: str
+) -> None:
+    """No transcription slot: a model named ``embed`` is not sent audio-side to the embed slot."""
+    client, calls = three_slot_client
+    shutil.copy(_SEEDS / "embed.toml", _slots_dir(tmp_hal0_home) / "embed.toml")
+    _register_ready_slot(client, "embed", 8096)
+    _assert_refusal(_transcribe(client, "my-embed-model"), "stt")
+    assert calls.paths == []
 
 
 def test_image_generation_without_img_slot_is_503_capability_not_enabled(
