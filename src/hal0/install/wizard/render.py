@@ -17,7 +17,7 @@ RESET = "\x1b[0m"
 _ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 _Piece = tuple[str, str]  # (text, style code or "")
 _Line = list[_Piece]
-_Segment = tuple[str, str, str]  # (text, style, separator before it)
+_Segment = tuple[str, str, str, bool]  # (text, style, separator before it, start a new line)
 
 
 def strip_ansi(text: str) -> str:
@@ -44,12 +44,12 @@ def _flow(first: _Line, rest: str, segments: list[_Segment], avail: int) -> list
 
     # A line holds content once anything beyond its prefix has been put on it.
     filled = False
-    for text, style, sep in segments:
+    for text, style, sep, apart in segments:
         if not text:
             continue
         words = text.split(" ")
         spacer = sep if filled else ""
-        if _length(lines[-1]) + len(spacer) + len(text) <= avail:
+        if not apart and _length(lines[-1]) + len(spacer) + len(text) <= avail:
             lines[-1].append((spacer + text, style))
             filled = True
             continue
@@ -76,7 +76,7 @@ def _flow(first: _Line, rest: str, segments: list[_Segment], avail: int) -> list
 def _wrap(text: str, avail: int, indent: str = "", style: str = "") -> list[_Line]:
     out: list[_Line] = []
     for paragraph in text.split("\n"):
-        out.extend(_flow([(indent, "")], indent, [(paragraph, style, " ")], avail))
+        out.extend(_flow([(indent, "")], indent, [(paragraph, style, " ", False)], avail))
     return out
 
 
@@ -90,22 +90,65 @@ def _mark(row: Row, highlighted: bool) -> str:
     return ""
 
 
-def _row_lines(row: Row, lead: str, highlighted: bool, avail: int, plain: bool) -> list[_Line]:
-    mark = _mark(row, highlighted)
-    if highlighted and not plain:
-        row_style = ACCENT
-    elif row.state == "unavailable":
-        row_style = DIM
-    else:
-        row_style = ""
-    head = f"{lead}{mark} " if mark else lead
-    indent = " " * (len(lead) + (4 if mark else 2))
+def _segments(row: Row, style: str, detail_under: bool, note_under: bool) -> list[_Segment]:
     if row.kind == "text":
-        segments: list[_Segment] = [(f"{row.label}:", row_style, ""), (row.detail, row_style, " ")]
+        label, sep = f"{row.label}:", " "
     else:
-        segments = [(row.label, row_style, ""), (row.detail, row_style, "  ")]
-    segments.append((row.note, DIM, "  "))
-    return _flow([(head, row_style)], indent, segments, avail)
+        label, sep = row.label, "  "
+    return [
+        (label, style, "", False),
+        (row.detail, style, sep, detail_under),
+        (row.note, DIM, "  ", note_under),
+    ]
+
+
+def _row_style(row: Row, highlighted: bool, plain: bool) -> str:
+    if highlighted and not plain:
+        return ACCENT
+    return DIM if row.state == "unavailable" else ""
+
+
+def _head(row: Row, lead: str, highlighted: bool) -> tuple[str, str]:
+    """The text before the label, and the indent that continuation lines get."""
+    mark = _mark(row, highlighted)
+    head = f"{lead}{mark} " if mark else lead
+    return head, " " * (len(lead) + (4 if mark else 2))
+
+
+def _placement(
+    rows: tuple[Row, ...], leads: list[str], cursor: int, avail: int, plain: bool
+) -> tuple[bool, bool]:
+    """Whether details, and separately notes, go under the label on this screen.
+
+    One row that does not fit beside its label moves every row's detail (or note),
+    so the details of a screen all sit in the same place."""
+    detail_under = note_under = False
+    for index, row in enumerate(rows):
+        head, indent = _head(row, leads[index], index == cursor)
+        style = _row_style(row, index == cursor, plain)
+        first: _Line = [(head, style)]
+        if row.detail:
+            beside = _flow(first, indent, _segments(row, style, False, False)[:2], avail)
+            detail_under = detail_under or len(beside) > 1
+    for index, row in enumerate(rows):
+        if not row.note:
+            continue
+        head, indent = _head(row, leads[index], index == cursor)
+        style = _row_style(row, index == cursor, plain)
+        without = _segments(row, style, detail_under, False)[:2]
+        with_note = _segments(row, style, detail_under, False)
+        first = [(head, style)]
+        if len(_flow(first, indent, with_note, avail)) > len(_flow(first, indent, without, avail)):
+            note_under = True
+    return detail_under, note_under
+
+
+def _row_lines(
+    row: Row, lead: str, highlighted: bool, avail: int, plain: bool, under: tuple[bool, bool]
+) -> list[_Line]:
+    head, indent = _head(row, lead, highlighted)
+    style = _row_style(row, highlighted, plain)
+    return _flow([(head, style)], indent, _segments(row, style, *under), avail)
 
 
 def _title_lines(view: View, avail: int) -> list[_Line]:
@@ -127,6 +170,28 @@ def _field_lines(text: str, avail: int) -> list[_Line]:
     return [[(indent + part, "")] for part in _chunks(typed, size)]
 
 
+_EXTRA_KEYS = ("b back", "? explain", "s save a copy", "q quit")
+
+
+def _plain_hint(view: View) -> str:
+    """What to type on a terminal with no cursor keys, from the shape of the screen."""
+    kinds = {row.kind for row in view.rows}
+    if view.editing is not None:
+        if "nothing is shown" in view.hint:
+            return "Type or paste the token and press Enter (nothing is shown). Enter alone skips."
+        return "Type the value and press Enter. Enter alone cancels."
+    if "choice" in kinds:
+        text = "Type a number and press Enter to choose. Enter alone keeps the marked one."
+    elif kinds & {"check", "text"}:
+        text = "Type a number and press Enter to change that line. Enter alone goes on."
+    elif "Up/Down" not in view.hint:
+        return view.hint
+    else:
+        text = "Press Enter to go on."
+    extra = [key for key in _EXTRA_KEYS if key in view.hint]
+    return f"{text} Also: {', '.join(extra)}." if extra else text
+
+
 def render(view: View, *, width: int, plain: bool, color: bool) -> list[str]:
     """The screen as lines no wider than `width - 1` visible characters."""
     avail = max(width - 1, 1)
@@ -138,23 +203,24 @@ def render(view: View, *, width: int, plain: bool, color: bool) -> list[str]:
         lines.extend(_wrap(text, avail, " "))
     lines.append([])
     number = 0
+    leads: list[str] = []
     for index, row in enumerate(view.rows):
-        highlighted = index == view.cursor
-        if plain:
-            if row.kind == "info":
-                lead = " " * 5
-            else:
-                number += 1
-                lead = f"{number:>3}) "
+        if plain and row.kind == "info":
+            leads.append(" " * 5)
+        elif plain:
+            number += 1
+            leads.append(f"{number:>3}) ")
         else:
-            lead = " > " if highlighted and row.kind != "info" else "   "
-        lines.extend(_row_lines(row, lead, highlighted, avail, plain))
+            leads.append(" > " if index == view.cursor and row.kind != "info" else "   ")
+    under = _placement(view.rows, leads, view.cursor, avail, plain)
+    for index, row in enumerate(view.rows):
+        lines.extend(_row_lines(row, leads[index], index == view.cursor, avail, plain, under))
     if view.error:
         lines.extend(_wrap(view.error, avail, "   ", ACCENT))
     if view.editing is not None:
         lines.extend(_field_lines(view.editing, avail))
     lines.append([])
-    lines.extend(_wrap(view.hint, avail, " "))
+    lines.extend(_wrap(_plain_hint(view) if plain else view.hint, avail, " "))
     return [_paint(line, avail, colored) for line in lines]
 
 

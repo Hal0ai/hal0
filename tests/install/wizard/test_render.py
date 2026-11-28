@@ -48,6 +48,13 @@ def folder_error_view(catalog: Catalog, two_disk_facts: Facts) -> View:
 
 
 @pytest.fixture
+def token_view(ladder_catalog: Catalog, usable_facts: Facts) -> View:
+    facts = replace(usable_facts, gpu_pool_gb=96.0)
+    s = run(to_jobs(ladder_catalog, facts), "ENTER", "DOWN", "DOWN", "ENTER", *"hf_abc")
+    return view(s)
+
+
+@pytest.fixture
 def all_views(
     catalog: Catalog,
     ladder_catalog: Catalog,
@@ -58,6 +65,7 @@ def all_views(
     npu_facts: Facts,
     folder_error_view: View,
     fixed_jobs_view: View,
+    token_view: View,
 ) -> list[View]:
     views = [view(start(catalog, consent_facts)), view(start(catalog, stop_facts))]
     pool = replace(usable_facts, gpu_pool_gb=32.0)
@@ -69,7 +77,7 @@ def all_views(
             s = press(s, "ENTER")
     quick = run(start(catalog, two_disk_facts), "ENTER")
     views += [view(start(catalog, usable_facts)), view(quick), view(press(quick, "ENTER"))]
-    views += [view(run(quick, "ENTER", "s")), folder_error_view, fixed_jobs_view]
+    views += [view(run(quick, "ENTER", "s")), folder_error_view, fixed_jobs_view, token_view]
     return views
 
 
@@ -163,3 +171,80 @@ def test_a_note_that_does_not_fit_moves_under_the_label(jobs_view: View) -> None
     index = next(i for i, x in enumerate(lines) if "Use the NPU" in x)
     assert "no NPU was found" not in lines[index]
     assert "no NPU was found" in " ".join(x.strip() for x in lines[index:])
+
+
+def _lines(v: View, width: int, plain: bool = False) -> list[str]:
+    return render(v, width=width, plain=plain, color=False)
+
+
+def test_setup_type_details_all_sit_under_their_labels_at_80(type_view: View) -> None:
+    lines = _lines(type_view, 80)
+    for row in type_view.rows:
+        index = next(i for i, x in enumerate(lines) if row.label in x)
+        assert row.detail not in lines[index]
+        assert lines[index + 1].strip() == row.detail
+
+
+def test_setup_type_details_all_sit_beside_their_labels_at_200(type_view: View) -> None:
+    lines = _lines(type_view, 200)
+    for row in type_view.rows:
+        assert any(row.label in x and row.detail in x for x in lines)
+
+
+def test_notes_move_together_on_a_screen(jobs_view: View) -> None:
+    assert any("Use the NPU  no NPU was found" in x for x in _lines(jobs_view, 80))
+    narrow = _lines(jobs_view, 30)
+    index = next(i for i, x in enumerate(narrow) if "Use the NPU" in x)
+    assert "no NPU was found" not in narrow[index]
+
+
+def test_plain_hint_for_choice_rows(type_view: View) -> None:
+    assert _lines(type_view, 200, plain=True)[-1].strip() == (
+        "Type a number and press Enter to choose. Enter alone keeps the marked one."
+        " Also: ? explain, q quit."
+    )
+
+
+def test_plain_hint_for_check_rows(jobs_view: View) -> None:
+    assert _lines(jobs_view, 200, plain=True)[-1].strip() == (
+        "Type a number and press Enter to change that line. Enter alone goes on."
+        " Also: b back, ? explain, q quit."
+    )
+
+
+def test_plain_hint_for_text_rows(catalog: Catalog, usable_facts: Facts) -> None:
+    storage = view(run(to_jobs(catalog, usable_facts), "ENTER", "ENTER"))
+    assert (
+        _lines(storage, 200, plain=True)[-1]
+        .strip()
+        .startswith("Type a number and press Enter to change that line.")
+    )
+
+
+def test_plain_hint_for_an_open_field(folder_error_view: View) -> None:
+    assert _lines(folder_error_view, 200, plain=True)[-1].strip() == (
+        "Type the value and press Enter. Enter alone cancels."
+    )
+
+
+def test_plain_hint_for_the_token_field(token_view: View) -> None:
+    assert _lines(token_view, 200, plain=True)[-1].strip() == (
+        "Type or paste the token and press Enter (nothing is shown). Enter alone skips."
+    )
+
+
+def test_plain_hint_for_an_info_only_review(catalog: Catalog, usable_facts: Facts) -> None:
+    review = view(run(start(catalog, usable_facts), "ENTER", "ENTER"))
+    assert _lines(review, 200, plain=True)[-1].strip() == review.hint
+
+
+def test_plain_hint_is_wrapped_and_last(type_view: View) -> None:
+    lines = _lines(type_view, 40, plain=True)
+    assert lines[-1].strip().endswith("q quit.")
+    assert all(len(x) <= 39 for x in lines)
+
+
+def test_no_plain_form_output_says_up_down(all_views: list[View]) -> None:
+    for v in all_views:
+        for width in (20, 60, 200):
+            assert not any("Up/Down" in x for x in _lines(v, width, plain=True))
