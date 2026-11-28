@@ -81,6 +81,8 @@ echo "write_rc=$?"
         "STUB_FAIL_LOG": str(tmp_path / "fail.log"),
     }
     full_env.update(env or {})
+    full_env.setdefault("HAL0_FACTS_UNIT_DIR", str(tmp_path / "units"))
+    full_env.setdefault("HAL0_FACTS_HERMES_BIN", str(tmp_path / "hermes-venv" / "hermes"))
     proc = subprocess.run(
         ["bash", "-c", script], capture_output=True, text=True, env=full_env, check=False
     )
@@ -108,6 +110,7 @@ def test_full_amd_box(tmp_path: Path) -> None:
         "gpu": {"outcome": "usable", "reason": None, "vendor": "amd", "pool_gb": 96.0},
         "npu": {"device": True, "memlock_ok": True, "flm_build": True},
         "install": {"state": "fresh", "version": None},
+        "hermes": {"installed": False},
         "memory_python": True,
     }
 
@@ -241,6 +244,7 @@ def test_writer_needs_no_python(tmp_path: Path) -> None:
         "gpu": {"outcome": "usable", "reason": None, "vendor": None, "pool_gb": None},
         "npu": {"device": True, "memlock_ok": True, "flm_build": True},
         "install": {"state": "fresh", "version": None},
+        "hermes": {"installed": False},
         "memory_python": True,
     }
 
@@ -345,3 +349,64 @@ def test_write_replaces_a_symlink_to_a_directory_at_the_target_name(tmp_path: Pa
     assert json.loads(out.read_text())["version"] == 1
     assert list(victim.iterdir()) == []
     assert not any(p.name.startswith(".facts.") for p in target_dir.iterdir())
+
+
+def _hermes_box(tmp_path: Path, *, unit: bool, venv: bool) -> None:
+    if unit:
+        (tmp_path / "units").mkdir(exist_ok=True)
+        (tmp_path / "units" / "hal0-agent@.service").write_text("")
+    if venv:
+        (tmp_path / "hermes-venv").mkdir(exist_ok=True)
+        exe = tmp_path / "hermes-venv" / "hermes"
+        exe.write_text("#!/bin/sh\n")
+        exe.chmod(0o755)
+
+
+@pytest.mark.parametrize(
+    ("unit", "venv", "installed"),
+    [(True, True, True), (True, False, False), (False, True, False), (False, False, False)],
+)
+def test_hermes_installed_needs_the_unit_file_and_an_executable_venv(
+    tmp_path: Path, unit: bool, venv: bool, installed: bool
+) -> None:
+    _hermes_box(tmp_path, unit=unit, venv=venv)
+    facts = _facts(tmp_path)
+    assert facts["hermes"] == {"installed": installed}
+    assert facts["version"] == 1
+    assert set(facts) == {
+        "version", "distro", "container", "podman", "gpu", "npu", "install", "hermes",
+        "memory_python",
+    }  # fmt: skip
+    assert facts["memory_python"] is True and facts["container"] == "none"
+
+
+def test_a_venv_binary_that_is_not_executable_does_not_count(tmp_path: Path) -> None:
+    _hermes_box(tmp_path, unit=True, venv=True)
+    (tmp_path / "hermes-venv" / "hermes").chmod(0o644)
+    assert _facts(tmp_path)["hermes"] == {"installed": False}
+
+
+def test_hermes_defaults_match_the_hermes_step_of_install_sh() -> None:
+    # The Hermes step of install.sh tests the same venv path and the unit file
+    # ${UNIT_DIR}/hal0-agent@.service; the two must not drift apart.
+    root = FACTS_SH.parents[2]
+    install = (root / "installer" / "install.sh").read_text(encoding="utf-8")
+    facts = FACTS_SH.read_text(encoding="utf-8")
+    venv = "/var/lib/hal0/venvs/hermes/bin/hermes"
+    assert f'[[ -x "{venv}" ]] && _hermes_was_provisioned=1' in install
+    assert f"HAL0_FACTS_HERMES_BIN:-{venv}" in facts
+    assert 'AGENT_UNIT_DST="${UNIT_DIR}/hal0-agent@.service"' in install
+    assert "${UNIT_DIR}/hal0-agent@.service" in facts
+
+
+def test_hermes_fact_reads_unit_dir_from_the_installer_variable(tmp_path: Path) -> None:
+    # install.sh sets UNIT_DIR (prefixed under --dev); with no seam variable the
+    # fact follows it.
+    _hermes_box(tmp_path, unit=True, venv=True)
+    proc, out = _run(
+        tmp_path,
+        stubs=f'UNIT_DIR="{tmp_path / "units"}"; unset HAL0_FACTS_UNIT_DIR',
+        env={"HAL0_FACTS_UNIT_DIR": ""},
+    )
+    assert "write_rc=0" in proc.stdout, proc.stdout + proc.stderr
+    assert json.loads(out.read_text())["hermes"] == {"installed": True}

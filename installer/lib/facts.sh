@@ -9,7 +9,7 @@
 #          (HAL0_GPU_GATE=1) and passes its return code to hal0_facts_gather.
 #          Plain bash and coreutils only: this runs before any Python exists.
 # Provides: hal0_json_string, hal0_gpu_pool_gb, hal0_install_state,
-#          hal0_facts_gather, hal0_facts_write.
+#          hal0_hermes_installed, hal0_facts_gather, hal0_facts_write.
 # Safety:  Every call here only reads. Nothing installs a package, pulls an
 #          image, or changes a device or group. The functions of preflight.sh
 #          that can do so (resolve_*_python, preflight_venv, preflight_git,
@@ -21,6 +21,9 @@
 #          In --dev mode the installer keeps its tree under a prefix and has no
 #          `current` link, so the CALLER MUST SET BOTH HAL0_FACTS_VAR_DIR and
 #          HAL0_FACTS_FHS_ROOT there; the defaults look at the real system.
+#          HAL0_FACTS_UNIT_DIR (default ${UNIT_DIR:-/etc/systemd/system}, where
+#          install.sh keeps its units) and HAL0_FACTS_HERMES_BIN (default
+#          /var/lib/hal0/venvs/hermes/bin/hermes) point the assistant fact at a tree.
 
 # Print VALUE as a JSON string literal. Only printable ASCII survives (every
 # byte outside 040-176 is dropped, so the output is always valid UTF-8), then
@@ -68,6 +71,17 @@ hal0_install_state() {
     else
         printf 'fresh\n'
     fi
+}
+
+# Is the assistant (Hermes) installed on this box? True when the agent unit file
+# exists AND the venv's `hermes` is executable: the test the Hermes step of
+# install.sh makes (the unit file AGENT_UNIT_DST=${UNIT_DIR}/hal0-agent@.service
+# and the executable /var/lib/hal0/venvs/hermes/bin/hermes). A test in
+# tests/installer/test_facts_writer.py keeps the two paths equal.
+hal0_hermes_installed() {
+    local unit_dir="${HAL0_FACTS_UNIT_DIR:-${UNIT_DIR:-/etc/systemd/system}}"
+    local bin="${HAL0_FACTS_HERMES_BIN:-/var/lib/hal0/venvs/hermes/bin/hermes}"
+    [[ -f "${unit_dir}/hal0-agent@.service" && -x "${bin}" ]]
 }
 
 # Contents of current/VERSION (first line), or nothing.
@@ -144,6 +158,9 @@ hal0_facts_gather() {
     FACT_INSTALL_VERSION=""
     [[ "${FACT_INSTALL_STATE}" == upgrade ]] && FACT_INSTALL_VERSION="$(_hal0_install_version)"
 
+    FACT_HERMES_INSTALLED=false
+    hal0_hermes_installed && FACT_HERMES_INSTALLED=true
+
     FACT_MEMORY_PYTHON=false
     # Detection only: the wrapper never installs; a skip request must not read as "usable".
     (HAL0_SKIP_HINDSIGHT=0 preflight_hindsight_python) >/dev/null 2>&1 && FACT_MEMORY_PYTHON=true
@@ -199,6 +216,7 @@ hal0_facts_write() {
         printf '  "install": {"state": "%s", "version": %s},\n' \
             "${FACT_INSTALL_STATE:-fresh}" \
             "$(_hal0_facts_str_or_null "${FACT_INSTALL_VERSION:-}")"
+        printf '  "hermes": {"installed": %s},\n' "${FACT_HERMES_INSTALLED:-false}"
         printf '  "memory_python": %s\n' "${FACT_MEMORY_PYTHON:-false}"
         printf '}\n'
     } > "${tmp}" || { rm -f "${tmp}"; return 1; }
