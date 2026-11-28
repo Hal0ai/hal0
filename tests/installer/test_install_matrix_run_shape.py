@@ -43,6 +43,12 @@ case "$cmd" in
   "pvesh get"*)
     echo '[]'; exit 0 ;;
   "if test -e /etc/pve/lxc/"*)
+    # FAKE_PRESENT_AFTER=N: someone else's guest appears after N presence reads.
+    if [[ -n "${FAKE_PRESENT_AFTER:-}" ]]; then
+      n=$(cat "$FAKE_STATE/presence-reads" 2>/dev/null || echo 0); n=$((n + 1))
+      echo "$n" > "$FAKE_STATE/presence-reads"
+      [[ "$n" -le "$FAKE_PRESENT_AFTER" ]] || touch "$FAKE_STATE/present"
+    fi
     if [[ -e "$FAKE_STATE/present" ]]; then echo present; else echo absent; fi
     exit 0 ;;
   "bash -s -- gpu"*)
@@ -51,9 +57,13 @@ case "$cmd" in
     [[ -e "$FAKE_STATE/present" ]] || exit 2
     vm="${cmd#pct config }"
     printf 'hostname: hal0-mx-%s\ntags: hal0-matrix\ncores: 8\n' "${vm%% *}"
+    [[ ! -s "$FAKE_STATE/description" ]] || printf 'description: %s\n' "$(cat "$FAKE_STATE/description")"
     exit 0 ;;
   "pct create "*)
     [[ -z "${FAKE_CREATE_FAILS:-}" ]] || exit 1
+    # The description this run asked for, as `pct config` would show it.
+    d="${cmd#*--description }"; d="${d%% --*}"; d="${d//\\/}"
+    [[ "$cmd" == *"--description "* ]] && printf '%s' "$d" > "$FAKE_STATE/description"
     touch "$FAKE_STATE/present"; exit 0 ;;
   "pct start "*)
     exit 0 ;;
@@ -188,6 +198,27 @@ def test_refuses_a_vmid_that_already_exists(host):
     r = host.run("u2404-cpu", "--vmid", "172", "--out", str(host.out))
     assert r.returncode == 2
     assert not any("pct create" in c or "pct destroy" in c for c in host.calls())
+
+
+def test_a_refused_create_never_destroys_the_guest_it_found(host):
+    """Another run's guest appears at the VMID after this run's pre-check. The
+    create refuses; cleanup must leave that guest alone (it carries the tag and
+    the hostname, but not this run's nonce, and this run never created it)."""
+    r = host.run("u2404-cpu", "--vmid", "172", "--out", str(host.out), FAKE_PRESENT_AFTER="1")
+    assert r.returncode == 1, r.stderr
+    calls = host.calls()
+    assert not any("pct create" in c for c in calls)
+    assert not any("pct destroy" in c for c in calls)
+    assert "LEFT BEHIND" not in r.stderr
+    assert (host.state / "present").exists()
+
+
+def test_the_guest_this_run_created_carries_its_nonce(host):
+    r = host.run("u2404-cpu", "--vmid", "172", "--out", str(host.out))
+    assert r.returncode == 0, r.stderr
+    create = [c for c in host.calls() if "pct create" in c][0]
+    m = re.search(r"--description hal0-matrix\\ run\\ ([0-9a-f]{16})(?: |$)", create)
+    assert m, create
 
 
 def test_refuses_a_vmid_outside_the_range(host):

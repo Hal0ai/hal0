@@ -118,6 +118,12 @@ if [[ -n "$SHAPE_ANSWERS" ]]; then
   ANSWERS_FILE="${HERE}/answers/${SHAPE_ANSWERS}"
 fi
 
+# This run's nonce: 16 hex characters from the kernel, written into the
+# guest's description so cleanup destroys only the guest this run created.
+NONCE="$(head -c 8 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+[[ "$NONCE" =~ ^[0-9a-f]{16}$ ]] || die2 "could not generate a run nonce"
+CT_NONCE="$NONCE"
+
 # ── dry run: decided once, here ──────────────────────────────────────────────
 if [[ "$DRY_RUN" == "1" ]]; then
   exec 9>&1
@@ -138,7 +144,7 @@ if [[ "$DRY_RUN" == "1" ]]; then
       "bash -s -- gpu"*) printf 'dev /dev/dri/renderD128\nmajor 226\n' ;;
       "pct config "*)
         vm="${cmd#pct config }"
-        printf 'hostname: hal0-mx-%s\ntags: hal0-matrix\n' "${vm%% *}"
+        printf 'hostname: hal0-mx-%s\ntags: hal0-matrix\ndescription: hal0-matrix run %s\n' "${vm%% *}" "$NONCE"
         ;;
       *) ;;
     esac
@@ -151,7 +157,7 @@ plan() { [[ "$DRY_RUN" != "1" ]] || printf '[dry-run] %s\n' "$*" >&9; }
 ART=""             # artifact directory (the real --out, or scratch on a dry run)
 SCRATCH=""         # dry-run artifact directory, removed on exit
 TREE_TAR=""        # packed local tree, removed on exit
-CT_MAYBE=0         # set just before ct_create: the container may exist
+CT_MAYBE=0         # set once ct_create got as far as running pct create
 GUEST_UP=0         # ct_start succeeded
 INSTALL_RC=""      # the install's exit status, once known
 INTERRUPTED=0      # signal number that stopped the run
@@ -311,7 +317,7 @@ cleanup() {
       fi
       if [[ "$KEEP" == "1" ]]; then
         log "--keep: container ${VMID} left in place; destroy it with: ssh ${PVE_ALIAS} pct destroy ${VMID} --force --purge"
-      elif ct_destroy "$VMID"; then
+      elif ct_destroy "$VMID" "$NONCE"; then
         log "destroyed container ${VMID}"
       else
         printf 'LEFT BEHIND: %s (destroy it with: ssh %s pct destroy %s --force --purge)\n' \
@@ -383,9 +389,13 @@ if [[ -n "$TREE_DIR" ]]; then
 fi
 
 # ── step 5: create, start, wait for the network ──────────────────────────────
-CT_MAYBE=1
+create_rc=0
 ct_create "$VMID" "$VOLID" "$SHAPE_UNPRIVILEGED" "$SHAPE_CORES" "$SHAPE_MEMORY_MB" "$SHAPE_DISK_GB" \
-  ${DEVS[@]+"${DEVS[@]}"} || { log "could not create container ${VMID}"; exit 1; }
+  ${DEVS[@]+"${DEVS[@]}"} || create_rc=$?
+# Only a run that got as far as `pct create` may clean anything up; a refusal
+# (status 90) created nothing, and what is at that VMID is not ours.
+[[ "$create_rc" == "$_CT_REFUSED" ]] || CT_MAYBE=1
+[[ "$create_rc" == "0" ]] || { log "could not create container ${VMID}"; exit 1; }
 if [[ ${#MAJORS[@]} -gt 0 ]]; then
   ct_apply_device_rules "$VMID" "$SHAPE_UNPRIVILEGED" "${MAJORS[@]}" || { log "could not apply device rules"; exit 1; }
 fi

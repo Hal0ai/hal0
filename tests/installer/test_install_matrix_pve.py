@@ -521,7 +521,7 @@ def test_create_uses_bridge_env(fake):
 def test_create_refuses_bad_arguments(fake, args):
     fake.rule("pvesm status --content rootdir", STORAGE)
     r = fake.run(f"ct_create {args}")
-    assert r.returncode == 1
+    assert r.returncode == 90  # refused: nothing was created
     assert [c for c in fake.calls() if "pct create" in c] == []
 
 
@@ -529,8 +529,77 @@ def test_create_refuses_an_existing_vmid(fake):
     fake.rule("pvesm status --content rootdir", STORAGE)
     fake.rule("test -e /etc/pve/lxc/172.conf", "present\n")
     r = fake.run("ct_create 172 local:vztmpl/x.tar.zst 0 4 8192 40")
-    assert r.returncode == 1
+    assert r.returncode == 90  # refused: nothing was created
     assert [c for c in fake.calls() if "pct create" in c] == []
+
+
+def test_create_refuses_when_presence_is_unknown(fake):
+    fake.rule("pvesm status --content rootdir", STORAGE)
+    fake.rule("test -e /etc/pve/lxc/172.conf", "", 255)
+    r = fake.run("ct_create 172 local:vztmpl/x.tar.zst 0 4 8192 40")
+    assert r.returncode == 90
+    assert [c for c in fake.calls() if "pct create" in c] == []
+
+
+def test_create_writes_the_run_nonce_into_the_description(fake):
+    fake.rule("pvesm status --content rootdir", STORAGE)
+    fake.rule("test -e /etc/pve/lxc/172.conf", "absent\n")
+    fake.rule("pct create", "")
+    r = fake.run(
+        "CT_NONCE=0123456789abcdef; "
+        "ct_create 172 local:vztmpl/x.tar.zst 0 4 8192 40"
+    )
+    assert r.returncode == 0, r.stderr
+    call = [c for c in fake.calls() if "pct create" in c][-1]
+    tokens = shlex.split(call)
+    assert tokens[tokens.index("--description") + 1] == "hal0-matrix run 0123456789abcdef"
+
+
+def test_create_refuses_a_malformed_nonce(fake):
+    r = fake.run("CT_NONCE='x; id'; ct_create 172 local:vztmpl/x.tar.zst 0 4 8192 40")
+    assert r.returncode == 90
+    assert fake.calls() == []
+
+
+NONCE = "0123456789abcdef"
+NONCE_CONF = TAGGED_CONF + "description: hal0-matrix run " + NONCE + "\n"
+
+
+def test_destroy_with_nonce_refuses_a_guest_with_another_description(fake):
+    _owned_rules(fake, 172, TAGGED_CONF)  # tag and hostname fit, no nonce
+    r = fake.run(f"ct_destroy 172 {NONCE}")
+    assert r.returncode == 1
+    assert _destroy_calls(fake) == []
+
+
+def test_destroy_with_nonce_refuses_another_runs_nonce(fake):
+    _owned_rules(fake, 172, TAGGED_CONF + "description: hal0-matrix run ffffffffffffffff\n")
+    r = fake.run(f"ct_destroy 172 {NONCE}")
+    assert r.returncode == 1
+    assert _destroy_calls(fake) == []
+
+
+def test_destroy_with_nonce_destroys_the_guest_that_carries_it(fake):
+    _owned_rules(fake, 172, NONCE_CONF)
+    fake.rule("pct destroy 172 --force --purge", "")
+    fake.rule("test -e /etc/pve/lxc/172.conf", "absent\n")
+    r = fake.run(f"ct_destroy 172 {NONCE}; echo rc=$?")
+    assert "rc=0" in r.stdout
+    assert any("pct destroy 172" in c for c in fake.calls())
+
+
+def test_destroy_without_nonce_keeps_the_manual_rule(fake):
+    _owned_rules(fake, 172, TAGGED_CONF)
+    fake.rule("pct destroy 172 --force --purge", "")
+    fake.rule("test -e /etc/pve/lxc/172.conf", "absent\n")
+    assert fake.run("ct_destroy 172").returncode == 0
+
+
+@pytest.mark.parametrize("bad", ["12345", "0123456789ABCDEF", "x; id", "0123456789abcde"])
+def test_destroy_refuses_a_malformed_nonce_before_any_ssh(fake, bad):
+    r = fake.run(f"ct_destroy 172 {shlex.quote(bad)}")
+    assert r.returncode == 1
+    assert fake.calls() == []
 
 
 def test_feature_list_matches_proxmox_script():

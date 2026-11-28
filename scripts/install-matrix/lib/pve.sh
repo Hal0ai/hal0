@@ -18,6 +18,14 @@
 _PVE_FEATURES="nesting=1,keyctl=1,fuse=1,mknod=1"
 _PVE_TAG="hal0-matrix"
 _PVE_HOST_PREFIX="hal0-mx-"
+# ct_create returns this when it refused before running `pct create`: nothing
+# was created, so the caller must not clean anything up. A failed `pct create`
+# returns pct's own status instead.
+_CT_REFUSED=90
+# A run's nonce (16 hex characters), set by the caller. When set, ct_create
+# writes it into the guest's description and ct_destroy given the same nonce
+# destroys only a guest that carries it.
+CT_NONCE=""
 
 # Quote one value for the remote shell. Plain words stay as they are so the
 # recorded command reads naturally; anything else goes through printf %q.
@@ -206,20 +214,32 @@ sys.exit(1)
 ' "$lo" "$hi" "$_PVE_TAG" || return 1
 }
 
-# ct_owned <vmid>: 0 only for a guest this harness created.
+# ct_owned <vmid> [nonce]: 0 only for a guest this harness created. With a
+# nonce the guest's description must also be `hal0-matrix run <nonce>`, which
+# proves it is the guest THIS run created.
 ct_owned() {
-  local vmid="${1:-}" conf line tags="" host="" t found=1
+  local vmid="${1:-}" nonce="${2:-}" conf line tags="" host="" desc="" t found=1
   _pve_in_range "$vmid" || return 1
+  if [[ -n "$nonce" ]]; then
+    [[ "$nonce" =~ ^[0-9a-f]{16}$ ]] || return 1
+  fi
   conf="$(pve_run "pct config ${vmid}")" || return 1
   while IFS= read -r line; do
     case "$line" in
       tags:*) tags="${line#tags:}" ;;
       hostname:*) host="${line#hostname:}" ;;
+      description:*) desc="${line#description:}" ;;
     esac
   done <<<"$conf"
   host="${host// /}"
   tags="${tags// /}"
   [[ "$host" == "${_PVE_HOST_PREFIX}"* ]] || return 1
+  if [[ -n "$nonce" ]]; then
+    desc="${desc//%20/ }"
+    desc="${desc# }"
+    desc="${desc% }"
+    [[ "$desc" == "hal0-matrix run ${nonce}" ]] || return 1
+  fi
   local IFS=';,'
   for t in $tags; do
     [[ "$t" == "$_PVE_TAG" ]] && found=0
@@ -228,36 +248,40 @@ ct_owned() {
 }
 
 _ct_require_owned() {
-  ct_owned "${1:-}" || { _pve_err "refusing: guest '${1:-}' is not a harness-owned container"; return 1; }
+  ct_owned "${1:-}" "${2:-}" || { _pve_err "refusing: guest '${1:-}' is not a harness-owned container"; return 1; }
 }
 
 # ct_create <vmid> <volid> <unprivileged 0|1> <cores> <memory_mb> <disk_gb> [device...]
+# Returns _CT_REFUSED (90) when it refused before running `pct create`; any
+# other non-zero status is pct's, and a guest may then exist.
 ct_create() {
   local vmid="${1:-}" volid="${2:-}" unpriv="${3:-}" cores="${4:-}" mem="${5:-}" disk="${6:-}"
-  shift 6 2>/dev/null || { _pve_err "ct_create: too few arguments"; return 1; }
+  shift 6 2>/dev/null || { _pve_err "ct_create: too few arguments"; return "$_CT_REFUSED"; }
   local bridge="${HAL0_MATRIX_BRIDGE:-vmbr0}" storage dev i=0 cmd st
-  _pve_in_range "$vmid" || { _pve_err "refusing: VMID '${vmid}' is outside the harness range"; return 1; }
-  [[ "$volid" =~ ^[A-Za-z0-9._+-]+:[A-Za-z0-9._+/-]+$ ]] || { _pve_err "bad template volume id"; return 1; }
-  [[ "$unpriv" =~ ^[01]$ ]] || { _pve_err "unprivileged must be 0 or 1"; return 1; }
+  _pve_in_range "$vmid" || { _pve_err "refusing: VMID '${vmid}' is outside the harness range"; return "$_CT_REFUSED"; }
+  [[ "$volid" =~ ^[A-Za-z0-9._+-]+:[A-Za-z0-9._+/-]+$ ]] || { _pve_err "bad template volume id"; return "$_CT_REFUSED"; }
+  [[ "$unpriv" =~ ^[01]$ ]] || { _pve_err "unprivileged must be 0 or 1"; return "$_CT_REFUSED"; }
   if ! _pve_uint_ok "$cores" || ! _pve_uint_ok "$mem" || ! _pve_uint_ok "$disk"; then
     _pve_err "cores, memory and disk must be integers"
-    return 1
+    return "$_CT_REFUSED"
   fi
-  [[ "$bridge" =~ ^[A-Za-z0-9_.-]+$ ]] || { _pve_err "bad HAL0_MATRIX_BRIDGE"; return 1; }
+  [[ -z "$CT_NONCE" || "$CT_NONCE" =~ ^[0-9a-f]{16}$ ]] || { _pve_err "bad run nonce"; return "$_CT_REFUSED"; }
+  [[ "$bridge" =~ ^[A-Za-z0-9_.-]+$ ]] || { _pve_err "bad HAL0_MATRIX_BRIDGE"; return "$_CT_REFUSED"; }
   for dev in "$@"; do
     [[ "$dev" =~ ^/dev/[A-Za-z0-9_-]+(/[A-Za-z0-9_-]+)*(,gid=[0-9]+)?$ ]] \
-      || { _pve_err "bad device argument: ${dev}"; return 1; }
+      || { _pve_err "bad device argument: ${dev}"; return "$_CT_REFUSED"; }
   done
   # Never create over an existing guest, and not when that cannot be told.
   case "$(_ct_presence "$vmid")" in
     absent) ;;
-    present) _pve_err "refusing: guest ${vmid} already exists"; return 1 ;;
-    *) _pve_err "refusing: cannot tell whether guest ${vmid} exists"; return 1 ;;
+    present) _pve_err "refusing: guest ${vmid} already exists"; return "$_CT_REFUSED" ;;
+    *) _pve_err "refusing: cannot tell whether guest ${vmid} exists"; return "$_CT_REFUSED" ;;
   esac
-  storage="$(pve_storage)" || return 1
+  storage="$(pve_storage)" || return "$_CT_REFUSED"
   cmd="pct create $(_pve_q "$vmid") $(_pve_q "$volid")"
   cmd+=" --hostname $(_pve_q "${_PVE_HOST_PREFIX}${vmid}")"
   cmd+=" --tags $(_pve_q "$_PVE_TAG")"
+  [[ -z "$CT_NONCE" ]] || cmd+=" --description $(_pve_q "hal0-matrix run ${CT_NONCE}")"
   cmd+=" --cores ${cores} --memory ${mem} --swap 1024"
   cmd+=" --rootfs $(_pve_q "${storage}:${disk}")"
   cmd+=" --net0 $(_pve_q "name=eth0,bridge=${bridge},ip=dhcp")"
@@ -364,16 +388,18 @@ ct_pull() {
   fi
 }
 
-# ct_destroy <vmid>: refuses unless ct_owned, re-checked before each attempt.
+# ct_destroy <vmid> [nonce]: refuses unless ct_owned (with the nonce when one
+# is given), re-checked before each attempt. Without a nonce the rule is the
+# manual one: range, tag, hostname.
 # Sequence from scripts/fresh-test-ct.sh: SIGKILL the lxc-start monitor (a
 # privileged guest holding /dev/kfd hangs `lxc-stop --kill`), clear a stale
 # lock, purge-destroy, retry once. "Gone" means the config file is absent on
 # the host; an ssh failure is "unknown" and never counts as gone. The [l] in
 # the pkill pattern keeps the remote shell's own command line from matching it.
 ct_destroy() {
-  local vmid="${1:-}" attempt out="" state=""
+  local vmid="${1:-}" nonce="${2:-}" attempt out="" state=""
   for attempt in 1 2; do
-    _ct_require_owned "$vmid" || return 1
+    _ct_require_owned "$vmid" "$nonce" || return 1
     out="$(pve_run "pkill -9 -f '[l]xc-start -F -n ${vmid}( |\$)' 2>/dev/null; sleep 2; rm -f /run/lock/lxc/pve-config-${vmid}.lock; pct destroy ${vmid} --force --purge" 2>&1)" || true
     state="$(_ct_presence "$vmid")"
     [[ "$state" == "absent" ]] && return 0
