@@ -25,6 +25,7 @@ from .render import render
 from .term import Terminal, TerminalUnavailable
 
 SAVE_COPY = "_save_copy_to"
+_SAVE_FIELD = "save"
 _SIGNALS = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
 
 MakeDocument = Callable[[Mapping[str, object]], Document]
@@ -129,7 +130,6 @@ class Session:
         self.term = term
         self.plain = plain
         self.notice: str | None = None
-        self.copy_to: object = None
 
     def _view(self, state: State, first: Screen, notes: tuple[str, ...]) -> View:
         shown = flow.view(state)
@@ -157,14 +157,23 @@ class Session:
 
     def _save_copy(self, state: State) -> None:
         path = flow.chosen(state).get(SAVE_COPY)
-        if path is None or path == self.copy_to:
+        if path is None:
             return
-        self.copy_to = path
         try:
             write_document(self.document(flow.chosen(state)), Path(str(path)))
             self.notice = None
         except DocumentError as exc:
             self.notice = str(exc)
+
+    def _press(self, state: State, key: str) -> State:
+        """Press a key; write the copy each time the save field is confirmed."""
+        saving = state.editing is not None and state.field == _SAVE_FIELD
+        after = flow.press(state, key)
+        # Confirming a good path is the only thing that replaces the answers while
+        # the field is open; a cancelled or refused entry leaves them as they were.
+        if saving and after.editing is None and after.answers is not state.answers:
+            self._save_copy(after)
+        return after
 
     def run(self) -> State:
         inp = self.inp
@@ -175,9 +184,9 @@ class Session:
             width = self.term.width()
             self.term.draw(render(shown, width=width, plain=self.plain, color=not self.plain))
             state, keys = self._keys(state, shown)
+            self.notice = None  # a failed save is shown once, until the next key
             for key in keys:
-                state = flow.press(state, key)
-            self._save_copy(state)
+                state = self._press(state, key)
         return state
 
 

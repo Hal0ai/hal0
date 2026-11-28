@@ -356,3 +356,6 @@ def write_private_text(text: str, path: Path) -> None:
     except OSError as exc:
         temp.unlink(missing_ok=True)
         raise DocumentError(f"{path}: cannot be written ({exc.strerror or exc})") from None
+    except BaseException:
+        temp.unlink(missing_ok=True)
+        raise

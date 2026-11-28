@@ -18,6 +18,7 @@ from hal0.install.wizard.document import (
     preset,
     put,
     write_document,
+    write_private_text,
 )
 
 NOW = "2026-11-28T00:00:00Z"
@@ -638,6 +639,18 @@ def test_a_deeply_nested_file_is_a_document_error(tmp_path: Path) -> None:
     p.write_text("[" * 200000)
     with pytest.raises(DocumentError, match=r"a\.json"):
         load_document(p)
+
+
+def test_a_write_cut_short_by_an_interrupt_leaves_no_temporary_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def interrupted(fd: int) -> None:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr("hal0.install.wizard.document.os.fsync", interrupted)
+    with pytest.raises(KeyboardInterrupt):
+        write_private_text("x", tmp_path / "a.json")
+    assert list(tmp_path.iterdir()) == []
 
 
 # ------------------------------------------------- an old saved model choice

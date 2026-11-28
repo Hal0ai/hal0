@@ -312,11 +312,12 @@ def test_too_small_leaves_the_other_downloads_and_their_total_alone(
 
 
 def test_save_copy_path_is_exposed_but_never_reaches_the_document(
-    catalog: Catalog, usable_facts: Facts
+    catalog: Catalog, usable_facts: Facts, tmp_path: Path
 ) -> None:
-    s = run(start(catalog, usable_facts), "ENTER", "ENTER", "s", *"/tmp/a.json", "ENTER")
+    copy = str(tmp_path / "a.json")
+    s = run(start(catalog, usable_facts), "ENTER", "ENTER", "s", *copy, "ENTER")
     assert view(s).screen is Screen.REVIEW
-    assert chosen(s)["_save_copy_to"] == "/tmp/a.json"
+    assert chosen(s)["_save_copy_to"] == copy
     s = run(s, "s", *"rel", "ENTER")
     assert view(s).error is not None
 
@@ -355,11 +356,14 @@ def test_a_box_with_an_npu_lists_it_once(catalog: Catalog, usable_facts: Facts) 
     assert [r.id for r in rows].count("npu") == 1
 
 
-def test_the_review_says_where_a_copy_will_be_saved(catalog: Catalog, usable_facts: Facts) -> None:
+def test_the_review_says_where_a_copy_will_be_saved(
+    catalog: Catalog, usable_facts: Facts, tmp_path: Path
+) -> None:
+    copy = str(tmp_path / "a.json")
     s = run(start(catalog, usable_facts), "ENTER", "ENTER")
     assert view(s).intro == ()
-    s = run(s, "s", *"/tmp/a.json", "ENTER")
-    assert view(s).intro == ("Saving a copy of these answers to /tmp/a.json.",)
+    s = run(s, "s", *copy, "ENTER")
+    assert view(s).intro == (f"Saving a copy of these answers to {copy}.",)
     assert view(press(s, "b")).screen is Screen.FOLDER
 
 
@@ -482,3 +486,58 @@ def test_sizes_read_plainly(value: float, text: str) -> None:
     from hal0.install.wizard.flow_model import fmt_gb
 
     assert fmt_gb(value) == text
+
+
+def _save(catalog: Catalog, facts: Facts, text: str) -> State:
+    return run(start(catalog, facts), "ENTER", "ENTER", "s", *text, "ENTER")
+
+
+def test_a_copy_can_be_saved_over_an_earlier_copy(
+    catalog: Catalog, usable_facts: Facts, tmp_path: Path
+) -> None:
+    earlier = tmp_path / "copy.json"
+    earlier.write_text("{}")
+    s = _save(catalog, usable_facts, str(earlier))
+    assert view(s).error is None
+    assert view(s).editing is None
+    assert chosen(s)["_save_copy_to"] == str(earlier)
+
+
+def test_a_copy_cannot_be_saved_over_a_folder(
+    catalog: Catalog, usable_facts: Facts, tmp_path: Path
+) -> None:
+    s = _save(catalog, usable_facts, str(tmp_path))
+    assert view(s).error == f"{tmp_path} is a folder"
+    assert view(s).editing is not None
+
+
+def test_a_copy_cannot_be_saved_through_a_symlink(
+    catalog: Catalog, usable_facts: Facts, tmp_path: Path
+) -> None:
+    target = tmp_path / "real.json"
+    target.write_text("{}")
+    link = tmp_path / "link.json"
+    link.symlink_to(target)
+    s = _save(catalog, usable_facts, str(link))
+    assert view(s).error == f"{link} is a symlink"
+    dangling = tmp_path / "dangling.json"
+    dangling.symlink_to(tmp_path / "nowhere")
+    assert view(_save(catalog, usable_facts, str(dangling))).error == f"{dangling} is a symlink"
+
+
+def test_a_copy_needs_an_existing_folder_to_go_in(
+    catalog: Catalog, usable_facts: Facts, tmp_path: Path
+) -> None:
+    gone = tmp_path / "no" / "such" / "copy.json"
+    message = "the folder for this file does not exist"
+    assert view(_save(catalog, usable_facts, str(gone))).error == message
+    plain = tmp_path / "plain"
+    plain.write_text("x")
+    assert view(_save(catalog, usable_facts, str(plain / "copy.json"))).error == message
+
+
+def test_a_copy_path_may_contain_a_percent_sign(
+    catalog: Catalog, usable_facts: Facts, tmp_path: Path
+) -> None:
+    copy = str(tmp_path / "50%.json")
+    assert chosen(_save(catalog, usable_facts, copy))["_save_copy_to"] == copy

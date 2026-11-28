@@ -50,7 +50,7 @@ _GPU_REASONS = {
     "no_kfd": "A graphics card was found, but its compute driver is not available.",
     "broken_group": "A graphics card was found, but this user is not allowed to use it.",
 }
-_GPU_REASON_OTHER = "The graphics card on this box cannot be used."
+GPU_REASON_OTHER = "The graphics card on this box cannot be used."
 
 
 # ------------------------------------------------------------ GPU screen
@@ -63,7 +63,7 @@ def gpu_title(s: State) -> str:
 
 
 def gpu_intro(s: State) -> tuple[str, ...]:
-    return (_GPU_REASONS.get(s.facts.gpu_reason or "", _GPU_REASON_OTHER),)
+    return (_GPU_REASONS.get(s.facts.gpu_reason or "", GPU_REASON_OTHER),)
 
 
 def gpu_rows(s: State) -> tuple[Row, ...]:
@@ -229,7 +229,8 @@ def commit_folder(s: State, text: str) -> State:
     return go_on(done)
 
 
-def _check_path(text: str, what: str, *, percent: bool = False) -> tuple[str, str | None]:
+def _clean_path(text: str, what: str, *, percent: bool = False) -> tuple[str, str | None]:
+    """The trimmed, normalised absolute path and the reason it cannot be used, or None."""
     path = text.strip()
     if not path:
         return path, f"{what} is required"
@@ -239,7 +240,14 @@ def _check_path(text: str, what: str, *, percent: bool = False) -> tuple[str, st
         return path, f"{what} must not contain %"
     if not path.startswith("/"):
         return path, f"{what} must start with /"
-    path = posixpath.normpath(path)
+    return posixpath.normpath(path), None
+
+
+def validate_folder(text: str) -> tuple[str, str | None]:
+    """The cleaned folder path and the reason it cannot be used, or None."""
+    path, error = _clean_path(text, "the folder", percent=True)
+    if error is not None:
+        return path, error
     ancestor = path
     while not os.path.exists(ancestor) and ancestor != "/":
         ancestor = posixpath.dirname(ancestor)
@@ -248,9 +256,18 @@ def _check_path(text: str, what: str, *, percent: bool = False) -> tuple[str, st
     return path, None
 
 
-def validate_folder(text: str) -> tuple[str, str | None]:
-    """The cleaned folder path and the reason it cannot be used, or None."""
-    return _check_path(text, "the folder", percent=True)
+def _check_copy(text: str) -> tuple[str, str | None]:
+    """The path a copy of the answers may be saved to; an earlier copy is replaced."""
+    path, error = _clean_path(text, "the file path")
+    if error is not None:
+        return path, error
+    if os.path.islink(path):
+        return path, f"{path} is a symlink"
+    if os.path.isdir(path):
+        return path, f"{path} is a folder"
+    if not os.path.isdir(posixpath.dirname(path)):
+        return path, "the folder for this file does not exist"
+    return path, None
 
 
 # --------------------------------------------------------- REVIEW screen
@@ -371,9 +388,7 @@ def review_enter(s: State) -> State:
 
 
 def commit_save(s: State, text: str) -> State:
-    path, error = _check_path(text, "the file path")
-    if error is None and os.path.isdir(path):
-        error = f"{path} is a folder, not a file"
+    path, error = _check_copy(text)
     if error is not None:
         return replace(s, error=error)
     return replace(

@@ -30,6 +30,7 @@ from .document import (
     write_private_text,
 )
 from .facts import FactsError, load_facts
+from .flow_basic import GPU_REASON_OTHER
 from .flow_model import Outcome, State
 from .session import SAVE_COPY, Inputs, Interrupted, run_screens
 from .term import can_open
@@ -121,7 +122,7 @@ def _document(inp: Inputs, chosen: Mapping[str, object]) -> Document:
 def _gpu_reason(inp: Inputs) -> str:
     """The wording the GPU screen would show, taken from the screen itself."""
     shown = flow.view(flow.start(inp.catalog, inp.facts, saved=inp.saved, given=inp.given))
-    return shown.intro[0] if shown.intro else "The graphics card on this box cannot be used."
+    return shown.intro[0] if shown.intro else GPU_REASON_OTHER
 
 
 def _headless_stop(inp: Inputs, doc: Document) -> str | None:
@@ -204,7 +205,7 @@ def _finish(inp: Inputs, state: State, out: Path, secret_out: Path | None) -> in
     write_document(doc, out)
     _refresh_copy(state, doc)
     token = flow.secret(state)
-    if token is not None:
+    if token:
         _keep_token(inp, doc, token, secret_out)
     return EXIT_OK
 

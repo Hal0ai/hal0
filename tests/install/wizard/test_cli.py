@@ -2,14 +2,17 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
+import select
 import signal
 import stat
 import subprocess
 import sys
 import termios
 import threading
+import time
 from collections.abc import Callable, Iterator
 from pathlib import Path
 from types import FrameType
@@ -18,7 +21,10 @@ import pytest
 
 from hal0.install.wizard import cli
 from hal0.install.wizard.catalog import Catalog
+from hal0.install.wizard.document import DocumentError
+from hal0.install.wizard.facts import Facts
 from hal0.install.wizard.render import strip_ansi
+from hal0.install.wizard.session import Inputs, Session
 
 from .conftest import read_all, wait_exit, wait_for_output
 
@@ -512,9 +518,15 @@ def test_in_process_signal_returns_130_and_restores_the_handlers(
     handlers = {s: signal.getsignal(s) for s in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)}
     before = _tty_attrs(slave)
 
+    failures: list[BaseException] = []
+
     def interrupt_once_drawn() -> None:
-        wait_for_output(master)
-        os.kill(os.getpid(), signal.SIGTERM)
+        try:
+            wait_for_output(master)
+        except BaseException as exc:
+            failures.append(exc)
+        finally:
+            os.kill(os.getpid(), signal.SIGTERM)  # always end the run, then report the cause
 
     thread = threading.Thread(target=interrupt_once_drawn)
     thread.start()
@@ -525,6 +537,9 @@ def test_in_process_signal_returns_130_and_restores_the_handlers(
         )
     finally:
         thread.join(timeout=10)
+    assert not thread.is_alive()
+    if failures:
+        raise failures[0]
     assert code == 130 and not (tmp_path / "a.json").exists()
     assert {s: signal.getsignal(s) for s in handlers} == handlers
     assert _tty_attrs(slave) == before
@@ -868,3 +883,167 @@ def test_a_facts_file_leaves_that_line_out(
     )
     text = " ".join(strip_ansi(wait_for_output(pty_pair[0]).decode()).split())
     assert "could not be checked" not in text
+
+
+def test_saving_to_the_same_path_again_writes_the_changed_answers(
+    catalog_path: Path,
+    tmp_path: Path,
+    pty_pair: tuple[int, str],
+    spawn: Callable[..., subprocess.Popen[str]],
+) -> None:
+    master, slave = pty_pair
+    out, copy = tmp_path / "a.json", tmp_path / "copy.json"
+    p = spawn("--catalog", catalog_path, "--out", out, "--tty", slave)
+    wait_for_output(master)
+    os.write(master, ENTER * 2 + b"s" + str(copy).encode() + ENTER)  # review, copy saved
+    os.write(master, b"bb" + DOWN + ENTER * 2)  # type: pick Minimal, folder, back on the review
+    os.write(master, b"s" + str(copy).encode() + ENTER)  # the same path again
+    os.write(master, b"q")
+    assert wait_exit(p, master)[0] == 10 and not out.exists()
+    assert json.loads(copy.read_text())["install"]["type"] == "minimal"
+
+
+class _ScriptedTerminal:
+    """Keys from a list; every screen drawn is kept as one string."""
+
+    def __init__(self, keys: list[str]) -> None:
+        self.keys = list(keys)
+        self.frames: list[str] = []
+
+    def width(self) -> int:
+        return 100
+
+    def draw(self, lines: list[str]) -> None:
+        self.frames.append("\n".join(lines))
+
+    def read_key(self) -> str:
+        assert self.keys, "the screens asked for a key the test did not script"
+        return self.keys.pop(0)
+
+
+def test_a_failed_save_shows_its_notice_once(
+    catalog: Catalog, usable_facts: Facts, tmp_path: Path
+) -> None:
+    def failing(chosen: object) -> dict[str, object]:
+        raise DocumentError("the copy could not be written")
+
+    keys = ["ENTER", "ENTER", "s", *str(tmp_path / "copy.json"), "ENTER", "b", "ENTER", "q"]
+    term = _ScriptedTerminal(keys)
+    inp = Inputs(catalog, usable_facts, None, None, (), "v")
+    Session(inp, term, failing, plain=False).run()  # type: ignore[arg-type]
+    shown = ["the copy could not be written" in frame for frame in term.frames]
+    first = shown.index(True)
+    assert shown.count(True) == 1
+    assert first == len(keys) - 3  # drawn right after the path was confirmed
+
+
+def test_a_skipped_token_creates_no_secret_file(
+    catalog_path: Path,
+    ladder_models_path: Path,
+    big_pool_facts_path: Path,
+    tmp_path: Path,
+    pty_pair: tuple[int, str],
+    spawn: Callable[..., subprocess.Popen[str]],
+) -> None:
+    master, slave = pty_pair
+    sec = tmp_path / "s"
+    p = spawn(
+        "--catalog",
+        catalog_path,
+        "--models",
+        ladder_models_path,
+        "--facts",
+        big_pool_facts_path,
+        "--out",
+        tmp_path / "a.json",
+        "--secret-out",
+        sec,
+        "--tty",
+        slave,
+    )
+    wait_for_output(master)
+    os.write(master, DOWN + DOWN + ENTER + ENTER + DOWN + DOWN + ENTER + ENTER + ENTER * 4)
+    assert wait_exit(p, master)[0] == 0
+    assert (tmp_path / "a.json").exists()
+    assert not sec.exists()
+
+
+class _Screens:
+    """Read what the plain form draws, a screen at a time, with every wait bounded."""
+
+    def __init__(self, master: int) -> None:
+        self.master = master
+        self.seen = b""
+        self.mark = 0
+
+    def _pull(self) -> None:
+        ready, _, _ = select.select([self.master], [], [], 0.2)
+        if ready:
+            with contextlib.suppress(OSError):
+                self.seen += os.read(self.master, 4096)
+
+    def wait(self, text: str, timeout: float = 10.0) -> None:
+        deadline = time.monotonic() + timeout
+        needle = text.encode()
+        while needle not in self.seen[self.mark :]:
+            assert time.monotonic() < deadline, f"never saw {text!r}"
+            self._pull()
+        self.mark = self.seen.index(needle, self.mark) + len(needle)
+
+    def answer(self, title: str, line: str) -> None:
+        """Wait for a screen and its prompt, then type one line."""
+        self.wait(title)
+        self.wait("> ")
+        os.write(self.master, line.encode() + b"\n")
+
+
+def test_a_plain_form_token_is_read_with_echo_off_and_lands_only_in_the_secret_file(
+    catalog: Catalog,
+    catalog_path: Path,
+    ladder_models_path: Path,
+    big_pool_facts_path: Path,
+    tmp_path: Path,
+    pty_pair: tuple[int, str],
+    spawn: Callable[..., subprocess.Popen[str]],
+) -> None:
+    master, slave = pty_pair
+    out, sec = tmp_path / "a.json", tmp_path / "s"
+    p = spawn(
+        "--catalog",
+        catalog_path,
+        "--models",
+        ladder_models_path,
+        "--facts",
+        big_pool_facts_path,
+        "--out",
+        out,
+        "--secret-out",
+        sec,
+        "--tty",
+        slave,
+        env={"HAL0_PLAIN": "1"},
+        capture=True,
+    )
+    questions = catalog.questions
+    screens = _Screens(master)
+    screens.answer(questions["setup_type"].title, "3")  # Customize
+    screens.answer("What this box does", "")
+    screens.answer(questions["starter_model"].title, "3")  # auto, small-1, big-1: needs an account
+    screens.answer(questions["hf_token"].title, "hf_SECRET")
+    for title in ("Storage", "Network and access", "Assistant and memory", "Ready to install"):
+        screens.answer(title, "")
+    code, rest = wait_exit(p, master)
+    assert code == 0
+    assert sec.read_text() == "HF_TOKEN=hf_SECRET\n"
+    assert stat.S_IMODE(sec.stat().st_mode) == 0o600
+    assert p.stdout is not None and p.stderr is not None
+    everything = screens.seen + rest
+    assert b"hf_SECRET" not in everything
+    assert "hf_SECRET" not in out.read_text() + p.stdout.read() + p.stderr.read()
+
+
+def test_the_graphics_card_wording_lives_in_one_place() -> None:
+    from hal0.install.wizard import flow_basic
+
+    assert cli.GPU_REASON_OTHER is flow_basic.GPU_REASON_OTHER
+    assert flow_basic.GPU_REASON_OTHER not in Path(cli.__file__).read_text()
