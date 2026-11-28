@@ -23,6 +23,7 @@
 # shellcheck disable=SC2329  # trap handlers, background jobs and the dry-run ssh shadow
 set -euo pipefail
 umask 077
+exec 7>&2 # the run's own stderr, for messages written from a trap while a call has redirected fd 2
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "${HERE}/../.." && pwd)"
@@ -349,8 +350,14 @@ finish_result() {
 # the one fixed `free -g` call. Below WATCH_FLOOR it records why and sends the
 # main shell USR1, which stops the run through the normal cleanup. A reading
 # that cannot be made is not a reason to stop; three in a row are.
+#
+# Bash runs a trap only after the foreground command returns, so the watchdog
+# also ends whatever the main shell is waiting on (a probe, a pull, a push):
+# it sends USR1 first (the trap is then pending), then kills every process
+# below the main shell except itself. Cleanup runs its own ownership-checked
+# destroy afterwards, and reports LEFT BEHIND if that fails.
 watchdog() {
-  local parent="$1" n bad=0 reason="" detail=""
+  local parent="$1" me="$BASHPID" n bad=0 reason="" detail="" c
   while :; do
     sleep "$WATCH_EVERY"
     if n="$(pve_mem_available_gb 2>/dev/null)" && [[ "$n" =~ ^[0-9]{1,9}$ ]]; then
@@ -371,6 +378,9 @@ watchdog() {
   done
   printf 'reason=%s\ndetail=%s\n' "$reason" "$detail" >"$WATCH_FILE"
   kill -USR1 "$parent" 2>/dev/null || true
+  for c in $(pgrep -P "$parent" 2>/dev/null || true); do
+    [[ "$c" == "$me" ]] || kill_tree "$c"
+  done
 }
 
 start_watchdog() {
@@ -385,16 +395,23 @@ stop_watchdog() {
   WATCH_PID=""
 }
 
-on_watchdog() {
+# load_verdict: take the watchdog's verdict from its file. The file is local,
+# but its text is still checked before it is kept.
+load_verdict() {
   local reason detail
-  trap '' USR1
+  [[ -n "$WATCH_FILE" && -s "$WATCH_FILE" ]] || return 1
   reason="$(kv_get "$WATCH_FILE" reason)"
   detail="$(kv_get "$WATCH_FILE" detail)"
-  case "$reason" in host_memory_low | host_unreachable) ;; *) reason="host_memory_low" ;; esac
+  case "$reason" in host_memory_low | host_unreachable) ;; *) return 1 ;; esac
   [[ "$detail" =~ ^[A-Za-z0-9\ ().,_-]+$ ]] || detail="the host check failed"
   ABORT_REASON="$reason"
   ABORT_DETAIL="$detail"
-  log "aborting: ${detail}"
+}
+
+on_watchdog() {
+  trap '' USR1
+  load_verdict || { ABORT_REASON="host_memory_low"; ABORT_DETAIL="the host check failed"; }
+  log "aborting: ${ABORT_DETAIL}" >&7
   exit 1
 }
 
@@ -407,6 +424,8 @@ cleanup() {
   [[ "$CLEANED" == "0" ]] || exit "$rc"
   CLEANED=1
   [[ "$CT_MAYBE" != "1" ]] || announce_container
+  # The watchdog may have ended the call in progress before its USR1 was acted on.
+  [[ -n "$ABORT_REASON" ]] || load_verdict || true
   stop_watchdog
   stop_child
   if [[ -n "$ABORT_REASON" ]]; then

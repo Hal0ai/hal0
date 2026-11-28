@@ -8,6 +8,7 @@ stubbed to fail loudly in case a code path ran them locally.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import re
@@ -26,6 +27,7 @@ WRAPPER = REPO / "scripts" / "fresh-test-ct.sh"
 FAKE_SSH = r"""#!/usr/bin/env bash
 # Fake Proxmox host + guest. State lives in $FAKE_STATE.
 printf '%s\n' "$*" >> "$FAKE_STATE/ssh.log"
+printf '%s %s\n' "$(date +%s.%N)" "${*: -1}" >> "$FAKE_STATE/ssh.times"
 cmd="${*: -1}"
 plain="${cmd//\\/}"
 # An action arrives as `{ pct config V | grep ... ; } && <action>`: run the
@@ -54,7 +56,10 @@ case "$cmd" in
     if [[ -n "${FAKE_MEM_FAIL_AFTER:-}" && "$n" -gt "$FAKE_MEM_FAIL_AFTER" ]]; then exit 255; fi
     [[ "${FAKE_MEM_FAIL_ON:-0}" != "$n" ]] || exit 255
     mem="${FAKE_MEM:-100}"
-    [[ -z "${FAKE_MEM_AFTER:-}" || "$n" -le 1 ]] || mem="$FAKE_MEM_AFTER"
+    if [[ -n "${FAKE_MEM_AFTER:-}" && "$n" -gt 1 ]]; then
+      mem="$FAKE_MEM_AFTER"
+      [[ -e "$FAKE_STATE/low-read-at" ]] || date +%s.%N > "$FAKE_STATE/low-read-at"
+    fi
     printf '              total used free shared buff/cache available\nMem: 125 20 60 1 45 %s\n' "$mem"
     [[ -z "${FAKE_GPU_MEM:-}" ]] || printf 'gpu %s\n' "$FAKE_GPU_MEM"
     exit 0 ;;
@@ -124,6 +129,8 @@ case "$plain" in
     printf 'disk_used_bytes=5000\nnet_rx_bytes=900\nslot_count=2\nslots=a,b\nfailed_units=\ninstall_log=/var/log/hal0/install-1.log\nfailure_report=/tmp/hal0-install-report-1.txt\n'
     exit 0 ;;
   *"collect.sh probe"*)
+    date +%s.%N > "$FAKE_STATE/probe-started"
+    [[ -z "${FAKE_PROBE_SLEEP:-}" ]] || exec sleep "$FAKE_PROBE_SLEEP"
     printf 'api_health_s=3\ndoctor_ok=10\ndoctor_warn=1\ndoctor_critical=0\ndoctor_exit=0\nchat_ok=1\nchat_first_token_s=0.5\nchat_model=m\nmemory_write_ok=1\nmemory_read_ok=1\nhermes_reply_ok=1\nhermes_reply_s=2\n'
     exit 0 ;;
   *"cat /var/log/hal0/install-1.log"*)
@@ -208,6 +215,25 @@ def host(tmp_path):
     return Host(tmp_path)
 
 
+def kill_group(proc: subprocess.Popen) -> None:
+    """Kill the whole process group of a test's process (it runs in its own
+    session); only "no such process" is ignored."""
+    with contextlib.suppress(ProcessLookupError):
+        os.killpg(proc.pid, signal.SIGKILL)
+
+
+def spawn(host: Host, *args: str, **env: str) -> subprocess.Popen:
+    """Start run-shape.sh in a new session; the caller kills the group in a finally."""
+    return subprocess.Popen(
+        ["bash", str(RUN_SHAPE), *args],
+        env=host.env(**env),
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+    )
+
+
 def plan_lines(proc) -> list[str]:
     return [x for x in proc.stdout.splitlines() if x.startswith("[dry-run]")]
 
@@ -275,6 +301,32 @@ def test_watchdog_stops_the_install_when_host_memory_falls(host):
     assert not (host.state / "present").exists(), "the normal cleanup destroyed it"
     assert "LEFT BEHIND" not in r.stderr
     assert (host.out / "result.json").exists(), "what was measured is still saved"
+
+
+def test_a_low_reading_stops_the_host_call_in_progress_at_once(host):
+    """N1: the probe is a long host call. A low reading while it runs must
+    start cleanup within 3 seconds, not when the call returns."""
+    proc = spawn(
+        host, "u2604-cpu-unattended", "--vmid", "172", "--out", str(host.out),
+        **_watch_env(
+            HAL0_MATRIX_WATCH_SECONDS="3", FAKE_MEM_AFTER="5", FAKE_PROBE_SLEEP="15"
+        ),
+    )  # fmt: skip
+    try:
+        proc.communicate(timeout=60)
+    finally:
+        kill_group(proc)
+    probe_at = float((host.state / "probe-started").read_text())
+    low_at = float((host.state / "low-read-at").read_text())
+    assert probe_at < low_at, "the low reading must come while the probe call is running"
+    # Cleanup's first host call is the wait for a running `pct create`.
+    times = [x.split(" ", 1) for x in (host.state / "ssh.times").read_text().splitlines()]
+    cleanup_at = next(float(t) for t, c in times if "pgrep -f" in c and float(t) > low_at)
+    assert cleanup_at - low_at < 3, (
+        f"cleanup began {cleanup_at - low_at:.1f}s after the low reading"
+    )
+    assert json.loads((host.out / "result.json").read_text())["aborted"] == "host_memory_low"
+    assert not (host.state / "present").exists()
 
 
 def test_watchdog_aborts_after_three_unreadable_readings_in_a_row(host):
