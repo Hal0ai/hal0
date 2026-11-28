@@ -15,11 +15,14 @@ exit codes and the three side files.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import re
+import signal
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -123,6 +126,35 @@ def _saved(tmp_path: Path, doc: dict, *, mode: int = 0o600, dir_mode: int = 0o70
     return path
 
 
+def _kill_group(pid: int) -> None:
+    """SIGKILL a process group. The group can outlive its leader; an empty one is fine."""
+    with contextlib.suppress(ProcessLookupError):
+        os.killpg(pid, signal.SIGKILL)
+
+
+def _run_group(
+    argv: list[str], *, timeout: float = 60, **kwargs: object
+) -> subprocess.CompletedProcess[str]:
+    """subprocess.run in its own session; the whole process group is killed on every exit.
+
+    subprocess.run kills only the direct child on timeout. A grandchild (the stub
+    wizard under bash) that is blocked would survive as an orphan, and so would
+    one that outlives bash after a normal end. The group is killed on a timeout
+    (before it is raised again), on any other exception and on a normal end.
+    """
+    with subprocess.Popen(argv, start_new_session=True, **kwargs) as proc:  # type: ignore[call-overload]
+        try:
+            out, err = proc.communicate(timeout=timeout)
+        except BaseException:
+            _kill_group(proc.pid)
+            # a pipe holder outside the group must not be waited on forever
+            with contextlib.suppress(subprocess.TimeoutExpired):
+                proc.communicate(timeout=5)
+            raise
+        _kill_group(proc.pid)
+        return subprocess.CompletedProcess(argv, proc.returncode, out, err)
+
+
 def _collect(
     tmp_path: Path,
     env: dict[str, str] | None = None,
@@ -131,6 +163,7 @@ def _collect(
     reconfigure: bool = False,
     after: str = "",
     root: Path = ROOT,
+    timeout: float = 60,
 ) -> subprocess.CompletedProcess[str]:
     """Run hal0_collect_answers with the helpers of install.sh; print the state after it."""
     script = f"""
@@ -162,13 +195,13 @@ if bash -c 'env' | grep -v '^STUB_' | grep -q hf_StubToken; then echo "TOKEN_IN_
 echo "LEFT=$(ls -A "{tmp_path}/prefix/run/hal0-install" 2>/dev/null | tr '\\n' ' ')"
 {after}
 """
-    return subprocess.run(
+    return _run_group(
         ["bash", "-c", script],
-        capture_output=True,
+        timeout=timeout,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
         text=True,
-        timeout=60,
         env={"PATH": os.environ["PATH"], "HOME": str(tmp_path), **(env or {})},
-        check=False,
         cwd=tmp_path,
     )
 
@@ -514,12 +547,12 @@ NO_START=0
 {block}
 echo "LOOP DONE reconfigure=${{_HAL0_RECONFIGURE}} args=${{#_HAL0_INSTALL_ARGS[@]}}"
 """
-    return subprocess.run(
+    return _run_group(
         ["bash", "-c", script, "bash", *args],
-        capture_output=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
         text=True,
         env={"PATH": os.environ["PATH"], **env},
-        check=False,
     )
 
 
@@ -643,13 +676,13 @@ def test_a_document_the_reader_refuses_stops(tmp_path: Path, stub: dict[str, str
 def _seam_run(
     tmp_path: Path, env: dict[str, str], root: Path = ROOT
 ) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
+    return _run_group(
         ["bash", "-c", _seam_script(tmp_path, root=root)],
-        capture_output=True,
-        text=True,
         timeout=60,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
         env={"PATH": os.environ["PATH"], "HAL0_PLAIN": "1", **env},
-        check=False,
         cwd=tmp_path,
     )
 
@@ -729,9 +762,6 @@ def test_an_interrupt_before_the_wizard_handles_it_is_a_quiet_130(
     # Ctrl-C reaches the whole process group. The stub has no handler of its
     # own yet, so it dies of the signal, as the real wizard would before its
     # handler is installed; so does the reader checking a given file.
-    import signal
-    import time
-
     marker = tmp_path / "sleeping"
     env = {
         "PATH": os.environ["PATH"],
@@ -765,8 +795,10 @@ def test_an_interrupt_before_the_wizard_handles_it_is_a_quiet_130(
         os.killpg(proc.pid, signal.SIGINT)
         out, err = proc.communicate(timeout=20)
     finally:
-        if proc.poll() is None:
-            os.killpg(proc.pid, signal.SIGKILL)
+        # the group can outlive bash, so kill it whether or not bash has exited
+        _kill_group(proc.pid)
+        with contextlib.suppress(subprocess.TimeoutExpired):
+            proc.wait(timeout=5)
     assert proc.returncode == 130, (proc.returncode, out, err)
     assert "PAST THE SEAM" not in out
     log = (tmp_path / "report.log").read_text() if (tmp_path / "report.log").exists() else ""
@@ -774,6 +806,92 @@ def test_an_interrupt_before_the_wizard_handles_it_is_a_quiet_130(
     assert list((tmp_path / "prefix" / "run" / "hal0-install").iterdir()) == []
     if stage == "reader":
         assert _records(tmp_path) == [], "the wizard must not start after an interrupt"
+
+
+BLOCKED_ON_FIFO = """
+import os, sys
+with open(sys.argv[2], "w") as fh:
+    fh.write(str(os.getpid()))
+open(sys.argv[1]).read()  # blocks on opening: nothing ever writes to the FIFO
+"""
+
+
+def _wait_for_pid(pidfile: Path, seconds: float = 5) -> int:
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        text = pidfile.read_text(encoding="utf-8") if pidfile.exists() else ""
+        if text:
+            return int(text)
+        time.sleep(0.05)
+    raise AssertionError(f"the blocking child never wrote {pidfile}")
+
+
+def _wait_gone(pid: int, seconds: float = 5) -> bool:
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return True
+        time.sleep(0.1)
+    return False
+
+
+def _blocker(tmp_path: Path) -> tuple[str, Path]:
+    """The command line of a child that blocks opening a FIFO nobody writes to."""
+    fifo = tmp_path / "blocker.fifo"
+    os.mkfifo(fifo)
+    pidfile = tmp_path / "blocker.pid"
+    child = tmp_path / "blocked_on_fifo.py"
+    child.write_text(BLOCKED_ON_FIFO, encoding="utf-8")
+    return f'"{sys.executable}" "{child}" "{fifo}" "{pidfile}"', pidfile
+
+
+def test_a_timed_out_run_leaves_no_process_behind(tmp_path: Path) -> None:
+    command, pidfile = _blocker(tmp_path)
+    # not the last command, so bash forks it instead of exec-ing it: a grandchild
+    after = f"{command}; true"
+    pid = 0
+    gone = False
+    try:
+        with pytest.raises(subprocess.TimeoutExpired):
+            _collect(tmp_path, args=(), after=after, timeout=6)
+        pid = _wait_for_pid(pidfile)
+        gone = _wait_gone(pid)
+        assert gone, f"process {pid} survived the timed-out run"
+    finally:
+        if pid and not gone:
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(pid, signal.SIGKILL)
+
+
+def test_a_grandchild_outliving_its_parent_is_killed_when_the_run_ends(tmp_path: Path) -> None:
+    # bash exits at once; the grandchild stays blocked, with its output sent
+    # away so that no pipe holds the run open. The group outlives its leader.
+    command, pidfile = _blocker(tmp_path)
+    script = (
+        f"{command} >/dev/null 2>&1 &\n"
+        f'for _ in $(seq 100); do [ -s "{pidfile}" ] && break; sleep 0.05; done\n'
+    )
+    pid = 0
+    gone = False
+    try:
+        proc = _run_group(
+            ["bash", "-c", script],
+            timeout=20,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            cwd=tmp_path,
+        )
+        assert proc.returncode == 0
+        pid = _wait_for_pid(pidfile)
+        gone = _wait_gone(pid)
+        assert gone, f"process {pid} survived the end of the run"
+    finally:
+        if pid and not gone:
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(pid, signal.SIGKILL)
 
 
 def test_the_installer_sets_no_interrupt_trap_of_its_own() -> None:
@@ -1084,7 +1202,9 @@ stat() {{ printf '41ed 1000\\n'; }}
 {block}
 echo DONE
 """
-        proc = subprocess.run(["bash", "-c", script], capture_output=True, text=True, check=False)
+        proc = _run_group(
+            ["bash", "-c", script], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+        )
         assert expect in proc.stdout, proc.stdout + proc.stderr
         if expect == "MKDIR":
             assert "MKDIR -p" in proc.stdout and store in proc.stdout and "DONE" in proc.stdout
@@ -1121,7 +1241,9 @@ _HAL0_SAVED_STORE="{var}/models2" hal0_store_is_operator_choice "{var}/models2" 
 {block}
 echo DONE
 """
-    proc = subprocess.run(["bash", "-c", script], capture_output=True, text=True, check=False)
+    proc = _run_group(
+        ["bash", "-c", script], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+    )
     out = proc.stdout
     assert "DONE" in out, out + proc.stderr
     for p in (store, f"{store}/", f"{var}/models", f"{var}//models/./x/"):
@@ -1161,7 +1283,9 @@ hal0_doc_flm_prepare "$HAL0_FLM_MODELS_DIR" "{store}" "{default}"
 echo "FLM=${{HAL0_FLM_MODELS_DIR-unset}} EXPORTED=${{HAL0_ANSWERS_EXPORTED[*]}}"
 bash -c 'echo "CHILD=${{HAL0_FLM_MODELS_DIR-unset}}"'
 """
-    return subprocess.run(["bash", "-c", script], capture_output=True, text=True, check=False)
+    return _run_group(
+        ["bash", "-c", script], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+    )
 
 
 def test_npu_folder_from_document_only_inside_default_or_operator_store(tmp_path: Path) -> None:
@@ -1245,7 +1369,9 @@ _main_python_usable={usable}
 {region}
 echo "usable=$_main_python_usable" >> "$LOG"
 """
-    subprocess.run(["/bin/bash", "-c", script], capture_output=True, text=True, check=False)
+    _run_group(
+        ["/bin/bash", "-c", script], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+    )
     return log.read_text().splitlines()
 
 
@@ -1272,7 +1398,7 @@ def test_the_wizard_refuses_an_old_python(tmp_path: Path, stub: dict[str, str]) 
     )
     fake.chmod(0o755)
     script_env = {**stub, "STUB_DOC": DOC}
-    proc = subprocess.run(
+    proc = _run_group(
         [
             "bash",
             "-c",
@@ -1286,9 +1412,9 @@ _HAL0_INSTALL_ARGS=()
 rc=0; hal0_run_wizard || rc=$?; echo "RC=$rc"
 """,
         ],
-        capture_output=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
         text=True,
-        check=False,
         env={"PATH": os.environ["PATH"], **script_env},
     )
     assert "RC=1" in proc.stdout and "3.12" in proc.stderr, proc.stdout + proc.stderr
@@ -1353,8 +1479,12 @@ echo "FROM_DOC=${{MODELS_DIR_FROM_DOC}} DIR=${{MODELS_DIR}} SAVED=${{HAL0_ANSWER
     env = {"PATH": os.environ["PATH"]}
     if env_models is not None:
         env["HAL0_MODELS_DIR"] = env_models
-    proc = subprocess.run(
-        ["bash", "-c", script, "bash", *args], capture_output=True, text=True, check=False, env=env
+    proc = _run_group(
+        ["bash", "-c", script, "bash", *args],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env=env,
     )
     assert proc.returncode == 0, proc.stdout + proc.stderr
     return proc.stdout.strip()
@@ -1417,7 +1547,9 @@ for p in /home/alice/models/ //a//b/ /a/././b /a/./ /. / /a/. /a/.b/ /a/../b /a/
     printf '%s=%s\\n' "$p" "$(hal0_path_norm "$p")"
 done
 """
-    proc = subprocess.run(["bash", "-c", script], capture_output=True, text=True, check=False)
+    proc = _run_group(
+        ["bash", "-c", script], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+    )
     got = dict(line.split("=", 1) for line in proc.stdout.splitlines())
     assert got == {
         "/home/alice/models/": "/home/alice/models",
