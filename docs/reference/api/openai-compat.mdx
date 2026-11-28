@@ -198,8 +198,12 @@ Responses from `/v1/chat/completions`, `/v1/completions`, `/v1/embeddings`, `/v1
   can be answered by the default slot of the right kind, which serves its own
   model. The `model` field in the body is whatever the backend returns and may
   echo your request, so read this header when the exact model matters, for
-  example before storing embeddings. The header is absent when hal0 does not
-  know the model; it never repeats the name you sent as a guess.
+  example before storing embeddings. The header may be absent: hal0 sets it
+  only when it can vouch for the model, and never repeats the name you sent as
+  a guess. It is absent when the slot stopped serving before the response was
+  built, and on a FastFlowLM (NPU) slot whenever the request named a model
+  other than the one the slot has recorded, including speech-to-text on the
+  NPU, because FastFlowLM chooses the model from the request.
 - **`X-hal0-Slot`**: the slot that served the request. Absent for a remote
   provider that is not a slot.
 

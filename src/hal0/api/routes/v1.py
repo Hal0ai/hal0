@@ -1179,14 +1179,64 @@ RESOLVED_MODEL_HEADER = "X-hal0-Resolved-Model"
 RESOLVED_SLOT_HEADER = "X-hal0-Slot"
 
 
-def _resolved_identity(request: Request, call: Any) -> tuple[str, str]:
+def _sent_model(call: Any) -> str:
+    """The ``model`` hal0 put in the body it forwarded, or ``""`` when the body
+    is not JSON (a multipart upload) or carries none."""
+    try:
+        parsed = json.loads(getattr(call, "body", b"") or b"")
+    except (ValueError, TypeError, UnicodeDecodeError):
+        return ""
+    model = parsed.get("model") if isinstance(parsed, dict) else None
+    return model.strip() if isinstance(model, str) else ""
+
+
+#: Providers whose engine chooses the model from the request: a slot of one
+#: of these may answer with a model other than the one its record holds.
+_REQUEST_MODEL_PROVIDERS: frozenset[str] = frozenset({"flm"})
+
+
+async def _slot_picks_model_by_request(request: Request, slot: str) -> bool:
+    """Whether ``slot``'s engine may answer with the model a request names.
+
+    A llama-server slot and every single-purpose engine serve the one model
+    they loaded whatever the request's ``model`` says. FastFlowLM holds
+    several tags and picks by the request. Read from the slot's config through
+    the same function the launch uses, so it cannot disagree with what runs.
+    Anything unreadable or unknown counts as "may pick by request": the
+    cautious answer for a caller deciding whether to vouch for a model.
+    """
+    slot_manager = getattr(request.app.state, "slot_manager", None)
+    get_config = getattr(slot_manager, "get_config", None)
+    if not callable(get_config):
+        return True
+    try:
+        from hal0.slots.config_write import _cfg_effective_provider
+
+        provider = _cfg_effective_provider(await get_config(slot))
+    except Exception:
+        return True
+    return provider is None or str(provider) in _REQUEST_MODEL_PROVIDERS
+
+
+async def _resolved_identity(
+    request: Request, call: Any, *, sent_model: str | None = None
+) -> tuple[str, str]:
     """``(model, slot)`` that answered ``call``; either may be ``""`` (unknown).
 
-    For a slot, the model is read from the slot's own state (what it has
-    loaded), never from the routing decision: the dispatcher's fallback path
-    records the caller's requested name as ``resolved_model``, which is the
-    one value this header must not repeat. For a remote provider there is no
-    slot, and the model is the id hal0 sent upstream.
+    The model is stated only when hal0 can vouch for it:
+
+    * a remote provider (no slot): the id hal0 sent upstream;
+    * a slot whose engine serves the one model it loaded whatever the request
+      names (llama-server and the single-purpose engines): the registry id in
+      the slot's own state. Never the routing decision's ``resolved_model``:
+      the dispatcher's fallback path records the caller's requested name
+      there, the one value this header must not repeat;
+    * a slot whose engine picks the model from the request (FastFlowLM): the
+      slot's recorded model only when it is also the id hal0 sent. A request
+      that named another tag was answered by something hal0 did not see, so
+      the model is left out and the slot alone is named.
+
+    ``sent_model`` is for callers whose forwarded body is not JSON.
     """
     slot = (
         getattr(call, "slot_name", "") or getattr(call, "container_slot_name", "") or ""
@@ -1198,8 +1248,14 @@ def _resolved_identity(request: Request, call: Any) -> tuple[str, str]:
     try:
         model = loaded(slot) if callable(loaded) else ""
     except Exception:
-        model = ""
-    return (model if isinstance(model, str) else ""), slot
+        return "", slot
+    if not isinstance(model, str) or not model:
+        return "", slot
+    if await _slot_picks_model_by_request(request, slot):
+        sent = (sent_model if sent_model is not None else _sent_model(call)).strip()
+        if sent != model:
+            return "", slot
+    return model, slot
 
 
 def _stamp_resolved(response: Response, *, model: str, slot: str) -> None:
@@ -1303,7 +1359,7 @@ async def _dispatch_and_forward_probed(
             seam.record_error(exc, call=call, request=request, t_entry=t_entry)
         raise
     if isinstance(response, Response):
-        model, slot = _resolved_identity(request, call)
+        model, slot = await _resolved_identity(request, call)
         _stamp_resolved(response, model=model, slot=slot)
     if isinstance(response, StreamingResponse):
         response = _instrument_streaming_throughput(
@@ -2049,21 +2105,6 @@ async def _npu_embed_tag(request: Request, body: dict[str, Any]) -> str:
     return default.strip() if isinstance(default, str) and default.strip() else FLM_EMBED_TAG
 
 
-async def _npu_trio_default(request: Request, slot_type: str, requested: str) -> str:
-    """The ``[model].default`` of the NPU trio slot ``requested`` addresses, or ``""``."""
-    slot_manager = getattr(request.app.state, "slot_manager", None)
-    if slot_manager is None or not isinstance(requested, str):
-        return ""
-    try:
-        configs = await slot_manager.iter_configs()
-    except Exception:
-        return ""
-    cfg = _match_npu_trio_cfg(configs, slot_type, requested.strip())
-    model_section = (cfg or {}).get("model") or {}
-    default = model_section.get("default", "") if isinstance(model_section, dict) else ""
-    return default.strip() if isinstance(default, str) else ""
-
-
 async def _dispatch_via_npu_trio(
     request: Request,
     *,
@@ -2096,6 +2137,8 @@ async def _dispatch_via_npu_trio(
     upstream_resp = await router_obj.dispatch_embed_npu(body=body)
     _touch_npu_shadow_count(request, "flm-embed")
     response = _wrap_npu_trio_response(upstream_resp)
+    # The tag is what hal0 itself put in the forwarded body's ``model`` above
+    # (FastFlowLM validates that field), so hal0 can vouch for it.
     _stamp_resolved(response, model=tag, slot="flm-embed")
     return response
 
@@ -2963,11 +3006,10 @@ async def _forward_multipart(
                 )
                 _touch_npu_shadow_count(request, "flm-stt")
                 stt_response = _wrap_npu_trio_response(upstream_resp)
-                _stamp_resolved(
-                    stt_response,
-                    model=await _npu_trio_default(request, "transcription", model_value),
-                    slot="flm-stt",
-                )
+                # Slot only. The multipart body is forwarded verbatim, the
+                # caller's ``model`` field included, and FastFlowLM chooses
+                # from it; hal0 has no reading of which model transcribed.
+                _stamp_resolved(stt_response, model="", slot="flm-stt")
                 return stt_response
 
     call = await dispatcher.dispatch(request, body={"model": model_value} if model_value else {})
@@ -2984,7 +3026,7 @@ async def _forward_multipart(
     try:
         forwarded = await dispatcher.forward(call)
         if isinstance(forwarded, Response):
-            model, slot = _resolved_identity(request, call)
+            model, slot = await _resolved_identity(request, call, sent_model=model_value or "")
             _stamp_resolved(forwarded, model=model, slot=slot)
         return forwarded
     except httpx.HTTPError as exc:
