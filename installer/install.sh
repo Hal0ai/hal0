@@ -941,6 +941,20 @@ fi
 IS_UPGRADE=0
 [[ -n "${CURRENT_LINK}" && ( -e "${CURRENT_LINK}" || -L "${CURRENT_LINK}" ) ]] && IS_UPGRADE=1
 
+# ── install-in-progress marker: create ──────────────────────────────────────
+# From here on the install changes the host. This file exists exactly while an
+# install is under way, so a re-run after an abort can tell an unfinished
+# install from an upgrade (hal0_install_state in installer/lib/facts.sh reads
+# it). No failure path removes it: not the ERR trap, die(), or any `exit`.
+# Only the success path after the last step does. The state directory may not
+# exist yet on a fresh box; the "Filesystem layout" step's mkdir -p copes with
+# it already being there. Dev installs never create it.
+INSTALL_MARKER="${VAR_DIR}/.install-in-progress"
+if [[ "${DEV_MODE}" -eq 0 ]]; then
+    [[ -d "${VAR_DIR}" ]] || install -d -m 0755 -o root -g root "${VAR_DIR}"
+    : > "${INSTALL_MARKER}"
+fi
+
 ui_step "System user" "~1-2s"
 
 if [[ "${DEV_MODE}" -eq 1 ]]; then
@@ -4784,6 +4798,9 @@ ui_box "hal0 is ready" "${SUMMARY_LINES[@]}"
 # PREVIOUS step when the next one starts, so "Service start" needs this
 # explicit finalize) and report the total wall-clock time.
 ui_step_finalize
+# ── install-in-progress marker: remove ──────────────────────────────────────
+# Every step has finished; the install is complete.
+rm -f "${INSTALL_MARKER}"
 info "Total install time: $((SECONDS / 60))m $((SECONDS % 60))s"
 [[ -n "${HAL0_INSTALL_LOG:-}" ]] && info "Install log: ${HAL0_INSTALL_LOG}"
 
