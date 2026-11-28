@@ -44,6 +44,12 @@ _BAD_CHARS = "the folder may only contain letters, digits, spaces and _ . + @ , 
 _TOO_SHALLOW = "the folder must be at least two levels deep, for example /data/models"
 
 
+def _normalise(path: str) -> str:
+    """normpath, with the two leading slashes POSIX keeps made one."""
+    clean = posixpath.normpath(path)
+    return "/" + clean.lstrip("/") if clean.startswith("/") else clean
+
+
 def _clean_path(text: str, what: str, *, percent: bool = False) -> tuple[str, str | None]:
     """The trimmed, normalised absolute path and the reason it cannot be used, or None."""
     path = text.strip()
@@ -55,12 +61,13 @@ def _clean_path(text: str, what: str, *, percent: bool = False) -> tuple[str, st
         return path, f"{what} must not contain %"
     if not path.startswith("/"):
         return path, f"{what} must start with /"
-    return posixpath.normpath(path), None
+    return _normalise(path), None
 
 
 def _inside(path: str, tree: str) -> bool:
     """Whether path is the tree or lies under it, compared by component."""
-    return PurePosixPath(tree) in (PurePosixPath(path), *PurePosixPath(path).parents)
+    here = PurePosixPath(_normalise(path))
+    return PurePosixPath(tree) in (here, *here.parents)
 
 
 def strictly_inside(path: object, store: object) -> bool:
@@ -69,9 +76,7 @@ def strictly_inside(path: object, store: object) -> bool:
         return False
     if not (path.startswith("/") and store.startswith("/")):
         return False
-    return (
-        PurePosixPath(posixpath.normpath(store)) in PurePosixPath(posixpath.normpath(path)).parents
-    )
+    return PurePosixPath(_normalise(store)) in PurePosixPath(_normalise(path)).parents
 
 
 def check_store_text(text: str) -> tuple[str, str | None]:
@@ -86,6 +91,7 @@ def check_store_text(text: str) -> tuple[str, str | None]:
         return path, "the folder must not contain .."
     if len(typed) > STORE_PATH_MAX:
         return path, "the folder is too long"
+    # path is in the single-root form, so parts[0] is the root alone
     if len(PurePosixPath(path).parts) - 1 < STORE_MIN_COMPONENTS:
         return path, _TOO_SHALLOW
     if not _inside(path, STORE_ALLOWED_TREE):

@@ -755,3 +755,10 @@ def test_an_outside_npu_folder_is_still_an_override() -> None:
         if o.key == "model_store.flm_path"
     ]
     assert (found.value, found.source) == ("/elsewhere/flm", "HAL0_FLM_MODELS_DIR")
+
+
+def test_an_npu_variable_written_with_a_doubled_leading_slash_counts_as_inside(
+    catalog: Catalog,
+) -> None:
+    doc = _with_flm(catalog, "/a/models", "//a/models/flm")
+    assert get(doc, "model_store.flm_path") == "//a/models/flm"

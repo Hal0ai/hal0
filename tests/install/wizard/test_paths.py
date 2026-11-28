@@ -111,3 +111,26 @@ def test_a_file_in_the_way_is_not_a_folder(tmp_path: Path) -> None:
     if validate_folder(str(tmp_path))[1] is not None:
         pytest.skip("this machine's temporary folder is outside the allowed characters")
     assert validate_folder(f"{f}/models")[1] == f"{f} is not a folder"
+
+
+@pytest.mark.parametrize(
+    ("text", "error"),
+    [
+        ("//etc/models", "the folder cannot be inside /etc"),
+        ("//var/lib/x", "the folder cannot be inside /var/lib"),
+        ("//data", "the folder must be at least two levels deep, for example /data/models"),
+    ],
+)
+def test_a_doubled_leading_slash_is_the_same_folder_for_the_rules(text: str, error: str) -> None:
+    assert validate_folder(text)[1] == error
+
+
+def test_a_doubled_leading_slash_is_normalised_to_one() -> None:
+    assert validate_folder("//srv/a/b") == ("/srv/a/b", None)
+    assert validate_folder("//var/lib/hal0/models") == ("/var/lib/hal0/models", None)
+
+
+def test_strictly_inside_ignores_a_doubled_leading_slash() -> None:
+    assert paths.strictly_inside("//srv/m/n", "/srv/m")
+    assert paths.strictly_inside("/srv/m/n", "//srv/m")
+    assert not paths.strictly_inside("//srv/m", "/srv/m")

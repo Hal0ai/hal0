@@ -882,3 +882,11 @@ def test_changing_the_store_keeps_an_npu_folder_still_inside_it(
     s = open_field(s, "model_store")
     s = run(s, *"/srv/pool", "ENTER", "ENTER")
     assert chosen(s)["model_store.flm_path"] == "/srv/pool/models/npu"
+
+
+def test_an_npu_folder_typed_with_a_doubled_leading_slash_is_recorded_with_one(
+    catalog: Catalog, npu_facts: Facts
+) -> None:
+    s = run(_npu_storage(catalog, npu_facts), *"//srv/pool/models/npu", "ENTER")
+    assert view(s).error is None
+    assert chosen(s)["model_store.flm_path"] == "/srv/pool/models/npu"
