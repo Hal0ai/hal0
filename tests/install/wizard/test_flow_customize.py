@@ -1067,7 +1067,8 @@ def test_the_assistant_note_follows_the_table(
 ) -> None:
     facts = replace(usable_facts, hermes_installed=installed, hermes_stopped_by_setup=stopped)
     s = custom(catalog, facts)
-    if not ticked:
+    # With a stop in force the row opens unticked; otherwise it opens ticked.
+    if ticked is (stopped is True):
         s = open_field(s, "hermes")
     row = _assistant_job(s)
     assert row.value is ticked
@@ -1136,3 +1137,22 @@ def test_ordinary_non_ascii_text_is_not_refused_by_the_shared_check(text: str) -
     from hal0.install.wizard.render import has_unsafe_text
 
     assert not has_unsafe_text(text)
+
+
+# ------------------------- an assistant that setup stopped starts unticked in Customize
+
+
+def test_customize_opens_a_stopped_assistant_unticked_and_ticking_starts_it_again(
+    catalog: Catalog, usable_facts: Facts
+) -> None:
+    facts = replace(usable_facts, hermes_installed=True, hermes_stopped_by_setup=True)
+    s = custom(catalog, facts)
+    row = _assistant_job(s)
+    assert row.value is False
+    assert row.note == "installed; stopped"
+    assert effective_for(s)["apps"]["hermes"]["enabled"] is False
+    s = open_field(s, "hermes")
+    row = _assistant_job(s)
+    assert row.value is True
+    assert row.note == "installed; will be started again"
+    assert effective_for(s)["apps"]["hermes"]["enabled"] is True

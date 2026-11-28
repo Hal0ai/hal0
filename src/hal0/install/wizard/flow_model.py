@@ -138,6 +138,7 @@ def effective_doc(s: State) -> Document:
         now="",
         install_state=s.facts.install_state,
         mode=s.mode,
+        assistant_stopped=s.facts.hermes_stopped_by_setup is True,
     )
 
 

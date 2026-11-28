@@ -2289,3 +2289,101 @@ def test_a_marker_write_that_fails_after_the_create_leaves_no_file(
         cli._write_marker(state, shown)
     assert str(shown) in str(raised.value)
     assert not shown.exists()
+
+
+# ------------------------------------- an assistant that setup stopped stays stopped
+
+
+def _stop_facts(tmp_path: Path, stopped: bool | None) -> Path:
+    hermes: dict[str, object] = {"installed": True}
+    if stopped is not None:
+        hermes["stopped_by_setup"] = stopped
+    return _facts_file(tmp_path, "hermes.json", hermes=hermes)
+
+
+def _enabled(path: Path) -> object:
+    return json.loads(path.read_text())["apps"]["hermes"]["enabled"]
+
+
+@pytest.mark.parametrize(("stopped", "expected"), [(True, False), (False, True), (None, True)])
+def test_three_enters_on_recommended_follow_the_stop_fact(
+    stopped: bool | None,
+    expected: bool,
+    catalog_path: Path,
+    tmp_path: Path,
+    pty_pair: tuple[int, str],
+    spawn: Callable[..., subprocess.Popen[str]],
+) -> None:
+    master, slave = pty_pair
+    out = tmp_path / "a.json"
+    facts = _stop_facts(tmp_path, stopped)
+    p = spawn("--catalog", catalog_path, "--facts", facts, "--out", out, "--tty", slave)
+    wait_for_output(master)
+    os.write(master, ENTER * 3)
+    code, shown = wait_exit(p, master)
+    assert code == 0
+    assert _enabled(out) is expected
+    review = strip_ansi(shown.decode())
+    assert ("stays stopped" in review) is (stopped is True)
+    assert ("will be started again" in review) is False
+    if not expected:
+        assert json.loads(out.read_text())["apps"]["hermes"].get("terminal_tool") is False
+
+
+def test_saved_answers_with_the_assistant_on_do_not_lift_a_stop(
+    catalog_path: Path, tmp_path: Path
+) -> None:
+    saved = _write_json(tmp_path / "saved.json", {"apps": {"hermes": {"enabled": True}}})
+    out = tmp_path / "a.json"
+    facts = _stop_facts(tmp_path, True)
+    r = wizard(
+        "--catalog", catalog_path, "--facts", facts, "--saved", saved, "--out", out, "--headless"
+    )
+    assert r.returncode == 0
+    assert _enabled(out) is False
+
+
+@pytest.mark.parametrize("value", [True, False])
+def test_a_given_document_decides_for_a_stopped_assistant(
+    value: bool, catalog_path: Path, tmp_path: Path
+) -> None:
+    given = _write_json(tmp_path / "given.json", {"apps": {"hermes": {"enabled": value}}})
+    out = tmp_path / "a.json"
+    facts = _stop_facts(tmp_path, True)
+    r = wizard("--catalog", catalog_path, "--facts", facts, "--answers", given, "--out", out)
+    assert r.returncode == 0
+    assert _enabled(out) is value
+
+
+def test_no_hermes_keeps_a_stopped_assistant_off(catalog_path: Path, tmp_path: Path) -> None:
+    out = tmp_path / "a.json"
+    facts = _stop_facts(tmp_path, True)
+    r = wizard(
+        "--catalog", catalog_path, "--facts", facts, "--out", out, "--headless", "--", "--no-hermes"
+    )
+    assert r.returncode == 0
+    assert _enabled(out) is False
+
+
+@pytest.mark.parametrize(("stopped", "expected"), [(True, False), (False, True), (None, True)])
+def test_headless_follows_the_stop_fact(
+    stopped: bool | None, expected: bool, catalog_path: Path, tmp_path: Path
+) -> None:
+    out = tmp_path / "a.json"
+    facts = _stop_facts(tmp_path, stopped)
+    r = wizard("--catalog", catalog_path, "--facts", facts, "--out", out, "--headless")
+    assert r.returncode == 0
+    assert _enabled(out) is expected
+
+
+def test_the_minimal_document_is_the_same_with_or_without_a_stop(
+    catalog_path: Path, tmp_path: Path
+) -> None:
+    docs = []
+    for stopped in (True, False):
+        out = tmp_path / f"min-{stopped}.json"
+        facts = _stop_facts(tmp_path, stopped)
+        args = ("--catalog", catalog_path, "--facts", facts, "--out", out, "--headless")
+        assert wizard(*args, "--", "--bare").returncode == 0
+        docs.append(strip_meta(json.loads(out.read_text())))
+    assert docs[0] == docs[1]

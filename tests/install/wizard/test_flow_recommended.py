@@ -797,8 +797,17 @@ def _stop_rows(rows: tuple[Row, ...]) -> list[Row]:
     return [r for r in rows if r.id == "assistant_stop"]
 
 
-def _minimal_review(catalog: Catalog, facts: Facts, over: list[Override] | None = None) -> State:
-    return run(start(catalog, facts, over=_MINIMAL if over is None else over), "ENTER", "ENTER")
+_NAMED_ON = {"apps": {"hermes": {"enabled": True}}}  # a given document that names the row on
+
+
+def _minimal_review(
+    catalog: Catalog,
+    facts: Facts,
+    over: list[Override] | None = None,
+    given: dict[str, object] | None = None,
+) -> State:
+    over = _MINIMAL if over is None else over
+    return run(start(catalog, facts, over=over, given=given), "ENTER", "ENTER")
 
 
 def test_minimal_with_an_installed_assistant_says_it_will_be_stopped(
@@ -903,7 +912,10 @@ def test_the_assistant_row_follows_the_table(
     expected: str | None,
 ) -> None:
     over = [] if on else [Override("apps.hermes.enabled", False, "--no-hermes")]
-    rows = view(_minimal_review(catalog, _facts_of(usable_facts, installed, stopped), over)).rows
+    # With a stop in force the preset no longer turns the row on: a given document must.
+    given = _NAMED_ON if on and stopped is True else None
+    facts = _facts_of(usable_facts, installed, stopped)
+    rows = view(_minimal_review(catalog, facts, over, given)).rows
     found = [(r.label, r.detail) for r in _stop_rows(rows)]
     assert found == ([] if expected is None else [(_STOP_LABEL, expected)])
     if expected is not None:
@@ -930,8 +942,8 @@ def test_no_assistant_row_with_a_mode_in_any_case(
 def test_the_recommended_review_that_starts_the_assistant_again_fits_80_by_24(
     catalog: Catalog, usable_facts: Facts
 ) -> None:
-    s = run(start(catalog, _facts_of(usable_facts, True, True)), "ENTER", "ENTER")
-    review = view(s)
+    facts = _facts_of(usable_facts, True, True)
+    review = view(_minimal_review(catalog, facts, [], _NAMED_ON))
     assert review.screen is Screen.REVIEW
     assert [r.detail for r in _stop_rows(review.rows)] == [_AGAIN]
     for plain in (False, True):
