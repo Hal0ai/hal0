@@ -232,6 +232,21 @@ def _install_type(layers: Sequence[tuple[str, Document]]) -> tuple[str, str]:
     return "recommended", "preset"
 
 
+def is_gone_starter(catalog: Catalog, value: object) -> bool:
+    """True when a saved chat model is one the model list no longer offers.
+
+    False when the list has no chat models at all, and for ``auto``, ``none`` and
+    anything that is not a text value.
+    """
+    offered = {r.model for r in catalog.model_ladder if r.role == "starter"}
+    return (
+        isinstance(value, str)
+        and value not in ("auto", "none")
+        and bool(offered)
+        and (value not in offered)
+    )
+
+
 def _drop_gone_starter(catalog: Catalog, saved: Document, higher: Sequence[Document]) -> None:
     """Forget a saved chat model that the model list no longer offers.
 
@@ -244,10 +259,7 @@ def _drop_gone_starter(catalog: Catalog, saved: Document, higher: Sequence[Docum
         return
     key = question.answer_key
     value = get(saved, key)
-    offered = {r.model for r in catalog.model_ladder if r.role == "starter"}
-    if not isinstance(value, str) or value in ("auto", "none") or not offered:
-        return
-    if value in offered or any(get(layer, key) is not None for layer in higher):
+    if not is_gone_starter(catalog, value) or any(get(layer, key) is not None for layer in higher):
         return
     parent = get(saved, key.rpartition(".")[0]) if "." in key else saved
     if isinstance(parent, dict):

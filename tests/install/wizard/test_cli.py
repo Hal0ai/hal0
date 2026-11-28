@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import errno
 import json
 import os
 import re
@@ -337,6 +338,143 @@ def test_an_unwritable_out_path_is_one_line_exit_2(catalog_path: Path, tmp_path:
     assert r.returncode == 2 and len(r.stderr.strip().splitlines()) == 1
 
 
+# ------------------------------------------- the chat model of a run with no screens
+
+
+def _starter_run(
+    tmp_path: Path,
+    catalog_path: Path,
+    *args: object,
+    env: dict[str, str] | None = None,
+    tty: str | None = None,
+) -> dict[str, dict[str, object]]:
+    """Run the wizard to the end and return the document it wrote."""
+    out = tmp_path / "starter.json"
+    r = wizard("--catalog", catalog_path, "--out", out, *args, env=env, tty=tty)
+    assert r.returncode == 0, r.stderr
+    doc: dict[str, dict[str, object]] = json.loads(out.read_text())
+    return doc
+
+
+def _saved_with(tmp_path: Path, models: dict[str, object] | None) -> Path:
+    saved: dict[str, object] = {
+        "version": 1,
+        "install": {"type": "recommended"},
+        "model_store": {"path": str(tmp_path)},
+        "meta": {"saved_at": "2026-01-02T03:04:05Z"},
+    }
+    if models is not None:
+        saved["models"] = models
+    return _write_json(tmp_path / "saved-starter.json", saved)
+
+
+@pytest.mark.parametrize("how", ["headless", "noninteractive", "no_terminal"])
+def test_a_fresh_run_with_no_screens_leaves_the_chat_model_out(
+    how: str, catalog_path: Path, tmp_path: Path
+) -> None:
+    extra: dict[str, tuple[list[object], dict[str, str]]] = {
+        "headless": (["--headless"], {}),
+        "noninteractive": ([], {"HAL0_NONINTERACTIVE": "1"}),
+        "no_terminal": (["--tty", tmp_path / "absent-terminal"], {}),
+    }
+    args, env = extra[how]
+    doc = _starter_run(tmp_path, catalog_path, *args, env=env)
+    assert "starter" not in doc["models"]
+    assert doc["install"]["type"] == "recommended" and doc["models"]["brain"] == "auto"
+
+
+@pytest.mark.parametrize(
+    ("env", "expected"),
+    [
+        ({"HAL0_PULL_AGENT_MODEL": "1"}, "auto"),
+        ({"HAL0_PULL_AGENT_MODEL": "0"}, "none"),
+        ({"HAL0_AGENT_MODEL": "small-1"}, "small-1"),
+    ],
+)
+def test_a_variable_that_names_the_chat_model_keeps_it(
+    env: dict[str, str], expected: str, catalog_path: Path, ladder_models_path: Path, tmp_path: Path
+) -> None:
+    doc = _starter_run(
+        tmp_path,
+        catalog_path,
+        "--models",
+        ladder_models_path,
+        "--headless",
+        env={**env, "HAL0_NONINTERACTIVE": "1"},
+    )
+    assert doc["models"]["starter"] == expected
+
+
+@pytest.mark.parametrize(
+    ("given_doc", "expected"),
+    [
+        ({"models": {"starter": "auto"}}, "auto"),
+        ({"models": {"starter": "big-1"}}, "big-1"),
+        ({"install": {"type": "recommended"}}, None),
+    ],
+)
+def test_a_given_document_keeps_the_chat_model_only_when_it_names_one(
+    given_doc: dict[str, object],
+    expected: str | None,
+    catalog_path: Path,
+    ladder_models_path: Path,
+    tmp_path: Path,
+) -> None:
+    given = _write_json(tmp_path / "given.json", given_doc)
+    doc = _starter_run(tmp_path, catalog_path, "--models", ladder_models_path, "--answers", given)
+    if expected is None:
+        assert "starter" not in doc["models"]
+        assert doc["models"]["brain"] == "auto"
+    else:
+        assert doc["models"]["starter"] == expected
+
+
+@pytest.mark.parametrize(
+    ("saved_models", "expected"),
+    [
+        ({"starter": "auto"}, "auto"),
+        ({"starter": "big-1"}, "big-1"),
+        ({"brain": "auto"}, None),
+        (None, None),
+        ({"starter": "retired-9"}, None),
+    ],
+)
+def test_an_upgrade_keeps_a_saved_chat_model_only_when_it_is_still_offered(
+    saved_models: dict[str, object] | None,
+    expected: str | None,
+    catalog_path: Path,
+    ladder_models_path: Path,
+    upgrade_facts_path: Path,
+    tmp_path: Path,
+) -> None:
+    saved = _saved_with(tmp_path, saved_models)
+    doc = _starter_run(
+        tmp_path,
+        catalog_path,
+        "--models",
+        ladder_models_path,
+        "--facts",
+        upgrade_facts_path,
+        "--saved",
+        saved,
+    )
+    if expected is None:
+        assert "starter" not in doc["models"]
+        assert doc["models"]["brain"] == "auto"
+    else:
+        assert doc["models"]["starter"] == expected
+
+
+def test_minimal_with_no_screens_keeps_none_as_the_chat_model(
+    catalog_path: Path, tmp_path: Path
+) -> None:
+    doc = _starter_run(tmp_path, catalog_path, "--headless", "--", "--bare")
+    assert doc["models"]["starter"] == "none"
+    given = _write_json(tmp_path / "given-minimal.json", {"install": {"type": "minimal"}})
+    doc = _starter_run(tmp_path, catalog_path, "--answers", given)
+    assert doc["models"]["starter"] == "none"
+
+
 # --------------------------------------------------------------- upgrade
 
 
@@ -426,7 +564,12 @@ def test_typing_enter_three_times_writes_the_same_document_as_headless(
     wait_for_output(master)
     os.write(master, ENTER * 3)
     assert wait_exit(p, master)[0] == 0
-    assert strip_meta(json.loads(a.read_text())) == strip_meta(json.loads(b.read_text()))
+    headless, screens = json.loads(a.read_text()), json.loads(b.read_text())
+    # The review screen lists the chat model, so a run that showed it keeps the preset's
+    # `auto`; a run with no screens leaves it out (nobody saw its size).
+    assert "starter" not in headless["models"] and screens["models"]["starter"] == "auto"
+    headless["models"]["starter"] = "auto"
+    assert strip_meta(headless) == strip_meta(screens)
     assert stat.S_IMODE(b.stat().st_mode) == 0o600
 
 
@@ -1194,6 +1337,64 @@ def test_an_internal_error_is_one_line_exit_70_and_writes_nothing(
     assert _tty_attrs(slave) == before
 
 
+def test_an_oserror_that_is_a_bug_is_exit_70_not_an_interrupt(
+    catalog_path: Path,
+    tmp_path: Path,
+    pty_pair: tuple[int, str],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from hal0.install.wizard import flow, term
+
+    _, slave = pty_pair
+    before = _tty_attrs(slave)
+
+    def broken(*args: object, **kwargs: object) -> object:
+        raise OSError("bug")
+
+    monkeypatch.setattr(flow, "press", broken)
+    out = tmp_path / "a.json"
+    argv = ["--catalog", str(catalog_path), "--out", str(out), "--tty", slave]
+    # Opening the terminal discards typed-ahead input, so hand the loop its key directly.
+    monkeypatch.setattr(term.Terminal, "read_key", lambda self: "ENTER")
+    code = cli.main(argv, environ={"TERM": "xterm"})
+    captured = capsys.readouterr()
+    assert code == 70
+    assert captured.err == "hal0 setup: internal error (OSError)\n"
+    assert not out.exists()
+    assert _tty_attrs(slave) == before
+
+
+@pytest.mark.parametrize("method", ["read_key", "read_line", "width", "draw"])
+def test_a_lost_terminal_is_an_interruption_exit_130(
+    method: str,
+    catalog_path: Path,
+    tmp_path: Path,
+    pty_pair: tuple[int, str],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from hal0.install.wizard import term
+
+    _, slave = pty_pair
+    before = _tty_attrs(slave)
+
+    def lost(*args: object, **kwargs: object) -> object:
+        raise OSError(errno.EIO, "terminal lost")
+
+    monkeypatch.setattr(term.Terminal, method, lost)
+    plain = method == "read_line"  # read_line is the plain form's call
+    env = {"TERM": "xterm", **({"HAL0_PLAIN": "1"} if plain else {})}
+    out = tmp_path / "a.json"
+    argv = ["--catalog", str(catalog_path), "--out", str(out), "--tty", slave]
+    code = cli.main(argv, environ=env)
+    captured = capsys.readouterr()
+    assert code == cli.EXIT_INTERRUPTED == 130
+    assert captured.out == ""
+    assert not out.exists()
+    assert _tty_attrs(slave) == before
+
+
 def test_a_keyboard_interrupt_inside_the_screens_is_still_130(
     catalog_path: Path,
     tmp_path: Path,
@@ -1763,3 +1964,256 @@ def test_a_path_that_cannot_be_checked_is_refused_like_an_existing_one(
         "--chosen-folder-out", blocker / "folder",
     )  # fmt: skip
     assert r.returncode == 2 and r.stderr == NOT_THERE + "\n" and not out.exists()
+
+
+# ------------------------------------------- the screens-shown marker
+
+SHOWN_EXISTS = "hal0 setup: --screens-shown-out must name a path that does not exist"
+
+
+def test_a_confirmed_run_leaves_the_marker_with_its_content_and_mode(
+    catalog_path: Path,
+    tmp_path: Path,
+    pty_pair: tuple[int, str],
+    spawn: Callable[..., subprocess.Popen[str]],
+) -> None:
+    out, shown = tmp_path / "a.json", tmp_path / "shown"
+    code = _screens_run(
+        spawn,
+        pty_pair,
+        [ENTER * 3],
+        "--catalog",
+        catalog_path,
+        "--out",
+        out,
+        "--screens-shown-out",
+        shown,
+    )
+    assert code == 0 and out.exists()
+    assert shown.read_bytes() == b"shown\n"
+    assert stat.S_IMODE(shown.stat().st_mode) == 0o600
+
+
+def test_customize_that_is_confirmed_writes_the_marker_too(
+    catalog_path: Path,
+    tmp_path: Path,
+    pty_pair: tuple[int, str],
+    spawn: Callable[..., subprocess.Popen[str]],
+) -> None:
+    out, shown = tmp_path / "a.json", tmp_path / "shown"
+    code = _screens_run(
+        spawn,
+        pty_pair,
+        [*CUSTOM_KEYS, ENTER * 8],
+        "--catalog",
+        catalog_path,
+        "--out",
+        out,
+        "--screens-shown-out",
+        shown,
+    )
+    assert code == 0 and json.loads(out.read_text())["install"]["type"] == "custom"
+    assert shown.read_bytes() == b"shown\n"
+
+
+def test_a_run_without_screens_writes_no_marker(
+    catalog_path: Path,
+    tmp_path: Path,
+    pty_pair: tuple[int, str],
+    upgrade_facts_path: Path,
+    saved_path: Path,
+) -> None:
+    given = _write_json(tmp_path / "given.json", {})
+    base = ["--catalog", catalog_path, "--screens-shown-out"]
+    cases: list[tuple[list[object], dict[str, str], str | None]] = [
+        (["--headless"], {}, pty_pair[1]),
+        ([], {"HAL0_NONINTERACTIVE": "1"}, pty_pair[1]),
+        (["--answers", given], {}, pty_pair[1]),
+        ([], {}, str(tmp_path / "absent-terminal")),
+        (["--facts", upgrade_facts_path, "--saved", saved_path], {}, pty_pair[1]),
+    ]
+    for number, (extra, env, tty) in enumerate(cases):
+        shown = tmp_path / f"shown{number}"
+        out = tmp_path / f"a{number}.json"
+        r = wizard(*base, shown, "--out", out, *extra, env=env, tty=tty)
+        assert r.returncode == 0, (number, r.stderr)
+        assert out.exists() and not shown.exists(), number
+    assert read_all(pty_pair[0]) == b""
+
+
+@pytest.mark.parametrize(
+    ("keys", "code"),
+    [
+        ([b"q"], 10),
+        ([ENTER, ENTER, b"q"], 10),
+        ([ENTER, ENTER, b"\x03"], 130),
+    ],
+    ids=["quit-first-screen", "quit-review", "interrupt-review"],
+)
+def test_quit_and_interrupt_write_no_marker(
+    keys: list[bytes],
+    code: int,
+    catalog_path: Path,
+    tmp_path: Path,
+    pty_pair: tuple[int, str],
+    spawn: Callable[..., subprocess.Popen[str]],
+) -> None:
+    out, shown = tmp_path / "a.json", tmp_path / "shown"
+    got = _screens_run(
+        spawn, pty_pair, keys, "--catalog", catalog_path, "--out", out,
+        "--screens-shown-out", shown,
+    )  # fmt: skip
+    assert got == code
+    assert not out.exists() and not shown.exists()
+
+
+def _existing(kind: str, tmp_path: Path) -> Path:
+    path = tmp_path / "shown"
+    if kind == "file":
+        path.write_text("mine")
+    elif kind == "directory":
+        path.mkdir()
+    elif kind == "symlink":
+        (tmp_path / "target").write_text("mine")
+        path.symlink_to(tmp_path / "target")
+    else:
+        path.symlink_to(tmp_path / "nowhere")
+    return path
+
+
+@pytest.mark.parametrize("kind", ["file", "directory", "symlink", "dangling"])
+def test_a_marker_path_that_exists_is_a_usage_error(
+    kind: str, catalog_path: Path, tmp_path: Path
+) -> None:
+    shown = _existing(kind, tmp_path)
+    before = (shown.is_symlink(), shown.is_dir(), os.readlink(shown) if shown.is_symlink() else "")
+    out = tmp_path / "a.json"
+    r = wizard("--catalog", catalog_path, "--out", out, "--headless", "--screens-shown-out", shown)
+    assert r.returncode == 2 and r.stderr == SHOWN_EXISTS + "\n" and r.stdout == ""
+    assert not out.exists()
+    assert before == (
+        shown.is_symlink(),
+        shown.is_dir(),
+        os.readlink(shown) if shown.is_symlink() else "",
+    )
+    if kind == "file":
+        assert shown.read_text() == "mine"
+    if kind == "symlink":
+        assert (tmp_path / "target").read_text() == "mine"
+    if kind == "dangling":
+        assert not (tmp_path / "nowhere").exists()
+
+
+def test_a_marker_that_cannot_be_written_stops_the_run_with_no_files(
+    catalog_path: Path,
+    tmp_path: Path,
+    pty_pair: tuple[int, str],
+    saved_path: Path,
+    spawn: Callable[..., subprocess.Popen[str]],
+) -> None:
+    master, slave = pty_pair
+    out, secret, folder = tmp_path / "a.json", tmp_path / "token", tmp_path / "folder"
+    shown = tmp_path / "missing" / "shown"
+    p = spawn(
+        "--catalog", catalog_path, "--saved", saved_path, "--out", out, "--tty", slave,
+        "--secret-out", secret, "--chosen-folder-out", folder, "--screens-shown-out", shown,
+        capture=True,
+    )  # fmt: skip
+    wait_for_output(master)
+    for key in [*PICK_PRESET, ENTER]:  # the model folder is changed on screen
+        os.write(master, key)
+    code, _ = wait_exit(p, master)
+    assert p.stdout is not None and p.stderr is not None
+    stdout, stderr = p.stdout.read(), p.stderr.read()
+    assert code == 2  # the code an unwritable --out gives too
+    assert stdout == ""
+    assert len(stderr.strip().splitlines()) == 1 and stderr.startswith("hal0 setup: ")
+    assert str(shown) in stderr
+    assert not out.exists() and not secret.exists() and not folder.exists()
+
+
+def test_a_marker_path_below_a_regular_file_is_a_usage_error(
+    catalog_path: Path, tmp_path: Path
+) -> None:
+    blocker = tmp_path / "blocker"
+    blocker.write_text("x")
+    out = tmp_path / "a.json"
+    r = wizard(
+        "--catalog", catalog_path, "--out", out, "--headless",
+        "--screens-shown-out", blocker / "shown",
+    )  # fmt: skip
+    assert r.returncode == 2 and r.stderr == SHOWN_EXISTS + "\n" and r.stdout == ""
+    assert not out.exists() and blocker.read_text() == "x"
+
+
+SAME_PATH = "hal0 setup: --screens-shown-out must not name the same path as another output file"
+
+
+@pytest.mark.parametrize("other", ["--out", "--secret-out", "--chosen-folder-out"])
+def test_the_marker_path_may_not_be_another_output_path(
+    other: str, catalog_path: Path, tmp_path: Path
+) -> None:
+    same = tmp_path / "same"
+    odd = tmp_path / "sub" / ".." / "same"  # the same file, written differently
+    args: dict[str, Path] = {
+        "--out": tmp_path / "a.json",
+        "--secret-out": tmp_path / "token",
+        "--chosen-folder-out": tmp_path / "folder",
+    }
+    args[other] = same
+    flat = [x for pair in args.items() for x in pair]
+    r = wizard("--catalog", catalog_path, "--headless", *flat, "--screens-shown-out", odd)
+    assert r.returncode == 2 and r.stderr == SAME_PATH + "\n" and r.stdout == ""
+    assert list(tmp_path.glob("**/*")) == []
+
+
+def test_a_saved_copy_named_like_the_marker_never_leaves_a_forged_marker(
+    catalog_path: Path,
+    tmp_path: Path,
+    pty_pair: tuple[int, str],
+    spawn: Callable[..., subprocess.Popen[str]],
+) -> None:
+    master, slave = pty_pair
+    out, shown = tmp_path / "a.json", tmp_path / "shown"
+    p = spawn(
+        "--catalog", catalog_path, "--out", out, "--tty", slave,
+        "--screens-shown-out", shown, capture=True,
+    )  # fmt: skip
+    wait_for_output(master)
+    typed = [c.encode() for c in str(shown)]
+    for key in [ENTER, ENTER, b"s", *typed, ENTER, ENTER]:
+        os.write(master, key)
+    code, _ = wait_exit(p, master)
+    assert p.stderr is not None
+    stderr = p.stderr.read()
+    assert code == 2 and not out.exists()
+    assert len(stderr.strip().splitlines()) == 1 and str(shown) in stderr
+    assert shown.read_bytes() != b"shown\n"  # the copy is there; no marker replaced it
+
+
+def test_a_copy_that_could_not_be_written_cannot_take_the_markers_place(
+    catalog: Catalog, usable_facts: Facts, tmp_path: Path
+) -> None:
+    from dataclasses import replace
+
+    from hal0.install.wizard import flow
+
+    state = flow.start(catalog, usable_facts)
+    for _ in range(3):
+        state = flow.press(state, "ENTER")
+    shown = tmp_path / "shown"
+    state = replace(state, answers={**state.answers, flow.SAVE_COPY_KEY: str(shown)})
+    inp = Inputs(catalog, usable_facts, None, None, (), "v")
+    out = tmp_path / "a.json"
+    with pytest.raises(DocumentError):
+        cli._finish(inp, state, out, None, None, shown)
+    assert not shown.exists() and not out.exists()
+
+
+def test_the_help_lists_the_marker_option() -> None:
+    r = wizard("--help")
+    assert r.returncode == 0
+    assert "--screens-shown-out" in r.stdout
+    assert "write a one-line file when the screens were shown and confirmed" in " ".join(
+        r.stdout.split()
+    )

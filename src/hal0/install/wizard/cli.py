@@ -24,6 +24,7 @@ from .document import (
     DocumentError,
     effective,
     get,
+    is_gone_starter,
     load_document,
     overrides,
     write_document,
@@ -46,6 +47,10 @@ VERSION_TEXT = "hal0 setup wizard 1"
 _CPU_CONSENT_LINE = "set HAL0_ALLOW_CPU_ONLY=1 to continue without a GPU"
 _NO_TOKEN_PLACE = "no place to keep the token; add it later"
 _FOLDER_EXISTS = "--chosen-folder-out must name a path that does not exist"
+_SHOWN_EXISTS = "--screens-shown-out must name a path that does not exist"
+_SHOWN_SAME = "--screens-shown-out must not name the same path as another output file"
+_SHOWN_TAKEN = "cannot be created, something is already there"
+_SHOWN_TEXT = "shown\n"
 _FOLDER_NOT_RECORDED = "could not record the chosen folder"
 _ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
 
@@ -71,6 +76,11 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--secret-out", type=Path, help="where to keep a typed token")
     parser.add_argument(
         "--chosen-folder-out", type=Path, help="where to record a model folder chosen on screen"
+    )
+    parser.add_argument(
+        "--screens-shown-out",
+        type=Path,
+        help="write a one-line file when the screens were shown and confirmed (for the installer)",
     )
     parser.add_argument("--tty", default="/dev/tty", help="the terminal device to use")
     parser.add_argument("--hal0-version", default="unknown", help="the version being installed")
@@ -162,8 +172,34 @@ def _gone_saved_folder(inp: Inputs, doc: Document) -> str | None:
     return path
 
 
+def _leave_out_unseen_starter(inp: Inputs, doc: Document) -> None:
+    """Take the chat model out of a document that nobody saw it in.
+
+    A run with no screens must not start the large download on the preset's say
+    alone: the key stays only when a flag or variable, the given answers or the
+    saved answers (unless the list no longer offers that model) name it, or when
+    the preset's value is ``none``.
+    """
+    question = inp.catalog.questions.get("starter_model")
+    if question is None:
+        return
+    key = question.answer_key
+    saved = get(inp.saved or {}, key)
+    named = (
+        any(o.key == key for o in inp.over)
+        or get(inp.given or {}, key) is not None
+        or (saved is not None and not is_gone_starter(inp.catalog, saved))
+    )
+    parent_key, _, name = key.rpartition(".")
+    parent = get(doc, parent_key) if parent_key else doc
+    if named or get(doc, key) in (None, "none") or not isinstance(parent, dict):
+        return
+    parent.pop(name, None)
+
+
 def _run_headless(inp: Inputs, out: Path) -> int:
     doc = _document(inp, {})
+    _leave_out_unseen_starter(inp, doc)
     stop = _headless_stop(inp, doc)
     if stop is not None:
         print(f"hal0 setup: {stop}", file=sys.stderr)
@@ -232,12 +268,25 @@ def _record_folder(folder: str, path: Path) -> None:
         print(f"hal0 setup: {_FOLDER_NOT_RECORDED}", file=sys.stderr)
 
 
+def _write_marker(state: State, path: Path) -> None:
+    """Create the marker as a new file; it is never put in place of anything."""
+    copy = flow.chosen(state).get(flow.SAVE_COPY_KEY)
+    if os.path.lexists(path) or (copy is not None and _same(str(copy), path)):
+        raise DocumentError(f"{path}: {_SHOWN_TAKEN}")
+    write_private_text(_SHOWN_TEXT, path)
+
+
+def _same(a: str | Path, b: str | Path) -> bool:
+    return os.path.abspath(a) == os.path.abspath(b)
+
+
 def _finish(
     inp: Inputs,
     state: State,
     out: Path,
     secret_out: Path | None,
     folder_out: Path | None = None,
+    shown_out: Path | None = None,
 ) -> int:
     status = flow.outcome(state)
     if status is Outcome.QUIT:
@@ -245,6 +294,10 @@ def _finish(
     if status is Outcome.STOPPED:
         return EXIT_STOPPED
     doc = _document(inp, flow.chosen(state))
+    if shown_out is not None:
+        # First of all the files: a failure here (a DocumentError, exit 2) leaves the
+        # answers, token and folder files unwritten.
+        _write_marker(state, shown_out)
     write_document(doc, out)
     _refresh_copy(state, doc)
     token = flow.secret(state)
@@ -256,16 +309,28 @@ def _finish(
     return EXIT_OK
 
 
+def _require_absent(path: Path | None, message: str) -> None:
+    """Refuse a path that exists, is a symlink (even a dangling one) or cannot be checked."""
+    if path is None:
+        return
+    try:
+        os.lstat(path)
+    except FileNotFoundError:
+        pass
+    except OSError:
+        raise _Usage(message) from None
+    else:
+        raise _Usage(message)
+
+
 def _run(args: argparse.Namespace, environ: Mapping[str, str]) -> int:
-    if args.chosen_folder_out is not None:
-        try:
-            os.lstat(args.chosen_folder_out)
-        except FileNotFoundError:
-            pass
-        except OSError:
-            raise _Usage(_FOLDER_EXISTS) from None
-        else:
-            raise _Usage(_FOLDER_EXISTS)
+    _require_absent(args.chosen_folder_out, _FOLDER_EXISTS)
+    _require_absent(args.screens_shown_out, _SHOWN_EXISTS)
+    others = (args.out, args.secret_out, args.chosen_folder_out)
+    if args.screens_shown_out is not None and any(
+        o is not None and _same(o, args.screens_shown_out) for o in others
+    ):
+        raise _Usage(_SHOWN_SAME)
     if args.catalog is None or args.out is None:
         raise _Usage("--catalog and --out are required")
     inp = _read_inputs(args, environ)
@@ -279,7 +344,14 @@ def _run(args: argparse.Namespace, environ: Mapping[str, str]) -> int:
     if not quiet and can_open(args.tty):
         state = run_screens(inp, args.tty, environ, lambda chosen: _document(inp, chosen))
         if state is not None:
-            return _finish(inp, state, args.out, args.secret_out, args.chosen_folder_out)
+            return _finish(
+                inp,
+                state,
+                args.out,
+                args.secret_out,
+                args.chosen_folder_out,
+                args.screens_shown_out,
+            )
     return _run_headless(inp, args.out)
 
 

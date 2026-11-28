@@ -336,3 +336,49 @@ def test_a_huge_number_that_reads_as_infinity_is_refused(tmp_path: Path) -> None
     path.write_text('{"version": 1, "gpu": {"pool_gb": 1e999}}')
     with pytest.raises(FactsError, match=r"gpu\.pool_gb"):
         load_facts(path, disks=[], ram_gb=None)
+
+
+def test_nested_mounts_with_equal_free_bytes_are_one_row_under_the_shortest_mount() -> None:
+    table = {
+        "/pool": _stat(10 * 2**30, 6 * 2**30, fsid=1),
+        "/pool/a": _stat(20 * 2**30, 6 * 2**30, fsid=2),
+        "/pool/b": _stat(30 * 2**30, 6 * 2**30, fsid=3),
+    }
+    mounts = "a /pool/b zfs rw 0 0\nb /pool/a zfs rw 0 0\nc /pool zfs rw 0 0\n"
+    assert [d.mount for d in local_disks(mounts, _probe(table))] == ["/pool"]
+
+
+def test_unrelated_mounts_with_equal_free_bytes_stay_two_rows() -> None:
+    table = {
+        "/pool": _stat(10 * 2**30, 6 * 2**30, fsid=1),
+        "/other": _stat(20 * 2**30, 6 * 2**30, fsid=2),
+    }
+    mounts = "a /pool zfs rw 0 0\nb /other zfs rw 0 0\n"
+    assert len(local_disks(mounts, _probe(table))) == 2
+
+
+def test_a_mount_whose_name_only_starts_like_another_is_not_under_it() -> None:
+    table = {
+        "/pool": _stat(10 * 2**30, 6 * 2**30, fsid=1),
+        "/pool2": _stat(20 * 2**30, 6 * 2**30, fsid=2),
+    }
+    mounts = "a /pool zfs rw 0 0\nb /pool2 zfs rw 0 0\n"
+    assert [d.mount for d in local_disks(mounts, _probe(table))] == ["/pool", "/pool2"]
+
+
+def test_the_root_absorbs_a_mount_under_it_with_equal_free_bytes() -> None:
+    table = {
+        "/": _stat(100 * 2**30, 40 * 2**30, fsid=1),
+        "/data": _stat(200 * 2**30, 40 * 2**30, fsid=2),
+    }
+    mounts = "a / ext4 rw 0 0\nb /data ext4 rw 0 0\n"
+    assert [d.mount for d in local_disks(mounts, _probe(table))] == ["/"]
+
+
+def test_the_root_and_a_mount_under_it_with_different_free_bytes_stay_two_rows() -> None:
+    table = {
+        "/": _stat(100 * 2**30, 40 * 2**30, fsid=1),
+        "/data": _stat(200 * 2**30, 50 * 2**30, fsid=2),
+    }
+    mounts = "a / ext4 rw 0 0\nb /data ext4 rw 0 0\n"
+    assert [d.mount for d in local_disks(mounts, _probe(table))] == ["/data", "/"]

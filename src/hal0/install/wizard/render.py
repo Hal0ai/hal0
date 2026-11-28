@@ -22,7 +22,7 @@ _Segment = tuple[str, str, str, bool]  # (text, style, separator before it, star
 
 
 # Text comes from input files too: no control character may reach the terminal.
-_CONTROLS = {**{code: "?" for code in range(0x20)}, 0x7F: "?"}
+_CONTROLS = {code: "?" for code in (*range(0x20), 0x7F, *range(0x80, 0xA0))}
 
 
 def strip_ansi(text: str) -> str:
@@ -124,7 +124,7 @@ def _mark(row: Row, highlighted: bool) -> str:
 
 def _segments(row: Row, style: str, detail_under: bool, note_under: bool) -> list[_Segment]:
     if row.kind == "text":
-        label, sep = f"{row.label}:", " "
+        label, sep = (f"{row.label}:" if row.detail else row.label), " "
     else:
         label, sep = row.label, "  "
     return [

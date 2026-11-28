@@ -12,7 +12,7 @@ import os
 import re
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 FACTS_VERSION = 1
@@ -184,6 +184,21 @@ def _same_filesystem(a: os.statvfs_result, b: os.statvfs_result) -> bool:
     )
 
 
+def _lies_under(mount: str, parent: str) -> bool:
+    """True when `mount` is `parent` or inside it, decided on path components."""
+    parent_parts = PurePosixPath(parent).parts
+    return PurePosixPath(mount).parts[: len(parent_parts)] == parent_parts
+
+
+def _same_pool(mount: str, st: os.statvfs_result, other: str, other_st: os.statvfs_result) -> bool:
+    if _same_filesystem(st, other_st):
+        return True
+    free = st.f_bavail * st.f_frsize
+    return free == other_st.f_bavail * other_st.f_frsize and (
+        _lies_under(mount, other) or _lies_under(other, mount)
+    )
+
+
 def local_disks(mounts_text: str, statvfs: Callable[[str], os.statvfs_result]) -> tuple[Disk, ...]:
     """Local writable filesystems, one row each (its shortest mount), most free first.
 
@@ -207,7 +222,7 @@ def local_disks(mounts_text: str, statvfs: Callable[[str], os.statvfs_result]) -
             continue
         if mount != "/" and st.f_blocks * st.f_frsize < _GIB:
             continue
-        if any(_same_filesystem(st, other) for _, other in kept):
+        if any(_same_pool(mount, st, other, other_st) for other, other_st in kept):
             continue
         kept.append((mount, st))
     disks = [

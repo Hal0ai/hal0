@@ -311,3 +311,17 @@ def test_every_drawn_text_is_cleaned_of_control_characters() -> None:
         assert not any(ord(c) < 0x20 and c != "\n" for c in out)
         assert "\x7f" not in out
         assert "a?]0;x?b?c?d?e" in out
+
+
+def test_c1_control_characters_are_drawn_as_question_marks(type_view: View) -> None:
+    row = replace(type_view.rows[0], label="bad\x9b2Jlabel")
+    shown = replace(type_view, rows=(row, *type_view.rows[1:]))
+    out = "\n".join(render(shown, width=80, plain=True, color=False))
+    assert "\x9b" not in out and "bad?2Jlabel" in out
+
+
+def test_a_text_row_without_detail_has_no_colon(catalog: Catalog, two_disk_facts: Facts) -> None:
+    folder = view(run(start(catalog, two_disk_facts), "ENTER", "DOWN", "DOWN", "ENTER"))
+    lines = render(folder, width=80, plain=False, color=False)
+    last_row = [line for line in lines if "Type another folder" in line]
+    assert [line.strip().removeprefix("> ") for line in last_row] == ["Type another folder..."]

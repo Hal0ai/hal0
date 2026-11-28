@@ -234,3 +234,70 @@ def test_a_catalog_without_a_question_the_screens_need_is_refused(
     with pytest.raises(CatalogError, match=f"question '{qid}' is missing") as err:
         load_catalog(p)
     assert str(p) in str(err.value)
+
+
+def _drop_options(d: dict[str, Any], qid: str, how: str) -> None:
+    question = next(q for q in d["questions"] if q["id"] == qid)
+    if how == "missing":
+        question.pop("options", None)
+    elif how == "empty":
+        question["options"] = []
+    else:
+        question["options"] = "recommended"
+
+
+@pytest.mark.parametrize("how", ["missing", "empty", "not_a_list"])
+@pytest.mark.parametrize("qid", ["cpu_only", "setup_type"])
+def test_a_choice_question_without_options_is_refused(
+    catalog_path: Path, tmp_path: Path, qid: str, how: str
+) -> None:
+    data = json.loads(catalog_path.read_text())
+    _drop_options(data, qid, how)
+    p = tmp_path / "c.json"
+    p.write_text(json.dumps(data))
+    expected = "options must be a list" if how == "not_a_list" else "needs at least one option"
+    with pytest.raises(CatalogError, match=f"question '{qid}' {expected}") as err:
+        load_catalog(p)
+    assert str(p) in str(err.value)
+    assert "\n" not in str(err.value)
+
+
+def test_every_shipped_preset_has_the_same_model_store_path(catalog: Catalog) -> None:
+    # Guard, passes today: the screens compare a chosen folder against this one value.
+    paths = {name: preset.get("model_store.path") for name, preset in catalog.presets.items()}
+    assert all(isinstance(v, str) and v for v in paths.values()), paths
+    assert len(set(paths.values())) == 1, paths
+
+
+def _set_options(catalog_path: Path, tmp_path: Path, qid: str, **change: object) -> Path:
+    data = json.loads(catalog_path.read_text())
+    question = next(q for q in data["questions"] if q["id"] == qid)
+    if "options" in change and change["options"] is _ABSENT:
+        question.pop("options", None)
+    else:
+        question.update(change)
+    p = tmp_path / "c.json"
+    p.write_text(json.dumps(data))
+    return p
+
+
+_ABSENT = object()
+
+
+@pytest.mark.parametrize("bad", ["abc", {"a": 1}, 5, None])
+def test_an_options_value_that_is_not_a_list_is_refused_on_any_question(
+    catalog_path: Path, tmp_path: Path, bad: object
+) -> None:
+    p = _set_options(catalog_path, tmp_path, "model_store", options=bad)
+    with pytest.raises(CatalogError, match="question 'model_store' options must be a list") as err:
+        load_catalog(p)
+    assert str(p) in str(err.value)
+    assert "\n" not in str(err.value)
+
+
+@pytest.mark.parametrize("options", [_ABSENT, []])
+def test_a_non_choice_question_may_have_no_options(
+    catalog_path: Path, tmp_path: Path, options: object
+) -> None:
+    p = _set_options(catalog_path, tmp_path, "model_store", options=options)
+    assert load_catalog(p).questions["model_store"].options == ()
