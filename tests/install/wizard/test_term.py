@@ -366,7 +366,8 @@ def test_a_signal_while_closing_still_restores_the_terminal(
     def signal_first(fd: int, when: int, attrs: list[object]) -> None:
         if armed:
             armed.clear()
-            os.kill(os.getpid(), signal.SIGTERM)  # lands just before the restore
+            # Aimed at this thread, so it stays pending while the signals are held.
+            signal.pthread_kill(threading.get_ident(), signal.SIGTERM)
         real(fd, when, attrs)
 
     def raise_boom(signum: int, frame: FrameType | None) -> None:
@@ -379,9 +380,8 @@ def test_a_signal_while_closing_still_restores_the_terminal(
         try:
             with Terminal(slave_path, raw=True):
                 armed.append(True)
-            # The held signal is handled once the mask returns, a few steps later.
-            for _ in range(100_000):
-                pass
+            # Unblocking a pending signal runs its handler before pthread_sigmask returns,
+            # so _Boom has already left the block above; nothing here waits for it.
         except _Boom as exc:
             caught.append(exc)
     finally:
@@ -407,3 +407,24 @@ def test_closing_carries_on_without_a_signal_mask(
     with Terminal(slave_path, raw=True):
         assert _attrs(slave_path) != before
     assert _attrs(slave_path) == before
+
+
+def test_a_failing_mask_call_still_restores_the_terminal_and_the_mask(
+    pty_pair: tuple[int, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, slave_path = pty_pair
+    before = _attrs(slave_path)
+    mask_before = signal.pthread_sigmask(signal.SIG_BLOCK, [])
+    real = signal.pthread_sigmask
+
+    def blocking_fails(how: int, mask: object) -> set[signal.Signals]:
+        if how == signal.SIG_BLOCK and mask:
+            raise _Boom
+        return real(how, mask)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(signal, "pthread_sigmask", blocking_fails)
+    with pytest.raises(_Boom), Terminal(slave_path, raw=True):
+        assert _attrs(slave_path) != before
+    monkeypatch.undo()
+    assert _attrs(slave_path) == before
+    assert signal.pthread_sigmask(signal.SIG_BLOCK, []) == mask_before

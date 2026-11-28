@@ -82,11 +82,13 @@ def _signals_held() -> Iterator[None]:
     A held signal is delivered when the old mask returns. Without
     ``pthread_sigmask`` (or when it fails) the restore runs unprotected.
     """
+    previous: set[int] | None = None
     try:
-        previous = signal.pthread_sigmask(signal.SIG_BLOCK, _CLOSE_SIGNALS)
-    except (AttributeError, OSError, ValueError):
-        previous = None
-    try:
+        try:
+            previous = signal.pthread_sigmask(signal.SIG_BLOCK, [])
+            signal.pthread_sigmask(signal.SIG_BLOCK, _CLOSE_SIGNALS)
+        except (AttributeError, OSError, ValueError):
+            pass
         yield
     finally:
         if previous is not None:
@@ -232,8 +234,11 @@ class Terminal:
         self._close()
 
     def _close(self) -> None:
-        with _signals_held():
-            self._restore()
+        try:
+            with _signals_held():
+                self._restore()
+        finally:
+            self._restore()  # returns at once when the restore above already ran
 
     def _restore(self) -> None:
         fd, self._fd = self._fd, -1

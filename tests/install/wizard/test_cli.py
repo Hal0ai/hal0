@@ -1194,6 +1194,34 @@ def test_an_internal_error_is_one_line_exit_70_and_writes_nothing(
     assert _tty_attrs(slave) == before
 
 
+def test_an_oserror_that_is_a_bug_is_exit_70_not_an_interrupt(
+    catalog_path: Path,
+    tmp_path: Path,
+    pty_pair: tuple[int, str],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from hal0.install.wizard import flow, term
+
+    _, slave = pty_pair
+    before = _tty_attrs(slave)
+
+    def broken(*args: object, **kwargs: object) -> object:
+        raise OSError("bug")
+
+    monkeypatch.setattr(flow, "press", broken)
+    out = tmp_path / "a.json"
+    argv = ["--catalog", str(catalog_path), "--out", str(out), "--tty", slave]
+    # Opening the terminal discards typed-ahead input, so hand the loop its key directly.
+    monkeypatch.setattr(term.Terminal, "read_key", lambda self: "ENTER")
+    code = cli.main(argv, environ={"TERM": "xterm"})
+    captured = capsys.readouterr()
+    assert code == 70
+    assert captured.err == "hal0 setup: internal error (OSError)\n"
+    assert not out.exists()
+    assert _tty_attrs(slave) == before
+
+
 def test_a_keyboard_interrupt_inside_the_screens_is_still_130(
     catalog_path: Path,
     tmp_path: Path,

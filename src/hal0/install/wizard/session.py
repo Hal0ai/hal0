@@ -13,6 +13,7 @@ import signal
 import termios
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, replace
+from functools import partial
 from pathlib import Path
 from types import FrameType
 
@@ -137,17 +138,26 @@ class Session:
             shown = replace(shown, error=self.notice)
         return shown
 
+    @staticmethod
+    def _terminal_call[T](call: Callable[[], T]) -> T:
+        """Run one of the terminal's own calls; a lost terminal is an interruption.
+
+        Only errors raised by these calls mean that. Any other exception from the
+        screens is a bug and must reach the caller's last-resort handler.
+        """
+        try:
+            return call()
+        except (OSError, termios.error):
+            raise Interrupted from None
+
     def _keys(self, state: State, shown: View) -> tuple[State, list[str]]:
         if not self.plain:
-            key = self.term.read_key()
+            key = self._terminal_call(self.term.read_key)
             if key in ("INTERRUPT", "EOF"):
                 raise Interrupted
             return state, [key]
         secret = flow.secret_field_open(state)
-        try:
-            line = self.term.read_line("> ", echo=not secret)
-        except termios.error:
-            raise Interrupted from None
+        line = self._terminal_call(partial(self.term.read_line, "> ", echo=not secret))
         if line is None:
             raise Interrupted
         cursor, keys = plain_keys(line, shown)
@@ -179,8 +189,9 @@ class Session:
         first, notes = state.screen, _intro_notes(inp)
         while flow.outcome(state) is Outcome.RUNNING:
             shown = self._view(state, first, notes)
-            width = self.term.width()
-            self.term.draw(render(shown, width=width, plain=self.plain, color=not self.plain))
+            width = self._terminal_call(self.term.width)
+            lines = render(shown, width=width, plain=self.plain, color=not self.plain)
+            self._terminal_call(partial(self.term.draw, lines))
             state, keys = self._keys(state, shown)
             self.notice = None  # a failed save is shown once, until the next key
             for key in keys:
@@ -198,5 +209,3 @@ def run_screens(
             return Session(inp, term, document, plain=plain).run()
     except TerminalUnavailable:
         return None
-    except (OSError, termios.error):
-        raise Interrupted from None
