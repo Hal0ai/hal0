@@ -82,6 +82,26 @@ def test_first_half_calls_no_mutating_function() -> None:
     assert "preflight_gpu" in first
 
 
+def test_file_origin_region_holds_only_the_python_install() -> None:
+    first = _first_half()
+    region = first[first.index(_FILE_BEGIN) : first.index(_FILE_END)]
+    code = _code(region).replace("_hal0_resolve_main_python_or_die", "")
+    for name in (
+        "persist_bootstrap_cosign",
+        "resolve_main_python",
+        "preflight_venv",
+        "preflight_container_runtime",
+        "resolve_hindsight_python",
+        "chgrp",
+        "_confirm_cpu_only",
+        "apt-get",
+        "podman",
+        "pip",
+    ):
+        assert name not in code, name
+    assert _code(region).count("_hal0_resolve_main_python_or_die") == 1
+
+
 def test_file_origin_branch_is_the_only_early_install() -> None:
     first = _first_half()
     assert first.count(_FILE_BEGIN) == 1
@@ -94,11 +114,13 @@ def test_file_origin_branch_is_the_only_early_install() -> None:
 def test_facts_written_before_seam() -> None:
     first = _first_half()
     assert first.index("hal0_facts_gather") < first.index("hal0_facts_write")
-    assert 'hal0_facts_write "${HAL0_FACTS_FILE:-/run/hal0-install/facts.json}"' in first
     assert "could not write the facts file" in first
-    # --dev has no `current` link: both seams come from the installer's own variables.
+    # --dev has no `current` link: the seams come from the installer's own
+    # variables, in dev mode only (prod keeps the library defaults).
     assert 'HAL0_FACTS_VAR_DIR="${VAR_DIR}"' in first
     assert 'HAL0_FACTS_FHS_ROOT="${PREFIX}"' in first
+    assert first.count("HAL0_FACTS_VAR_DIR=") == 1
+    assert "HAL0_FHS_ROOT" not in first
 
 
 def test_gpu_detection_runs_once() -> None:
@@ -193,7 +215,9 @@ def test_no_answers_keeps_todays_prompts(tmp_path: Path, applied: str | None) ->
 # ── file origin without a usable Python ─────────────────────────────────────
 
 
-def _python_first_script(tmp_path: Path, *, usable: bool, answers_file: str) -> str:
+def _python_first_script(
+    tmp_path: Path, *, usable: bool, answers_file: str, py: str = "python3"
+) -> str:
     fn_head = TEXT.index("_hal0_resolve_main_python_or_die() {")
     fn = TEXT[fn_head : TEXT.index("\n}\n", fn_head) + 3]
     head = TEXT.index("# Detection only: is the default Python usable?")
@@ -214,7 +238,7 @@ hal0_facts_write() {{ echo write >> "$LOG"; }}
 resolve_main_python() {{ echo "resolve autoinstall=${{HAL0_PY_AUTOINSTALL:-}}" >> "$LOG"; echo python3.12; }}
 hal0_collect_answers() {{ echo seam >> "$LOG"; }}
 DEV_MODE=0
-PY=python3
+PY={py}
 VAR_DIR=/var/lib/hal0
 HAL0_FHS_ROOT=/usr/lib/hal0
 PREFIX=/usr/lib/hal0/hal0-0
@@ -253,3 +277,89 @@ def test_file_with_usable_python_installs_nothing_early(tmp_path: Path) -> None:
     proc = _run(_python_first_script(tmp_path, usable=True, answers_file="/x/answers.json"))
     assert proc.returncode == 0, proc.stderr
     assert not any(c.startswith(("resolve", "info: Installing")) for c in _calls(tmp_path))
+
+
+def test_file_origin_with_no_python_at_all_installs_one(tmp_path: Path) -> None:
+    script = _python_first_script(
+        tmp_path, usable=False, answers_file="/x/answers.json", py="no-such-python-xyz"
+    )
+    proc = _run(script)
+    assert proc.returncode == 0, proc.stderr
+    calls = _calls(tmp_path)
+    assert "resolve autoinstall=1" in calls
+    assert calls.index("resolve autoinstall=1") < calls.index("seam")
+    assert "PY=python3.12" in calls
+    assert not any(c.startswith("die") for c in calls)
+
+
+def test_file_origin_dies_when_python_still_missing_after_install_try(tmp_path: Path) -> None:
+    script = _python_first_script(
+        tmp_path, usable=False, answers_file="/x/answers.json", py="no-such-python-xyz"
+    ).replace("echo python3.12; }", "return 1; }")
+    proc = _run(script)
+    assert proc.returncode == 1
+    calls = _calls(tmp_path)
+    assert any(c.startswith("die: python interpreter 'no-such-python-xyz' not found") for c in calls)
+    assert "seam" not in calls
+
+
+def test_no_file_and_no_python_still_dies_without_trying_install(tmp_path: Path) -> None:
+    fn_head = TEXT.index("_hal0_resolve_main_python_or_die() {")
+    fn = TEXT[fn_head : TEXT.index("\n}\n", fn_head) + 3]
+    script = f"""
+die() {{ echo "die: $*"; exit 1; }}
+python_venv_hint() {{ echo hint; }}
+resolve_main_python() {{ echo RESOLVED; echo python3.12; }}
+PY=no-such-python-xyz
+{fn}
+_hal0_resolve_main_python_or_die
+"""
+    proc = _run(script)
+    assert proc.returncode == 1
+    assert "RESOLVED" not in proc.stdout
+    assert "not found" in proc.stdout
+
+
+# ── the facts section ───────────────────────────────────────────────────────
+
+
+def _facts_section_script(tmp_path: Path, *, dev: bool, facts_file: str = "") -> str:
+    head = TEXT.index("# ── Facts file ──")
+    block = TEXT[head : TEXT.index(_FILE_BEGIN, head)]
+    log = tmp_path / "calls.log"
+    return f"""
+set -uo pipefail
+warn() {{ echo "warn: $*" >> "{log}"; }}
+hal0_facts_gather() {{ :; }}
+hal0_facts_write() {{ echo "path=$1" >> "{log}"; echo "line one" >&2; echo "line two" >&2; return 1; }}
+DEV_MODE={1 if dev else 0}
+VAR_DIR=/var/lib/hal0
+PREFIX={tmp_path}/prefix
+gpu_rc=0
+unset HAL0_FACTS_FILE HAL0_FACTS_VAR_DIR HAL0_FACTS_FHS_ROOT
+{"HAL0_FACTS_FILE=" + facts_file if facts_file else ""}
+{block}
+echo "VAR=${{HAL0_FACTS_VAR_DIR:-unset}} FHS=${{HAL0_FACTS_FHS_ROOT:-unset}}"
+"""
+
+
+def test_facts_write_failure_is_one_warn_line_and_silent_on_stderr(tmp_path: Path) -> None:
+    proc = _run(_facts_section_script(tmp_path, dev=False))
+    assert proc.returncode == 0
+    assert proc.stderr == ""
+    warns = [c for c in _calls(tmp_path) if c.startswith("warn:")]
+    assert len(warns) == 1
+    assert "line one" in warns[0] and "line two" in warns[0]
+    assert "path=/run/hal0-install/facts.json" in _calls(tmp_path)
+    assert "VAR=unset FHS=unset" in proc.stdout  # prod keeps the library defaults
+
+
+def test_dev_mode_facts_file_lives_under_the_prefix(tmp_path: Path) -> None:
+    proc = _run(_facts_section_script(tmp_path, dev=True))
+    assert f"path={tmp_path}/prefix/run/hal0-install/facts.json" in _calls(tmp_path)
+    assert f"VAR=/var/lib/hal0 FHS={tmp_path}/prefix" in proc.stdout
+
+
+def test_dev_mode_respects_an_explicit_facts_file(tmp_path: Path) -> None:
+    _run(_facts_section_script(tmp_path, dev=True, facts_file="/elsewhere/f.json"))
+    assert "path=/elsewhere/f.json" in _calls(tmp_path)

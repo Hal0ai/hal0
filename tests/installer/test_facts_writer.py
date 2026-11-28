@@ -29,7 +29,7 @@ command() {
     if [[ "$1" == "-v" && "$2" == "podman" ]]; then return "${STUB_PODMAN_PRESENT:-0}"; fi
     builtin command "$@"
 }
-podman() { [[ "$1" == "info" ]] && return "${STUB_PODMAN_INFO_RC:-0}"; echo "podman $*" >> "$STUB_FAIL_LOG"; return 1; }
+podman() { [[ "$1" == "--version" ]] && return "${STUB_PODMAN_INFO_RC:-0}"; echo "podman $*" >> "$STUB_FAIL_LOG"; return 1; }
 """
 
 
@@ -248,7 +248,7 @@ def test_gather_installs_nothing(tmp_path: Path) -> None:
         stub.chmod(0o755)
     podman = bindir / "podman"
     podman.write_text(
-        f'#!/bin/sh\n[ "$1" = info ] && exit 0\necho "podman $*" >> "{log}"\nexit 1\n'
+        f'#!/bin/sh\n[ "$1" = --version ] && exit 0\necho "podman $*" >> "{log}"\nexit 1\n'
     )
     podman.chmod(0o755)
     stubs = "unset -f podman command"
@@ -297,10 +297,19 @@ def test_write_refuses_symlinked_directory(tmp_path: Path) -> None:
     assert not (real / "facts.json").exists()
 
 
-def test_write_sets_existing_own_directory_to_0755(tmp_path: Path) -> None:
+def test_write_keeps_the_mode_of_an_existing_directory(tmp_path: Path) -> None:
     d = tmp_path / "run"
     d.mkdir()
-    d.chmod(0o700)
+    d.chmod(0o1777)
     proc, out = _run(tmp_path)
     assert "write_rc=0" in proc.stdout
-    assert stat.S_IMODE(d.stat().st_mode) == 0o755
+    assert stat.S_IMODE(d.stat().st_mode) == 0o1777
+    assert stat.S_IMODE(out.stat().st_mode) == 0o644
+
+
+def test_write_creates_a_new_directory_0755(tmp_path: Path) -> None:
+    out = tmp_path / "fresh" / "facts.json"
+    script = f'source "{FACTS_SH}"\nhal0_facts_write "{out}"\necho "rc=$?"'
+    proc = subprocess.run(["bash", "-c", script], capture_output=True, text=True, check=False)
+    assert "rc=0" in proc.stdout
+    assert stat.S_IMODE(out.parent.stat().st_mode) == 0o755

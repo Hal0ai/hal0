@@ -473,13 +473,17 @@ trap 'err "install failed at line ${LINENO} during: ${CURRENT_STEP:-pre-init}"
 # first half can run it ahead of the answers seam (a person who passes an
 # answers file has already chosen to let the installer install Python).
 _hal0_resolve_main_python_or_die() {
-    if ! command -v "${PY}" >/dev/null 2>&1; then
+    # With an answers file the installer must try to install a missing
+    # interpreter before giving up, so the not-found guard comes after that try.
+    if [[ "${1:-}" != "install-first" ]] && ! command -v "${PY}" >/dev/null 2>&1; then
         die "python interpreter '${PY}' not found — install with: $(python_venv_hint)"
     fi
     if resolved_py="$(HAL0_PY_AUTOINSTALL=1 resolve_main_python)" && [[ -n "${resolved_py}" ]]; then
         info "using ${resolved_py} for the main hal0 venv (default ${PY} is below hal0's 3.12 floor)"
         PY="${resolved_py}"
         export HAL0_PYTHON="${PY}"
+    elif ! command -v "${PY}" >/dev/null 2>&1; then
+        die "python interpreter '${PY}' not found — install with: $(python_venv_hint)"
     else
         die "python '${PY}' is below hal0's floor (pyproject.toml requires-python >=3.12) and no compatible interpreter could be found or installed.
   install one manually, e.g.: $(pkg_install_cmd python3.12 python3.12-venv 2>/dev/null || echo 'install python3.12'), then re-run with HAL0_PYTHON=python3.12"
@@ -622,23 +626,22 @@ fi
 # warns and the install goes on. In --dev mode the tree lives under a prefix
 # and has no `current` link, so point the writer at the installer's own paths.
 if [[ "${DEV_MODE}" -eq 1 ]]; then
-    HAL0_FACTS_VAR_DIR="${VAR_DIR}"
-    HAL0_FACTS_FHS_ROOT="${PREFIX}"
-else
-    HAL0_FACTS_VAR_DIR="${VAR_DIR}"
-    HAL0_FACTS_FHS_ROOT="${HAL0_FHS_ROOT}"
+    export HAL0_FACTS_VAR_DIR="${VAR_DIR}" HAL0_FACTS_FHS_ROOT="${PREFIX}"
+    # A non-root dev run cannot write /run; keep the file under the prefix.
+    HAL0_FACTS_FILE="${HAL0_FACTS_FILE:-${PREFIX}/run/hal0-install/facts.json}"
 fi
-export HAL0_FACTS_VAR_DIR HAL0_FACTS_FHS_ROOT
 hal0_facts_gather "${gpu_rc}"
-hal0_facts_write "${HAL0_FACTS_FILE:-/run/hal0-install/facts.json}" \
-    || warn "could not write the facts file ${HAL0_FACTS_FILE:-/run/hal0-install/facts.json}; continuing without it"
+_facts_path="${HAL0_FACTS_FILE:-/run/hal0-install/facts.json}"
+if ! _facts_err="$(hal0_facts_write "${_facts_path}" 2>&1)"; then
+    warn "could not write the facts file ${_facts_path}; continuing without it${_facts_err:+ (${_facts_err//$'\n'/ })}"
+fi
 
 # file-origin: begin (the one place the detection half installs anything)
 # A person who passes an answers file has already chosen, and reading it needs
 # a Python. If none is usable yet, install one now, before the seam.
 if [[ "${_main_python_usable}" -eq 0 && -n "${HAL0_ANSWERS_FILE:-}" ]]; then
     info "Installing Python, which is needed to read your answers file."
-    _hal0_resolve_main_python_or_die
+    _hal0_resolve_main_python_or_die install-first
     _main_python_usable=1
 fi
 # file-origin: end

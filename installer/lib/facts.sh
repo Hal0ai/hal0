@@ -99,7 +99,9 @@ hal0_facts_gather() {
     FACT_PODMAN_RUNS=false
     if command -v podman >/dev/null 2>&1; then
         FACT_PODMAN_PRESENT=true
-        podman info >/dev/null 2>&1 && FACT_PODMAN_RUNS=true
+        # `runs` means the binary executes. `podman info` would create its
+        # storage as root; whether containers really run is the smoke test's job.
+        podman --version >/dev/null 2>&1 && FACT_PODMAN_RUNS=true
     fi
 
     case "${gpu_rc}" in
@@ -170,7 +172,7 @@ hal0_facts_write() {
             printf 'hal0_facts_write: %s is not owned by this user; refusing\n' "${dir}" >&2
             return 1
         fi
-        chmod 0755 "${dir}" || return 1
+        # An existing directory keeps its mode (it may be /tmp, 1777).
     else
         mkdir -p "${dir}" 2>/dev/null && chmod 0755 "${dir}" || return 1
     fi
