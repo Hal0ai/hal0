@@ -22,6 +22,7 @@ from .flow_model import (
     UNCHECKED,
     Row,
     State,
+    assistant_change,
     auto_outcome,
     auto_row,
     disk_of,
@@ -42,6 +43,11 @@ from .paths import strictly_inside, validate_folder
 
 _IMAGE_JOB = "images"
 _ASSISTANT_JOB = "hermes"
+_ASSISTANT_NOTE = {
+    "stop": "installed; will be stopped",
+    "stays": "installed; stopped",
+    "start": "installed; will be started again",
+}
 _MEMORY_JOB = "memory"
 _NPU_FOUND = "found; set up if it passes its check"
 _PROXMOX = "; in a Proxmox container the host has to pass it through first"
@@ -87,6 +93,11 @@ def jobs_rows(s: State) -> tuple[Row, ...]:
         state, note = _job_state(s, c)
         size = "" if c.download_gb is None else f"about {fmt_gb(c.download_gb)} GB"
         ticked = get(doc, c.answer_key) == c.on
+        extra = (
+            _ASSISTANT_NOTE.get(assistant_change(s, ticked), "") if c.id == _ASSISTANT_JOB else ""
+        )
+        if extra:
+            note = f"{note}; {extra}" if note else extra
         rows.append(make_row(c.id, c.label, size, "check", ticked, state, note))
     return tuple(rows)
 

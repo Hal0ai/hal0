@@ -25,6 +25,7 @@ from .paths import strictly_inside
 
 DOCUMENT_VERSION = 1
 TERMINAL_KEY = "apps.hermes.terminal_tool"
+_ASSISTANT = "hermes"  # the catalog component for the assistant
 ADMIN_KEY = "access.admin_key"
 TYPE_KEY = "install.type"
 STORE_KEY = "model_store.path"
@@ -290,12 +291,16 @@ def effective(
     now: str,
     install_state: str = "fresh",
     mode: str = "",
+    assistant_stopped: bool = False,
 ) -> Document:
     """Layer preset, saved, given, chosen and overrides into one answers document.
 
     ``mode`` is a flag (``--dev``, ``--no-start``) under which the installer sets up
     no assistant or image models: the terminal tool and the image models are then
     off, unless a flag or variable names them (the installer ignores those too).
+
+    ``assistant_stopped`` says setup stopped an installed assistant earlier: it then
+    stays off unless this run names it (see ``_keep_assistant_stopped``).
     """
     saved_layer = copy.deepcopy(_require_object("saved", saved)) if saved is not None else {}
     given_layer = _require_object("given", given) if given is not None else {}
@@ -330,12 +335,26 @@ def effective(
     for layer in (chosen_layer, over_layer):
         _merge_replacing(doc, layer)
     _drop_outside_flm_path(doc, over)
+    if assistant_stopped:
+        _keep_assistant_stopped(catalog, doc, (given_layer, chosen_layer, over_layer))
     for key, value in _UNPROVISIONED if mode else ():
         if not any(o.key == key for o in over):
             put(doc, key, copy.deepcopy(value))
     doc["version"] = DOCUMENT_VERSION
     doc["meta"] = {"saved_at": now, "saved_by": hal0_version}
     return doc
+
+
+def _keep_assistant_stopped(catalog: Catalog, doc: Document, naming: Sequence[Document]) -> None:
+    """Turn the assistant off unless a given document, a choice or an override names it.
+
+    The preset and the saved answers do not count: a stop always saves the key as off, so
+    a saved "on" is older than the stop, and the preset's "on" is only a default.
+    """
+    component = next((c for c in catalog.components if c.id == _ASSISTANT), None)
+    if component is None or any(get(layer, component.answer_key) is not None for layer in naming):
+        return
+    put(doc, component.answer_key, copy.deepcopy(component.off))
 
 
 def _drop_outside_flm_path(doc: Document, over: Sequence[Override]) -> None:

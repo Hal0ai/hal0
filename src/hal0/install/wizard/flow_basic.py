@@ -19,6 +19,7 @@ from .flow_model import (
     Pick,
     Row,
     State,
+    assistant_change,
     current_type,
     disk_of,
     download_items,
@@ -44,6 +45,13 @@ from .paths import check_copy, check_store_text, validate_folder
 
 _DOWNLOAD_MBIT = 100
 _NPU_JOB = "npu"
+_ASSISTANT_JOB = "hermes"
+_IMAGE_JOB = "images"
+_ASSISTANT_CHANGE = {
+    "stop": "will be stopped (it stays installed)",
+    "stays": "stays stopped",
+    "start": "will be started again",
+}
 _TERMINAL_ON = "ON: the assistant can run commands as a root-equivalent user"
 _NO_DOWNLOADS = "nothing yet; models are added after install"
 _NO_CHAT_DOWNLOAD = "no chat model to download"
@@ -254,15 +262,18 @@ def commit_folder(s: State, text: str) -> State:
 def review_rows(s: State) -> tuple[Row, ...]:
     doc = effective_doc(s)
     jobs = jobs_on(s, doc)
-    items = download_items(s, doc)
+    # --dev and --no-start download no image models, even when a variable names one.
+    items = download_items(s, doc, without=_IMAGE_JOB if s.mode else "")
     pick = pick_model(s, doc)
-    total = download_total(s)
+    sizes = [gb for _, gb in items if gb is not None]
+    total = sum(sizes) if sizes else None
     rows = [
         make_row(
             "install",
             "Installing",
             ", ".join(c.label for c in jobs if c.id != _NPU_JOB) or "only the model server",
         ),
+        *_assistant_stop_rows(s, doc),
         *_terminal_rows(s, doc),
         make_row("downloads", "Downloads", ", ".join(t for t, _ in items) or _no_downloads(pick)),
     ]
@@ -321,12 +332,25 @@ def _access_rows(s: State, doc: Document) -> list[Row]:
     ]
 
 
+def _assistant_stop_rows(s: State, doc: Document) -> list[Row]:
+    """Say what confirming does to an assistant that is already installed.
+
+    The installer leaves services alone with --dev or --no-start, so it says nothing then.
+    """
+    on = any(c.id == _ASSISTANT_JOB for c in jobs_wanted(s, doc))
+    text = _ASSISTANT_CHANGE.get(assistant_change(s, on))
+    return [] if text is None else [make_row("assistant_stop", "Assistant", text)]
+
+
 def _terminal_rows(s: State, doc: Document) -> list[Row]:
     """The terminal-tool row, on every review: what the document says, ON or off.
 
     It reads the document, not what can run here, so what the review says is what
-    the box gets.
+    the box gets. With --dev or --no-start the installer does nothing with the tool,
+    so the row says off whatever the document holds.
     """
+    if s.mode:
+        return [make_row("terminal_tool", "Terminal tool", f"off (not set up with {s.mode})")]
     on = maybe_value(s, doc, "terminal_tool") is True
     return [make_row("terminal_tool", "Terminal tool", _TERMINAL_ON if on else "off")]
 

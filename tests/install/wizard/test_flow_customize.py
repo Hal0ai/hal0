@@ -11,6 +11,7 @@ from hal0.install.wizard.document import Override, effective
 from hal0.install.wizard.facts import Facts, load_facts
 from hal0.install.wizard.flow import (
     Outcome,
+    Row,
     Screen,
     State,
     chosen,
@@ -933,7 +934,7 @@ def test_the_terminal_tool_is_unavailable_and_reviews_as_off_with_such_a_mode(
     assert "apps.hermes.terminal_tool" not in chosen(ticked)
     review = run(ticked, "ENTER")
     (shown,) = [r for r in view(review).rows if r.id == "terminal_tool"]
-    assert shown.detail == "off"
+    assert shown.detail == f"off (not set up with {mode})"
     assert effective_for(review)["apps"]["hermes"]["terminal_tool"] is False
 
 
@@ -992,3 +993,166 @@ def test_a_control_character_in_typed_text_is_refused_before_it_is_stored(
     assert chosen(after) == chosen(s)
     assert secret(after) is None
     assert after.token is None
+
+
+# ---------------------------------- the assistant row says an installed one will be stopped
+
+_STOP_NOTE = "installed; will be stopped"
+
+
+def _assistant_job(state: State) -> Row:
+    return next(r for r in view(state).rows if r.id == "hermes")
+
+
+def test_an_unticked_assistant_row_notes_that_the_installed_one_will_be_stopped(
+    catalog: Catalog, usable_facts: Facts
+) -> None:
+    facts = replace(usable_facts, hermes_installed=True)
+    s = custom(catalog, facts)
+    assert _assistant_job(s).note == ""  # on by default: nothing to stop
+    off = open_field(s, "hermes")
+    row = _assistant_job(off)
+    assert (row.value, row.state, row.note) == (False, "open", _STOP_NOTE)
+
+
+@pytest.mark.parametrize("known", [False, None])
+def test_no_stop_note_when_the_assistant_is_not_installed_or_unknown(
+    catalog: Catalog, usable_facts: Facts, known: bool | None
+) -> None:
+    s = open_field(custom(catalog, replace(usable_facts, hermes_installed=known)), "hermes")
+    assert _assistant_job(s).note == ""
+
+
+def test_the_stop_note_follows_a_note_a_flag_already_gives(
+    catalog: Catalog, usable_facts: Facts
+) -> None:
+    facts = replace(usable_facts, hermes_installed=True)
+    over = [Override("apps.hermes.enabled", False, "--no-hermes")]
+    row = _assistant_job(custom(catalog, facts, over=over))
+    assert row.note == f"set by --no-hermes; {_STOP_NOTE}"
+
+
+@pytest.mark.parametrize("mode", _MODES)
+def test_no_stop_note_with_a_mode_that_leaves_services_alone(
+    catalog: Catalog, usable_facts: Facts, mode: str
+) -> None:
+    facts = replace(usable_facts, hermes_installed=True)
+    s = open_field(custom(catalog, facts, mode=mode), "hermes")
+    assert _assistant_job(s).note == ""
+
+
+_NOTE_TABLE = [
+    # installed, stopped, ticked, expected note
+    (True, False, False, "installed; will be stopped"),
+    (True, None, False, "installed; will be stopped"),
+    (True, True, False, "installed; stopped"),
+    (True, True, True, "installed; will be started again"),
+    (True, False, True, ""),
+    (True, None, True, ""),
+    (False, True, False, ""),
+    (False, True, True, ""),
+    (None, True, False, ""),
+    (None, True, True, ""),
+]
+
+
+@pytest.mark.parametrize(("installed", "stopped", "ticked", "note"), _NOTE_TABLE)
+def test_the_assistant_note_follows_the_table(
+    catalog: Catalog,
+    usable_facts: Facts,
+    installed: bool | None,
+    stopped: bool | None,
+    ticked: bool,
+    note: str,
+) -> None:
+    facts = replace(usable_facts, hermes_installed=installed, hermes_stopped_by_setup=stopped)
+    s = custom(catalog, facts)
+    # With a stop in force the row opens unticked; otherwise it opens ticked.
+    if ticked is (stopped is True):
+        s = open_field(s, "hermes")
+    row = _assistant_job(s)
+    assert row.value is ticked
+    assert row.note == note
+
+
+def test_the_stopped_note_follows_a_note_a_flag_already_gives(
+    catalog: Catalog, usable_facts: Facts
+) -> None:
+    facts = replace(usable_facts, hermes_installed=True, hermes_stopped_by_setup=True)
+    over = [Override("apps.hermes.enabled", False, "--no-hermes")]
+    assert _assistant_job(custom(catalog, facts, over=over)).note == (
+        "set by --no-hermes; installed; stopped"
+    )
+
+
+@pytest.mark.parametrize("mode", _MODES)
+@pytest.mark.parametrize("ticked", [True, False])
+def test_no_stopped_note_with_a_mode(
+    catalog: Catalog, usable_facts: Facts, mode: str, ticked: bool
+) -> None:
+    facts = replace(usable_facts, hermes_installed=True, hermes_stopped_by_setup=True)
+    s = custom(catalog, facts, mode=mode)
+    if not ticked:
+        s = open_field(s, "hermes")
+    assert _assistant_job(s).note == ""
+
+
+# ---------------- characters that reorder or break lines are refused when typed
+
+_REORDERING = [
+    "\u2028",
+    "\u2029",
+    "\u202e",
+    "\u2066",
+    "\u200b",
+    "\ufeff",
+    "\ue000",
+    "\u200e",
+    "\u061c",
+    "\u2060",
+    "\u202a",
+    "\u2069",
+]
+
+
+@pytest.mark.parametrize("field", _TEXT_FIELDS)
+@pytest.mark.parametrize("bad", _REORDERING)
+def test_a_reordering_character_in_typed_text_is_refused(
+    catalog: Catalog, npu_facts: Facts, field: str, bad: str
+) -> None:
+    from hal0.install.wizard.session import plain_keys
+
+    s = replace(custom(catalog, npu_facts), editing="", field=field)
+    keys = plain_keys(f"ok{bad}ok", view(s))[1]
+    after = run(s, *keys)
+    assert after.editing == ""
+    assert after.error is not None and "cannot be used here" in after.error
+    assert bad not in after.error
+    assert chosen(after) == chosen(s)
+    assert after.token is None
+
+
+@pytest.mark.parametrize("text", ["caf\u00e9", "\u65e5\u672c", "ok \U0001f600"])
+def test_ordinary_non_ascii_text_is_not_refused_by_the_shared_check(text: str) -> None:
+    from hal0.install.wizard.render import has_unsafe_text
+
+    assert not has_unsafe_text(text)
+
+
+# ------------------------- an assistant that setup stopped starts unticked in Customize
+
+
+def test_customize_opens_a_stopped_assistant_unticked_and_ticking_starts_it_again(
+    catalog: Catalog, usable_facts: Facts
+) -> None:
+    facts = replace(usable_facts, hermes_installed=True, hermes_stopped_by_setup=True)
+    s = custom(catalog, facts)
+    row = _assistant_job(s)
+    assert row.value is False
+    assert row.note == "installed; stopped"
+    assert effective_for(s)["apps"]["hermes"]["enabled"] is False
+    s = open_field(s, "hermes")
+    row = _assistant_job(s)
+    assert row.value is True
+    assert row.note == "installed; will be started again"
+    assert effective_for(s)["apps"]["hermes"]["enabled"] is True

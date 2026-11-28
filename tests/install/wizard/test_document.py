@@ -762,3 +762,76 @@ def test_an_npu_variable_written_with_a_doubled_leading_slash_counts_as_inside(
 ) -> None:
     doc = _with_flm(catalog, "/a/models", "//a/models/flm")
     assert get(doc, "model_store.flm_path") == "//a/models/flm"
+
+
+# ------------------------------------------- an assistant that setup stopped stays off
+
+_ASSISTANT_KEY = "apps.hermes.enabled"
+
+
+def _stopped(catalog: Catalog, **layers: object) -> object:
+    kw: dict[str, object] = {
+        "chosen": {},
+        "saved": None,
+        "given": None,
+        "over": [],
+        "hal0_version": "v",
+        "now": NOW,
+        "assistant_stopped": True,
+    }
+    kw.update(layers)
+    return get(effective(catalog, **kw), _ASSISTANT_KEY)  # type: ignore[arg-type]
+
+
+def test_the_preset_alone_does_not_turn_a_stopped_assistant_on(catalog: Catalog) -> None:
+    assert get(preset(catalog, "recommended"), _ASSISTANT_KEY) is True
+    assert _stopped(catalog) is False
+
+
+def test_a_saved_true_does_not_turn_a_stopped_assistant_on(catalog: Catalog) -> None:
+    assert _stopped(catalog, saved={"apps": {"hermes": {"enabled": True}}}) is False
+
+
+def test_a_chosen_answer_names_the_assistant_either_way(catalog: Catalog) -> None:
+    assert _stopped(catalog, chosen={_ASSISTANT_KEY: True}) is True
+    assert _stopped(catalog, chosen={_ASSISTANT_KEY: False}) is False
+
+
+@pytest.mark.parametrize("value", [True, False])
+def test_a_given_document_names_the_assistant_either_way(catalog: Catalog, value: bool) -> None:
+    given = {"apps": {"hermes": {"enabled": value}}}
+    assert _stopped(catalog, given=given) is value
+
+
+def test_an_override_names_the_assistant(catalog: Catalog) -> None:
+    assert _stopped(catalog, over=[Override(_ASSISTANT_KEY, False, "--no-hermes")]) is False
+
+
+def test_nothing_changes_without_a_stop(catalog: Catalog) -> None:
+    assert _stopped(catalog, assistant_stopped=False) is True
+    plain = {
+        "chosen": {},
+        "saved": None,
+        "given": None,
+        "over": [],
+        "hal0_version": "v",
+        "now": NOW,
+    }
+    assert effective(catalog, **plain) == effective(catalog, assistant_stopped=False, **plain)  # type: ignore[arg-type]
+
+
+def test_the_terminal_tool_stays_off_when_the_rule_turns_the_assistant_off(
+    catalog: Catalog,
+) -> None:
+    doc = effective(
+        catalog,
+        chosen={},
+        saved=None,
+        given=None,
+        over=[],
+        hal0_version="v",
+        now=NOW,
+        assistant_stopped=True,
+    )
+    assert get(doc, _ASSISTANT_KEY) is False
+    assert get(doc, "apps.hermes.terminal_tool") is False

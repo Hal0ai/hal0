@@ -135,6 +135,7 @@ def _document(inp: Inputs, chosen: Mapping[str, object]) -> Document:
         now=_now(),
         install_state=inp.facts.install_state,
         mode=inp.mode,
+        assistant_stopped=inp.facts.hermes_stopped_by_setup is True,
     )
 
 
