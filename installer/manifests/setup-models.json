@@ -1,57 +1,62 @@
 {
   "version": 1,
-  "generated_from": "src/hal0/registry/curated.py",
-  "models": [
+  "generated_from": [
+    "src/hal0/install/agent_model.py",
+    "src/hal0/install/brain_model.py",
+    "src/hal0/registry/curated.py",
+    "src/hal0/comfyui/catalog.py"
+  ],
+  "model_ladder": [
     {
-      "id": "qwen3.8-27b",
       "role": "starter",
-      "name": "Qwen3.8 27B",
-      "size_gb": 18.49,
+      "model": "qwen3.8-27b",
+      "label": "Qwen3.8 27B",
+      "download_gb": 18.49,
       "min_gpu_pool_gb": 25.0
     },
     {
-      "id": "lfm2.5-2.6b",
       "role": "brain",
-      "name": "LFM2.5 2.6B",
-      "size_gb": 2.87,
+      "model": "lfm2.5-2.6b",
+      "label": "LFM2.5 2.6B",
+      "download_gb": 2.87,
       "min_gpu_pool_gb": 4.0
     },
     {
-      "id": "hal0-brain-sft-f16",
       "role": "brain",
-      "name": "hal0 brain (F16, portable)",
-      "size_gb": 2.0,
+      "model": "hal0-brain-sft-f16",
+      "label": "hal0 brain (F16, portable)",
+      "download_gb": 2.0,
       "min_gpu_pool_gb": 4.0
     },
     {
-      "id": "sdxl-lightning",
       "role": "image",
-      "name": "SDXL Lightning (8-step)",
-      "size_gb": 7.1
+      "model": "sdxl-lightning",
+      "label": "SDXL Lightning (8-step)",
+      "download_gb": 7.1
     },
     {
-      "id": "sdxl-turbo",
       "role": "image",
-      "name": "SDXL Turbo",
-      "size_gb": 6.4
+      "model": "sdxl-turbo",
+      "label": "SDXL Turbo",
+      "download_gb": 6.4
     },
     {
-      "id": "sd-1.5-pruned-emaonly",
       "role": "image",
-      "name": "Stable Diffusion 1.5",
-      "size_gb": 4.0
+      "model": "sd-1.5-pruned-emaonly",
+      "label": "Stable Diffusion 1.5",
+      "download_gb": 4.0
     },
     {
-      "id": "qwen-image-lightning",
       "role": "image",
-      "name": "Qwen-Image (4-step Lightning)",
-      "size_gb": 47.9
+      "model": "qwen-image-lightning",
+      "label": "Qwen-Image (4-step Lightning)",
+      "download_gb": 47.9
     },
     {
-      "id": "qwen-image",
       "role": "image",
-      "name": "Qwen-Image (20-step)",
-      "size_gb": 47.1
+      "model": "qwen-image",
+      "label": "Qwen-Image (20-step)",
+      "download_gb": 47.1
     }
   ]
 }
