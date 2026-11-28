@@ -134,6 +134,9 @@ from hal0.api.routes import (
     ports as ports_routes,
 )
 from hal0.api.routes import (
+    profile_addons as profile_addons_routes,
+)
+from hal0.api.routes import (
     profiles as profiles_routes,
 )
 from hal0.api.routes import (
@@ -3357,6 +3360,11 @@ def create_app() -> FastAPI:
     # from /etc/hal0/profiles.toml (falling back to the built-in seeds on a
     # fresh install). Profiles are P1 container-runtime templates (issue #653).
     app.include_router(profiles_routes.router, prefix="/api/profiles", tags=["profiles"])
+    # Import catalog: the addon index a site publishes (hal0.dev by default),
+    # or the addons this release ships when it cannot be reached. Read-only.
+    app.include_router(
+        profile_addons_routes.router, prefix="/api/profile-addons", tags=["profiles"]
+    )
 
     # Stack catalog — named, portable bundles of slots + profiles + model
     # assignments + capability selections. Read + declarative apply (dry-run

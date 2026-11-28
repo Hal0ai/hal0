@@ -30,6 +30,10 @@ applying. Add those subsections to a version's section to surface them; see
 
 ## [Unreleased]
 
+### Added
+
+- **The Profiles page lists the profiles you can import, beside the ones already on the box.** The page is laid out like the gallery at hal0.dev/profiles: one grid, every card labelled built in, custom or import, filters for kind and runtime, and the settings a profile makes shown as chips. "settings" on a card opens its flags, its typed settings and its `[profile.<name>]` table. Import on a catalog card opens the usual import dialog on that profile. The catalog comes from `GET /api/profile-addons`, which reads the addon index hal0.dev publishes, at most once an hour, with a plain request that carries nothing about the box. With no network the page lists the four addons the release ships. A catalog profile is held to the same checks as an imported file, and one that fails is listed with the reason and cannot be imported. Set `HAL0_PROFILE_ADDONS_URL=off` to stop the request, or to another `https` URL to read a different index. The flag string is no longer printed on the card; it is in the card's settings view.
+
 ### Fixed
 
 - **The installer no longer adds the NPU software to a box that has no NPU.** The NPU step used to run on every Ubuntu or Debian host: it added the `lemonade-team` package source, installed `libxrt-npu2`, `libxrt-utils-npu` and FastFlowLM, and ended with a `flm validate` warning that read as a fault. It now does that only when the NPU device is present; otherwise it prints one line saying so and installs nothing. `HAL0_NPU_SETUP=on` runs the step anyway, for an NPU passed through after the install, and `HAL0_NPU_SETUP=off` skips it (#4006)

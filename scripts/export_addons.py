@@ -7,8 +7,8 @@ of ADR-0029) — the same wire shape the dashboard's profile Import accepts. A
 site (hal0.dev) can serve this directory statically and an operator installs
 one with a paste or an upload.
 
-Everything in ``community/addons/`` is GENERATED. Edit :data:`ADDON_PROFILES`
-below, rerun this script, commit the result;
+Everything in ``community/addons/`` is GENERATED. Edit ``ADDON_PROFILES`` in
+``src/hal0/profiles/addons.py``, rerun this script, commit the result;
 ``tests/community/test_addon_envelopes.py`` fails if the two ever disagree.
 A name that is also a code-shipped seed (``agent``, ``coding``, ...) does not
 belong here: importing it would collide with the seed.
@@ -22,124 +22,38 @@ from __future__ import annotations
 
 import argparse
 import json
-import re
 import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "src"))
 
-from hal0.config.schema import ProfileConfig  # noqa: E402
-from hal0.profiles import _runtime_family  # noqa: E402
-from hal0.profiles.portable import export_envelope  # noqa: E402
+from hal0.profiles.addons import (  # noqa: E402
+    ADDON_PROFILES,
+    EXPORTED_AT,
+    INDEX_KIND,
+    INDEX_SCHEMA_VERSION,
+    MIN_HAL0_VERSION,
+    build_envelopes,
+    build_index,
+)
 
-#: The published community tunes, as profile definitions. Flags carry only
-#: what a profile may hold: no hardware / managed / model-fact flags (hal0
-#: adds ``--jinja`` itself; ``vision = "off"`` replaces ``--no-mmproj``).
-ADDON_PROFILES: dict[str, dict[str, object]] = {
-    "chat-long-context": {
-        "flags": "-fa auto -ctk q8_0 -ctv q8_0 -b 2048 -ub 512 --no-context-shift",
-        "ctx_size": 131072,
-        "intent": "Long-context chat · tuned for 128K ctx",
-    },
-    "dense": {
-        "flags": (
-            "-fa auto -b 2048 -ub 512 --reasoning off --reasoning-budget -1 "
-            "--no-context-shift --temp 0 --top-p 0.95 --top-k 20 --seed 123"
-        ),
-        "ctx_size": 131072,
-        "vision": "off",
-        "intent": "Generic dense workload · tuned for 128K ctx",
-    },
-    "moe": {
-        "flags": (
-            "-fa auto -b 2048 -ub 512 --reasoning off --reasoning-budget -1 "
-            "--no-context-shift --temp 0 --top-p 0.95 --top-k 20 --seed 123"
-        ),
-        "ctx_size": 32768,
-        "vision": "off",
-        "intent": "Generic MoE workload · tuned for 32K ctx",
-    },
-    "thinking": {
-        "flags": (
-            "-fa auto -b 2048 -ub 512 --reasoning on --reasoning-format deepseek "
-            "--reasoning-budget -1 --no-context-shift --temp 1.0 --top-p 0.95 "
-            "--top-k 20 --min-p 0 --presence-penalty 0"
-        ),
-        "ctx_size": 32768,
-        "enable_thinking": True,
-        "vision": "off",
-        "intent": "Reasoning-ON workload (qwen3-deepseek, ace-saber thinking) · 32K ctx",
-    },
-}
+__all__ = [
+    "ADDON_PROFILES",
+    "EXPORTED_AT",
+    "INDEX_KIND",
+    "INDEX_SCHEMA_VERSION",
+    "MIN_HAL0_VERSION",
+    "build_envelopes",
+    "build_index",
+]
 
 ADDONS_DIR = ROOT / "community" / "addons"
 INDEX_PATH = ADDONS_DIR / "index.json"
 
-#: Frozen, NOT a live clock. These envelopes are committed artifacts: a
-#: wall-clock stamp would rewrite all every file on every run and make the
-#: checksum-stable output look churned. The checksum covers the profile body
-#: only, so this value never affects integrity — it is a provenance note.
-EXPORTED_AT = "2026-09-01T00:00:00Z"
-
-INDEX_KIND = "hal0.addon-index"
-INDEX_SCHEMA_VERSION = 1
-
-#: The oldest release that can install a row from this index.
-#:
-#: Profile envelope schema 2 (ctx_size / enable_thinking / vision / speculation
-#: "auto"|"off"|"ngram", ADR-0029,
-#: renamed from `mtp` by ADR-0031) is read from 1.5.0; schema-1 envelopes are refused
-#: there. The floor is a property of the CONTRACT, not of today's rows.
-MIN_HAL0_VERSION = "1.5.0"
-
-#: First separator in an ``intent`` string: a middot clause (`` · 32K ctx``)
-#: or an opening parenthetical. Everything before it is the headline.
-_TITLE_SPLIT = re.compile(r"\s*[·(]")
-
 
 def _dump(data: object) -> str:
     return json.dumps(data, indent=2, sort_keys=True, ensure_ascii=False) + "\n"
-
-
-def _title(intent: str) -> str:
-    """The intent's headline — the part before the first ``·`` or ``(``."""
-    return _TITLE_SPLIT.split(intent, maxsplit=1)[0].strip() or intent.strip()
-
-
-def build_envelopes() -> dict[str, dict]:
-    """One envelope per published profile, keyed by profile name."""
-    return {
-        name: export_envelope(
-            name,
-            ProfileConfig.model_validate(entry),
-            exported_at=EXPORTED_AT,
-        )
-        for name, entry in ADDON_PROFILES.items()
-    }
-
-
-def build_index(envelopes: dict[str, dict]) -> dict:
-    """The ``index.json`` catalog — one row per envelope, sorted by name."""
-    rows = []
-    for name in sorted(envelopes):
-        envelope = envelopes[name]
-        body = envelope["profile"]
-        profile = ProfileConfig.model_validate(ADDON_PROFILES[name])
-        intent = body.get("intent", "")
-        rows.append(
-            {
-                "name": name,
-                "title": _title(intent),
-                "description": intent,
-                "runtime_family": _runtime_family(name, profile),
-                "runner": body.get("runner"),
-                "checksum": envelope["checksum"],
-                "file": f"{name}.hal0profile.json",
-                "min_hal0_version": MIN_HAL0_VERSION,
-            }
-        )
-    return {"kind": INDEX_KIND, "schema_version": INDEX_SCHEMA_VERSION, "addons": rows}
 
 
 def render() -> dict[Path, str]:
