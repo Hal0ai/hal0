@@ -318,8 +318,18 @@ def _pyvenv_cfg_version(venv: Path) -> str | None:
     return None
 
 
-def _venv_python_problem(runner: Runner, venv: Path, stamp: dict[str, Any] | None) -> str | None:
-    """Why a managed venv cannot run on the interpreter it now resolves to, or ``None``.
+def _runnable_file(path: Path) -> bool:
+    """Whether ``path`` is a file this account may execute; ``True`` when that cannot be told."""
+    try:
+        return path.is_file() and os.access(path, os.X_OK)
+    except OSError:
+        return True
+
+
+def _venv_python_check(
+    runner: Runner, venv: Path, stamp: dict[str, Any] | None
+) -> tuple[str | None, bool]:
+    """Why a managed venv cannot run on the interpreter it now resolves to, and whether that is proven.
 
     A venv is tied to the ``major.minor`` it was built with: its packages sit
     under ``lib/pythonX.Y``. When the system Python moves (a distribution
@@ -327,17 +337,28 @@ def _venv_python_problem(runner: Runner, venv: Path, stamp: dict[str, Any] | Non
     The build stamp records the version; a stamp from before it did has no
     ``python`` key, and ``pyvenv.cfg`` answers for it, so an existing install
     is rebuilt only when its interpreter really changed.
+
+    Any reason is enough to rebuild. Only a proven one lets a rollback discard
+    the old venv: both versions were read and differ, or the interpreter is
+    missing or not executable. A version probe that merely failed (a timeout,
+    the drop to hal0's account refused) says nothing about the venv.
     """
     recorded = (stamp or {}).get("python")
     built = recorded if isinstance(recorded, str) and recorded else _pyvenv_cfg_version(venv)
-    now = _python_version(runner, str(venv / "bin" / "python"))
+    py = venv / "bin" / "python"
+    now = _python_version(runner, str(py))
     if now is None:
-        return "its Python interpreter does not run"
+        return "its Python interpreter does not run", not _runnable_file(py)
     if built is None:
-        return "the Python version it was built with is not recorded"
+        return "the Python version it was built with is not recorded", False
     if built != now:
-        return f"it was built with Python {built} and its interpreter is now Python {now}"
-    return None
+        return f"it was built with Python {built} and its interpreter is now Python {now}", True
+    return None, False
+
+
+def _venv_python_problem(runner: Runner, venv: Path, stamp: dict[str, Any] | None) -> str | None:
+    """The reason from :func:`_venv_python_check`, or ``None`` when the venv can run."""
+    return _venv_python_check(runner, venv, stamp)[0]
 
 
 def install_state(
@@ -906,9 +927,12 @@ class _Txn:
         self.prev_unit = prev_unit
         self.prev_params = parse_unit_params(prev_unit) if prev_unit else None
         self.venv_swapped = False
-        #: Why the venv this converge started with cannot run, when it cannot
-        #: (:func:`_venv_python_problem`); a rollback never restores that one.
+        #: Why the venv this converge started with was rebuilt for its
+        #: interpreter, when it was (:func:`_venv_python_check`).
         self.prev_venv_problem: str | None = None
+        #: Whether that reason is proven. A rollback never restores a venv
+        #: proven dead; one whose probe merely failed is restored as usual.
+        self.prev_venv_dead = False
         self.script_changed = False
         self.script_had_prev = False
         self.unit_changed = False
@@ -1029,7 +1053,9 @@ def _converge(
     script = server_script_path()
     script_prev = script.with_name(script.name + ".prev")
     if state == MANAGED:
-        txn.prev_venv_problem = _venv_python_problem(runner, venv, _read_build_stamp(venv))
+        txn.prev_venv_problem, txn.prev_venv_dead = _venv_python_check(
+            runner, venv, _read_build_stamp(venv)
+        )
     needs_build = state != MANAGED or label != pinned or txn.prev_venv_problem is not None
     if state == UNMANAGED:
         stamp = _read_build_stamp(venv)
@@ -1171,7 +1197,7 @@ def _roll_back(
         engine = _reconcile_engine(seam, txn.last_good)
         return _failed(error, remedy, lane="off", restore_problems=problems or None, engine=engine)
 
-    dead = txn.prev_venv_problem
+    dead = txn.prev_venv_problem if txn.prev_venv_dead else None
     if dead and txn.venv_swapped:
         # The venv this converge replaced cannot run (#3960): putting it back
         # and waiting on /health again would restore a server that is known
@@ -1179,6 +1205,7 @@ def _roll_back(
         # script and unit written for it.
         with contextlib.suppress(OSError):
             _fs(runner, "rmtree", str(prev))
+        with contextlib.suppress(OSError):
             _fs(runner, "rmtree", str(script_prev))
         return _failed(
             f"{error}; rollback: the previous venv was not restored ({dead}); "

@@ -594,6 +594,46 @@ def test_a_rollback_never_restores_a_venv_built_for_another_interpreter(
     assert [c[0] for c in seam.calls].count("restart") == 1
 
 
+@pytest.mark.parametrize("executable", [True, False])
+def test_a_failed_version_probe_alone_does_not_cost_the_old_venv(
+    box: dict[str, Any], executable: bool
+) -> None:
+    """A probe that failed proves nothing: the old venv comes back unless its python is unusable."""
+    _install(box)
+    py = dc.venv_dir() / "bin" / "python"
+    py.chmod(0o755 if executable else 0o644)
+
+    class FirstProbeFails(FakeRunner):
+        probes = 0
+
+        def __call__(self, argv: list[str], **kw: Any) -> subprocess.CompletedProcess:
+            if "sys.version_info" in " ".join(argv):
+                self.probes += 1
+                if self.probes == 1:
+                    self.calls.append(list(argv))
+                    return subprocess.CompletedProcess(argv, 1, stdout="", stderr="no")
+            return super().__call__(argv, **kw)
+
+    polls = {"n": 0}
+
+    def http(_url: str) -> dict[str, Any] | None:
+        polls["n"] += 1
+        return None if polls["n"] <= 81 else {"status": "ok"}  # the new server never answers
+
+    seam = FakeSeam()
+    result = _converge(box, runner=FirstProbeFails(), seam=seam, http_get=http)
+    restarts = [c[0] for c in seam.calls].count("restart")
+    if executable:
+        assert result["status"] == "rolled_back" and result["restored"] is True
+        assert restarts == 2 and polls["n"] > 81
+    else:
+        assert result["status"] == "build_failed" and result["restored"] is False
+        assert "previous venv was not restored" in result["error"]
+        assert "does not run" in result["error"]
+        assert restarts == 1 and polls["n"] == 81
+    assert not dc.venv_dir().with_name(".venv.prev").exists()
+
+
 def test_a_failed_rebuild_for_a_new_interpreter_leaves_the_old_venv_in_place(
     box: dict[str, Any],
 ) -> None:
