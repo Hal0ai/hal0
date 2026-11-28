@@ -51,15 +51,20 @@ continue without one, or says why hal0 cannot go on. The last screen, "Ready to 
 downloaded and installed. Press Enter to start, `b` to go back, `s` to save a
 copy of your answers, or `q` to quit; quitting changes nothing.
 
-Not at a terminal, or running from a script? Set `HAL0_NONINTERACTIVE=1` to
-skip the screens and take the defaults, or pass `--answers=FILE` with a JSON
-answers document. The installer checks the whole file before it changes
-anything. On a box that already has hal0, the installer reuses the answers
-saved by the last install and asks nothing; add `--reconfigure` to be asked
-again.
+Over ssh without a terminal (`ssh host command` without `-t`) or in CI with no
+terminal there are no screens, and the install is unattended. A script that
+runs the installer inside a terminal session sets `HAL0_NONINTERACTIVE=1` to
+skip the screens, or passes `--answers=FILE` with a JSON answers document; the
+installer checks the whole file before it changes anything. An unattended run takes the Recommended setup. Where the GPU memory pool is at least 25 GB, that includes downloading the Qwen3.8 27B chat model (about 18.5 GB); set `HAL0_PULL_AGENT_MODEL=0` to skip it.
 
-A flag such as `--no-hermes` settles that row for you: the screens show it
-as fixed instead of skipping every question. A flag the installer does not
+An upgrade reuses the answers saved by the last install and asks nothing. A box
+installed before this change has none saved, so it is asked once; add
+`--reconfigure` to be asked again.
+
+A component flag such as `--no-hermes` settles that choice for you. On the
+Customize screens the row shows as fixed, set by the flag; on the Recommended
+and Minimal path there is no component row, so the flag simply applies.
+`--bare` fixes the setup type to Minimal, and Customize cannot then be picked. A flag the installer does not
 know stops the run with one line, so a typo never turns into a different
 install.
 
@@ -206,7 +211,7 @@ curl -fsSL https://hal0.dev/install.sh | sudo bash -s -- --no-start --models-dir
 | `--no-start` | Set everything up but do not enable/start the units |
 | `--models-dir=PATH` | Absolute path where Hugging Face pulls land (same as `HAL0_MODELS_DIR`); the setup screens show the folder as fixed |
 | `--answers=FILE` | Read the install choices from a JSON answers document instead of asking (same as `HAL0_ANSWERS_FILE=FILE`). The file is checked in full first, and a bad one stops the install before anything changes. It never carries a key or a token |
-| `--reconfigure` | On a box that already has hal0, show the setup screens again instead of reusing the answers saved by the last install |
+| `--reconfigure` | Show the setup screens again instead of reusing the answers saved by the last install |
 | `--summary-json=PATH` | Write a versioned, machine-readable install summary to `PATH` once the install finishes (see below) |
 | `--no-owui` | Skip Open WebUI (same as `HAL0_SKIP_OPENWEBUI=1`) |
 | `--no-comfyui` | Skip the starter image models (same as `HAL0_IMAGE_MODELS=none`); the `img` slot still exists, parked |
@@ -215,7 +220,7 @@ curl -fsSL https://hal0.dev/install.sh | sudo bash -s -- --no-start --models-dir
 | `--no-agents` | Skip both agents; same as `--no-hermes --no-pi` |
 | `--no-memory` | Skip the Hindsight memory service (same as `HAL0_SKIP_HINDSIGHT=1`) |
 | `--no-brain-model` | Skip the brain model pull (same as `HAL0_SKIP_BRAIN_MODEL=1`) |
-| `--bare`, `--bare-inference` | Synonyms: turn every optional component above off. Add `HAL0_NONINTERACTIVE=1` for an install that shows no screens |
+| `--bare`, `--bare-inference` | Synonyms: turn every optional component above off (the setup type is fixed to Minimal). Add `HAL0_NONINTERACTIVE=1` for an install that shows no screens |
 
 | Variable | Default | Purpose |
 |---|---|---|
@@ -229,7 +234,7 @@ curl -fsSL https://hal0.dev/install.sh | sudo bash -s -- --no-start --models-dir
 | `HAL0_PY_AUTOINSTALL` | _(unset)_ | The installer already sets this itself when the default Python is below 3.12, so you rarely need it; it allows installing `python3.12` via apt or dnf when no 3.12-3.14 is on `PATH`. Other distros need `HAL0_PYTHON` pointed at a newer interpreter |
 | `HAL0_HINDSIGHT_PYTHON` | _(auto)_ | Interpreter (Python 3.11-3.14) for the Hindsight memory engine venv; use it when the installer reports none usable |
 | `HAL0_SKIP_HERMES` | _(unset)_ | Set to `1` to skip provisioning the bundled Hermes agent; install it later with `hal0 agent install hermes` |
-| `HAL0_INSTALL_PI` | _(unset)_ | Set to `1` to install the Pi agent unattended; the setup screens set it when Pi is turned on |
+| `HAL0_INSTALL_PI` | _(unset)_ | Set to `1` to install the Pi agent unattended; the variable, or an answers file, installs Pi; the setup screens do not offer it |
 | `HAL0_IMAGE_MODELS` | _(unset)_ | Starter image models to download: `recommended` or a list of ids. Unset downloads none; `none` skips the step |
 
 ### Choosing components
@@ -240,9 +245,9 @@ installs none of them. Customize lets you switch each part on or off on its
 "What this box does" screen. A part this machine cannot run is shown with the
 reason and cannot be turned on.
 
-A component flag fixes that row on the screens. `--no-hermes`, for example,
-shows the Hermes row as off and set by the flag, and the rest of the screens
-work as usual. The flags and the screens apply at install time only. They never
+A component flag settles that choice. On the Customize screens `--no-hermes`,
+for example, shows the Hermes row as off and set by the flag; on the
+Recommended and Minimal path there is no row, and the flag simply applies. The flags and the screens apply at install time only. They never
 remove a component that is already installed.
 
 `HAL0_SKIP_SETUP=1` is not a per-row knob: it skips the brain and image-model

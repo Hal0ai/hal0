@@ -32,15 +32,15 @@ applying. Add those subsections to a version's section to surface them; see
 
 ### Highlights
 
-- **The installer asks its questions once, at the start, on a few screens.** Right after its first checks it shows how you want to set up hal0 (Recommended, Minimal or Customize), asks where models are stored, shows a review, and then installs without stopping. It used to ask up to seven questions at three separate moments. (#4049, #4050)
-- **A flag fixes one row on the screens instead of hiding every question.** `--no-hermes`, `--no-owui`, `--bare` and the other component flags show their row as set by the flag; the rest of the screens work as usual.
-- **A box that already has hal0 is not asked again.** An upgrade reuses the answers saved by the last install; `--reconfigure` asks again.
+- **The installer asks its questions once, at the start, on a few screens.** Right after its first checks it shows how you want to set up hal0 (Recommended, Minimal or Customize), asks where models are stored, shows a review, and then installs without stopping. It used to ask six questions at three separate moments. (#4049, #4050)
+- **A flag fixes one row on the screens instead of hiding every question.** On the Customize screens `--no-hermes`, `--no-owui` and the other component flags show their row as set by the flag; on the Recommended and Minimal path there is no component row, so the flag simply applies. `--bare` fixes the setup type to Minimal, shown as set by the flag.
+- **An upgrade reuses your answers.** An upgrade reuses the answers saved by the last install. A box installed before this change has none saved, so it is asked once (or, with no terminal, takes the defaults); `--reconfigure` asks again.
 
 ### Breaking
 
-- **The one-line install now shows the setup screens to a person at a terminal.** `curl -fsSL https://hal0.dev/install.sh | sudo bash` used to take every default when piped. A script or a CI job that runs it must set `HAL0_NONINTERACTIVE=1` or pass `--answers=FILE` with a JSON answers document, or it waits for a person.
+- **The one-line install now shows the setup screens to a person at a terminal.** `curl -fsSL https://hal0.dev/install.sh | sudo bash` used to take every default when piped. A run with a terminal attached now shows the screens and waits there, so a script that runs the installer inside a terminal session must set `HAL0_NONINTERACTIVE=1` or pass `--answers=FILE` with a JSON answers document; a run with no terminal is unattended as before.
 - **An unknown installer flag now stops the run.** The installer used to warn and carry on with its defaults. It now prints one line (`unknown flag: ... (run with --help for the list)`) and exits with status 1 before anything changes, so fix a mistyped flag in your script.
-- **`HAL0_IMAGE_MODELS` unset now means no image models.** An install with the variable unset downloads none; set it to `recommended` or to a list of image model ids to get them, as before.
+- **An unattended install now downloads the large chat model where one fits.** The Recommended setup that an unattended run takes includes the Qwen3.8 27B chat model (about 18.5 GB), pulled only where the GPU memory pool is at least 25 GB; before, an unattended run pulled it only with `HAL0_PULL_AGENT_MODEL=1`. Set `HAL0_PULL_AGENT_MODEL=0` to keep the old behaviour.
 - **`hal0 setup` run by hand asks nothing.** It prints one line and stops. To change what was chosen at install, run the installer again with `--reconfigure`. The unattended forms the installer itself uses (`--auto`, `--answers`, `--plan`, `--emit-answers`) are unchanged.
 
 ### Added
@@ -50,6 +50,7 @@ applying. Add those subsections to a version's section to surface them; see
 
 ### Changed
 
+- **The separate image-model menu at the terminal is gone.** Image models are chosen on the Customize screens or by setting `HAL0_IMAGE_MODELS` (`recommended`, or a list of ids); unset downloads none, as it already did for an unattended run.
 - **The installer's component checklist, model-folder question, Hugging Face token question, terminal-tool question and its agent-model and image-model offers are now screens of the one setup flow.** The Recommended path asks one thing, where models are stored; Customize adds screens for what the box does, models, storage, network and the assistant and memory.
 - **Getting started and the README describe the setup screens.** The install page, the beginner's guide, the first-model page and the README's flag table no longer describe the separate prompts.
 

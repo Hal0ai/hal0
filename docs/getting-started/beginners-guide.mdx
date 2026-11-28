@@ -107,8 +107,10 @@ extras you choose. It checks your machine first and says what is missing.
 </Steps>
 
 The one-line form, `curl -fsSL https://hal0.dev/install.sh | sudo bash`,
-shows the same setup screens when you type it at a terminal. A script that
-cannot answer questions sets `HAL0_NONINTERACTIVE=1` and gets the defaults.
+shows the same setup screens when you type it at a terminal. Over ssh without
+`-t`, or in a job with no terminal, there are no screens and the install is
+unattended; a script that runs it inside a terminal session sets
+`HAL0_NONINTERACTIVE=1`. An unattended run takes the Recommended setup. Where the GPU memory pool is at least 25 GB, that includes downloading the Qwen3.8 27B chat model (about 18.5 GB); set `HAL0_PULL_AGENT_MODEL=0` to skip it.
 
 ### What the installer asks
 
@@ -134,14 +136,15 @@ last one off: with it on, the assistant can run any command with full
 control of the machine.
 
 Hugging Face is the website most models come from. Open models need no
-account, so leave its token blank unless a model you want asks for one.
+account. Only on the Customize models screen, and only for a model that needs
+an account, the installer asks for a token; leave it blank to skip.
 
 If the machine has no usable graphics card, a screen before these asks whether
 to continue without one. hal0 works without one, but answers are slow.
 
-On a machine that already has hal0, the installer reuses the answers from the
-last install and asks nothing. Run it again with `--reconfigure` to answer
-the questions again.
+An upgrade reuses the answers from the last install and asks nothing. A
+machine installed before this change has none saved, so it is asked once. Run
+the installer with `--reconfigure` to answer the questions again.
 
 A skipped component can be added later, and these choices never remove
 something already installed.

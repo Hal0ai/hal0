@@ -131,7 +131,9 @@ That fetches `installer/bootstrap.sh`, which installs any missing basics
 fetching a digest-pinned build when the box has none. It authenticates the channel manifest before parsing it, sha256- and
 Sigstore-bundle-verifies the release tarball, then hands off to
 [`installer/install.sh`](./installer/install.sh). Piped through `bash` it
-never prompts. Re-running it is safe: every provisioning step is idempotent
+still shows the setup screens when a person is at a terminal, because the
+screens open the terminal themselves; with `HAL0_NONINTERACTIVE=1`,
+`--answers=FILE` or no terminal it asks nothing. Re-running it is safe: every provisioning step is idempotent
 and existing slot configs are never overwritten.
 
 Pick a channel with `HAL0_CHANNEL` (`stable` is the default; `preview` and
@@ -177,12 +179,14 @@ Recommended (web chat, an assistant and memory, with models picked for this
 box), Minimal (only the model server) or Customize (choose each part). Then
 a review screen ("Ready to install") shows what will happen, and the install
 runs without stopping. The one-line `curl | sudo bash` install shows the
-screens too when a terminal can be opened. A script sets
-`HAL0_NONINTERACTIVE=1` or passes `--answers=FILE` instead. On a box that is
-already installed the installer reuses the answers saved by the last install
-and asks nothing; add `--reconfigure` to be asked again. A flag such as
-`--no-hermes` fixes that row on the screens instead of hiding every question,
-and an unknown flag stops the run with one line.
+screens too when a terminal can be opened; over ssh without `-t`, or in CI
+with no terminal, there are no screens and the install is unattended. A script
+that runs the installer inside a terminal session sets `HAL0_NONINTERACTIVE=1`
+or passes `--answers=FILE`. An unattended run takes the Recommended setup. Where the GPU memory pool is at least 25 GB, that includes downloading the Qwen3.8 27B chat model (about 18.5 GB); set `HAL0_PULL_AGENT_MODEL=0` to skip it. An upgrade reuses the answers saved by
+the last install; a box installed before this change has none saved, so it is
+asked once. Add `--reconfigure` to be asked again. A component flag such as
+`--no-hermes` shows its row as fixed on the Customize screens (on the other
+paths it simply applies), and an unknown flag stops the run with one line.
 
 Full step list and the complete env-var table:
 [`installer/README.md`](./installer/README.md).
@@ -196,7 +200,7 @@ Full step list and the complete env-var table:
 | `HAL0_CHANNEL=preview` | Install from a channel other than `stable` |
 | `HAL0_NONINTERACTIVE=1` | Never show the setup screens, even at a terminal; use the flags, variables and defaults |
 | `--answers=FILE` / `HAL0_ANSWERS_FILE=FILE` | Read the install choices from a JSON answers document instead of asking; it is checked in full before anything changes |
-| `--reconfigure` | On a box that is already installed, ask the setup questions again instead of reusing the saved answers |
+| `--reconfigure` | Ask the setup questions again instead of reusing the answers saved by the last install |
 | `HAL0_SKIP_SETUP=1` | Skip first-run seeding **and** the brain, agent and image model steps |
 | `--no-brain-model` / `HAL0_SKIP_BRAIN_MODEL=1` | Keep the seeding, skip the brain pull (`brain` stays model-less) |
 | `HAL0_BRAIN_MODEL=<id>` | Force a specific curated brain quant |
@@ -206,7 +210,7 @@ Full step list and the complete env-var table:
 | `--no-owui` / `HAL0_SKIP_OPENWEBUI=1` | Skip Open WebUI |
 | `--no-comfyui` / `HAL0_IMAGE_MODELS=none` | Skip the starter image models (the `img` slot still exists, parked) |
 | `--no-hermes` / `HAL0_SKIP_HERMES=1` | Skip the Hermes agent |
-| `--no-pi` / `HAL0_SKIP_PI=1` | Skip the Pi agent (`HAL0_INSTALL_PI=1` installs it unattended) |
+| `--no-pi` / `HAL0_SKIP_PI=1` | Skip the Pi agent (`HAL0_INSTALL_PI=1`, or an answers file, installs it; the screens do not offer Pi) |
 | `--no-memory` / `HAL0_SKIP_HINDSIGHT=1` | Skip the Hindsight memory service |
 | `--no-agents` | Same as `--no-hermes --no-pi` |
 | `--bare` (or `--bare-inference`) | Turn every optional component off: inference only |
