@@ -36,11 +36,14 @@ def usage_comment(text: str) -> str:
 
 
 def accepted_flags(text: str) -> set[str]:
-    """Bare flag names from the case arm of the unknown-flag stop in install.sh."""
-    start = text.index("if hal0_wizard_present")
-    end = text.index(") ;;", start)
-    arm = text[start:end]
-    return set(FLAG.findall(arm))
+    """Bare flag names from the case arm of the unknown-flag stop in install.sh.
+
+    Anchored on the stop's own message, walking back to the ``case`` that holds it,
+    so the parse does not depend on what wraps the loop.
+    """
+    stop = text.index('err "unknown flag:')
+    start = text.rindex('case "$arg" in', 0, stop)
+    return set(FLAG.findall(text[start:stop]))
 
 
 def bootstrap_consumed_flags(text: str) -> set[str]:
