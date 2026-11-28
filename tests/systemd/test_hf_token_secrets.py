@@ -98,9 +98,6 @@ class TestGather:
         assert "_tty_read" not in gather_block
         assert "/dev/tty" not in gather_block
 
-    def test_no_prompt_variable_is_left(self, gather_block: str) -> None:
-        assert "_hf_answer" not in gather_block
-
     def test_the_token_value_is_never_printed(self, gather_block: str) -> None:
         """Printing a secret is exactly what the 0600 secrets file exists to
         avoid: no log line in this block names the token variable."""

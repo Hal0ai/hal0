@@ -12,6 +12,7 @@ from __future__ import annotations
 import glob
 import os
 import subprocess
+import time
 from pathlib import Path
 
 import pytest
@@ -72,14 +73,48 @@ def _run(
     )
 
 
-def _install_logs() -> set[str]:
-    """Install logs on this machine. The installer names them under /tmp (or
-    /var/log/hal0 as root) whatever TMPDIR says, so look there; reading only."""
-    return set(glob.glob("/tmp/hal0-install-*.log")) | set(glob.glob("/var/log/hal0/install-*.log"))
+# File times come from a coarser clock than time_ns(); the line below is the real tie.
+_CLOCK_SLACK_NS = 2 * 10**9
+_LOG_PATTERNS = ("/tmp/hal0-install-*.log", "/var/log/hal0/install-*.log")
+
+
+def _logs_from_this_run(since_ns: int, patterns: tuple[str, ...] = _LOG_PATTERNS) -> list[str]:
+    """Install logs this run created: modified since ``since_ns`` AND holding its line.
+
+    The installer names its log under /tmp (or /var/log/hal0 as root) whatever
+    TMPDIR says, with a random name, so nothing ties a file to a run by name.
+    If the completeness check ever moved after the log was opened, the stop
+    line would be copied into that log, so the line is the tie: another test
+    running at the same time makes logs without it. Reading only.
+    """
+    found: list[str] = []
+    for pattern in patterns:
+        for name in glob.glob(pattern):
+            try:
+                if os.stat(name).st_mtime_ns < since_ns - _CLOCK_SLACK_NS:
+                    continue
+                text = Path(name).read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            if "this release tree is incomplete" in text:
+                found.append(name)
+    return found
+
+
+def test_the_log_check_counts_only_this_runs_files(tmp_path: Path) -> None:
+    started = time.time_ns()
+    stale = tmp_path / "hal0-install-old.log"
+    stale.write_text(MISSING_LINE, encoding="utf-8")
+    os.utime(stale, ns=(started - 10 * 10**9, started - 10 * 10**9))
+    other = tmp_path / "hal0-install-other.log"
+    other.write_text("some other test's install\n", encoding="utf-8")
+    mine = tmp_path / "hal0-install-mine.log"
+    mine.write_text("err: " + MISSING_LINE + "\n", encoding="utf-8")
+    assert _logs_from_this_run(started, (str(tmp_path / "hal0-install-*.log"),)) == [str(mine)]
 
 
 def _assert_stopped_at_the_check(
-    proc: subprocess.CompletedProcess[str], work: Path, before: set[str]
+    proc: subprocess.CompletedProcess[str], work: Path, since_ns: int
 ) -> None:
     assert proc.returncode == 1, proc.stdout + proc.stderr
     assert proc.stdout == ""
@@ -88,15 +123,15 @@ def _assert_stopped_at_the_check(
     assert lines[0].endswith(MISSING_LINE), proc.stderr
     assert [p.name for p in work.iterdir()] == ["tmp"]
     assert list((work / "tmp").iterdir()) == []
-    assert _install_logs() == before, "an install log was created before the stop"
+    assert _logs_from_this_run(since_ns) == [], "an install log was created before the stop"
 
 
 @pytest.mark.parametrize("args", [[], ["--dev"], ["--no-owui"], ["--help"], ["--bogus"]])
 def test_a_tree_without_the_wizard_stops_with_one_line(tmp_path: Path, args: list[str]) -> None:
     tree = _tree(tmp_path / "tree", wizard=False)
-    before = _install_logs()
+    started = time.time_ns()
     proc = _run(tree, tmp_path / "work", args)
-    _assert_stopped_at_the_check(proc, tmp_path / "work", before)
+    _assert_stopped_at_the_check(proc, tmp_path / "work", started)
     assert "unknown flag" not in proc.stderr
     assert not (tree / ".hal0ai").exists()
 
@@ -109,9 +144,9 @@ def test_a_tree_missing_one_wizard_file_stops_too(tmp_path: Path, missing: str) 
         "catalog": tree / "installer" / "manifests" / "setup-catalog.json",
     }[missing]
     victim.unlink()
-    before = _install_logs()
+    started = time.time_ns()
     proc = _run(tree, tmp_path / "work", [])
-    _assert_stopped_at_the_check(proc, tmp_path / "work", before)
+    _assert_stopped_at_the_check(proc, tmp_path / "work", started)
 
 
 @pytest.mark.parametrize("flag", ["--no-hermse", "--box", "--answers"])
