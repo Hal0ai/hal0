@@ -29,7 +29,9 @@ HAL0_UID = "990"
 NOFOLLOW_ROOT = "nofollow dir --create --owner root:root --mode 0755 --expect root"
 NOFOLLOW_HAL0 = "nofollow dir --create --owner hal0:hal0 --mode 2775 --expect adopt"
 NOFOLLOW_DEV = "nofollow dir --create --mode 0755 --expect adopt"
-EXISTING = "it already exists and is not a folder only root can change, nor one the hal0 account owns"
+EXISTING = (
+    "it already exists and is not a folder only root can change, nor one the hal0 account owns"
+)
 
 
 def _slice(start: str, end: str) -> str:
@@ -37,13 +39,22 @@ def _slice(start: str, end: str) -> str:
     return TEXT[head : TEXT.index(end, head)]
 
 
-def _run(tmp_path: Path, models_dir: str, *, from_doc: int = 1, owners: dict[str, str] | None = None,
-         fail: int = 0, var_dir: str = "/v", hal0_exists: bool = True, dev_mode: int = 0,
-         expect_rc: int = 0) -> tuple[list[str], str]:
+def _run(
+    tmp_path: Path,
+    models_dir: str,
+    *,
+    from_doc: int = 1,
+    owners: dict[str, str] | None = None,
+    fail: int = 0,
+    var_dir: str = "/v",
+    hal0_exists: bool = True,
+    dev_mode: int = 0,
+    expect_rc: int = 0,
+) -> tuple[list[str], str]:
     """Run the step. ``owners`` maps a path to the "UID MODE" its stubbed `stat -L` reports."""
     log = tmp_path / "calls.log"
     table = " ".join(f'["{path}"]="{value}"' for path, value in (owners or {}).items())
-    hal0 = f'echo {HAL0_UID}' if hal0_exists else "return 1"
+    hal0 = f"echo {HAL0_UID}" if hal0_exists else "return 1"
     script = f"""
 set -euo pipefail
 LOG="{log}"
@@ -122,7 +133,8 @@ def _link_died(calls: list[str], out: str, store: str, link: str, **kwargs: bool
 
 
 def test_missing_folders_under_root_only_ancestors_are_made_in_one_nofollow_call(
-        tmp_path: Path) -> None:
+    tmp_path: Path,
+) -> None:
     store = f"{tmp_path}/a/b/models"
     calls, out = _run(tmp_path, store)
     assert _nofollow(calls) == [f"{NOFOLLOW_ROOT} {tmp_path}/a {tmp_path}/a/b {store}"]
@@ -141,10 +153,12 @@ def test_existing_components_are_not_re_moded(tmp_path: Path) -> None:
     assert _nofollow(calls) == [f"{NOFOLLOW_ROOT} {store}"]
 
 
-@pytest.mark.parametrize("owner", ["0 755", "0 700", "0 1755", f"{HAL0_UID} 2775",
-                                   f"{HAL0_UID} 777"])
-def test_an_existing_store_owned_by_root_alone_or_by_hal0_needs_no_creation(tmp_path: Path,
-                                                                            owner: str) -> None:
+@pytest.mark.parametrize(
+    "owner", ["0 755", "0 700", "0 1755", f"{HAL0_UID} 2775", f"{HAL0_UID} 777"]
+)
+def test_an_existing_store_owned_by_root_alone_or_by_hal0_needs_no_creation(
+    tmp_path: Path, owner: str
+) -> None:
     (tmp_path / "models").mkdir()
     store = f"{tmp_path}/models"
     calls, out = _run(tmp_path, store, owners={store: owner})
@@ -160,15 +174,22 @@ def test_the_store_and_its_parents_are_looked_at_without_following_links(tmp_pat
 
 
 def test_a_path_inside_the_default_store_is_made_through_nofollow_like_the_default_store(
-        tmp_path: Path) -> None:
+    tmp_path: Path,
+) -> None:
     # the default store is hal0:hal0 2775 (the adopt loop below); folders a document
     # adds inside it get the same, through `nofollow`, never `mkdir -p` by name
     var_dir = f"{tmp_path}/var"
     (tmp_path / "var" / "models").mkdir(parents=True)  # the step's own `mkdir -p` made it
     store = f"{var_dir}/models/deeper/x"
-    calls, out = _run(tmp_path, store, var_dir=var_dir,
-                      owners={str(tmp_path): "4242 777",  # its parents' owners do not matter
-                              f"{var_dir}/models": f"{HAL0_UID} 2775"})
+    calls, out = _run(
+        tmp_path,
+        store,
+        var_dir=var_dir,
+        owners={
+            str(tmp_path): "4242 777",  # its parents' owners do not matter
+            f"{var_dir}/models": f"{HAL0_UID} 2775",
+        },
+    )
     assert "DIE" not in out and "DONE" in out, out
     assert _nofollow(calls) == [f"{NOFOLLOW_HAL0} {var_dir}/models/deeper {store}"]
     mkdir_p = _mkdir_p(calls).split()
@@ -179,14 +200,19 @@ def test_a_path_inside_the_default_store_is_made_through_nofollow_like_the_defau
 def test_the_default_store_itself_from_a_document_needs_no_creation(tmp_path: Path) -> None:
     var_dir = f"{tmp_path}/var"
     (tmp_path / "var" / "models").mkdir(parents=True)
-    calls, out = _run(tmp_path, f"{var_dir}/models", var_dir=var_dir,
-                      owners={f"{var_dir}/models": f"{HAL0_UID} 2775"})
+    calls, out = _run(
+        tmp_path,
+        f"{var_dir}/models",
+        var_dir=var_dir,
+        owners={f"{var_dir}/models": f"{HAL0_UID} 2775"},
+    )
     assert "DONE" in out and _nofollow(calls) == []
     assert f"{var_dir}/models" in _mkdir_p(calls).split()
 
 
 def test_inside_the_default_store_without_a_hal0_account_folders_are_made_plain(
-        tmp_path: Path) -> None:
+    tmp_path: Path,
+) -> None:
     var_dir = f"{tmp_path}/var"
     (tmp_path / "var" / "models").mkdir(parents=True)
     store = f"{var_dir}/models/x"
@@ -220,7 +246,8 @@ def test_a_default_store_that_is_a_link_stops_a_documents_store_inside_it(tmp_pa
 
 
 def test_an_existing_store_inside_the_default_store_gets_the_existing_folder_rule(
-        tmp_path: Path) -> None:
+    tmp_path: Path,
+) -> None:
     var_dir = f"{tmp_path}/var"
     (tmp_path / "var" / "models" / "x").mkdir(parents=True)
     store = f"{var_dir}/models/x"
@@ -231,8 +258,9 @@ def test_an_existing_store_inside_the_default_store_gets_the_existing_folder_rul
 def test_a_look_alike_of_the_default_store_gets_the_full_rule(tmp_path: Path) -> None:
     var_dir = f"{tmp_path}/var"
     store = f"{var_dir}/modelsx/m"
-    calls, out = _run(tmp_path, store, var_dir=var_dir, owners={str(tmp_path): "4242 755"},
-                      expect_rc=1)
+    calls, out = _run(
+        tmp_path, store, var_dir=var_dir, owners={str(tmp_path): "4242 755"}, expect_rc=1
+    )
     _died(calls, out, store, f"{tmp_path} is not owned by root")
 
 
@@ -249,8 +277,9 @@ def test_an_ancestor_owned_by_someone_else_stops_the_install(tmp_path: Path) -> 
 def test_an_ancestor_owned_by_the_hal0_account_stops_the_install(tmp_path: Path) -> None:
     (tmp_path / "lib" / "hal0").mkdir(parents=True)
     store = f"{tmp_path}/lib/hal0/other"
-    calls, out = _run(tmp_path, store, owners={f"{tmp_path}/lib/hal0": f"{HAL0_UID} 2775"},
-                      expect_rc=1)
+    calls, out = _run(
+        tmp_path, store, owners={f"{tmp_path}/lib/hal0": f"{HAL0_UID} 2775"}, expect_rc=1
+    )
     _died(calls, out, store, f"{tmp_path}/lib/hal0 is not owned by root")
 
 
@@ -275,8 +304,9 @@ def test_an_ancestor_further_up_counts_too_not_only_the_deepest(tmp_path: Path) 
 
 
 @pytest.mark.parametrize("owner", ["1000 755", "4242 700", "1000 2775"])
-def test_an_existing_store_owned_by_another_account_stops_the_install(tmp_path: Path,
-                                                                      owner: str) -> None:
+def test_an_existing_store_owned_by_another_account_stops_the_install(
+    tmp_path: Path, owner: str
+) -> None:
     (tmp_path / "models").mkdir()
     store = f"{tmp_path}/models"
     calls, out = _run(tmp_path, store, owners={store: owner}, expect_rc=1)
@@ -285,7 +315,8 @@ def test_an_existing_store_owned_by_another_account_stops_the_install(tmp_path: 
 
 @pytest.mark.parametrize("mode", ["1777", "2775", "775", "757", "777", "3777"])
 def test_an_existing_root_store_a_group_or_others_can_write_stops_the_install(
-        tmp_path: Path, mode: str) -> None:
+    tmp_path: Path, mode: str
+) -> None:
     # /var/tmp, /var/crash (1777), /var/mail, /var/local (2775): root's later
     # downloads write by name below the store, where anyone could plant a link
     (tmp_path / "shared").mkdir()
@@ -297,13 +328,15 @@ def test_an_existing_root_store_a_group_or_others_can_write_stops_the_install(
 def test_without_a_hal0_account_only_root_may_own_an_existing_store(tmp_path: Path) -> None:
     (tmp_path / "models").mkdir()
     store = f"{tmp_path}/models"
-    calls, out = _run(tmp_path, store, owners={store: f"{HAL0_UID} 755"}, hal0_exists=False,
-                      expect_rc=1)
+    calls, out = _run(
+        tmp_path, store, owners={store: f"{HAL0_UID} 755"}, hal0_exists=False, expect_rc=1
+    )
     _died(calls, out, store, EXISTING)
 
 
 def test_a_symlink_component_in_a_directory_someone_else_owns_stops_the_install(
-        tmp_path: Path) -> None:
+    tmp_path: Path,
+) -> None:
     (tmp_path / "home" / "alice").mkdir(parents=True)
     (tmp_path / "elsewhere").mkdir()
     (tmp_path / "home" / "alice" / "link").symlink_to(tmp_path / "elsewhere")
@@ -321,7 +354,8 @@ def test_a_symlink_leading_to_a_folder_someone_else_owns_stops_the_install(tmp_p
 
 
 def test_a_link_in_a_root_only_folder_to_a_root_only_folder_still_stops_the_install(
-        tmp_path: Path) -> None:
+    tmp_path: Path,
+) -> None:
     # like /home -> /var/home: every link is refused, wherever it sits and leads
     (tmp_path / "var" / "home").mkdir(parents=True)
     (tmp_path / "home").symlink_to(tmp_path / "var" / "home")
@@ -347,7 +381,8 @@ def test_a_link_in_the_middle_stops_the_install(tmp_path: Path) -> None:
 
 
 def test_the_reviews_data_models_link_into_the_default_store_stops_the_install(
-        tmp_path: Path) -> None:
+    tmp_path: Path,
+) -> None:
     # root's convenience link /data/models -> /var/lib/hal0/models: the hal0
     # account owns where it leads, so a document may not name it
     var_dir = f"{tmp_path}/var/lib/hal0"
@@ -355,9 +390,13 @@ def test_the_reviews_data_models_link_into_the_default_store_stops_the_install(
     (tmp_path / "data").mkdir()
     (tmp_path / "data" / "models").symlink_to(f"{var_dir}/models")
     store = f"{tmp_path}/data/models"
-    calls, out = _run(tmp_path, store, var_dir=var_dir,
-                      owners={var_dir: f"{HAL0_UID} 2775", f"{var_dir}/models": f"{HAL0_UID} 2775"},
-                      expect_rc=1)
+    calls, out = _run(
+        tmp_path,
+        store,
+        var_dir=var_dir,
+        owners={var_dir: f"{HAL0_UID} 2775", f"{var_dir}/models": f"{HAL0_UID} 2775"},
+        expect_rc=1,
+    )
     _link_died(calls, out, store, store)
 
 
@@ -404,15 +443,20 @@ def test_a_store_that_did_not_come_from_a_document_is_made_as_before(tmp_path: P
 
 
 def test_the_old_helpers_and_the_root_uid_seam_are_gone() -> None:
-    for gone in ("hal0_doc_dir_parent_ok", "hal0_mkdir_walk_nofollow", "_hal0_root_uid",
-                 "HAL0_ANSWERS_TEST_ROOT_UID", "HAL0_INSTALL_TEST_ROOT_UID"):
+    for gone in (
+        "hal0_doc_dir_parent_ok",
+        "hal0_mkdir_walk_nofollow",
+        "_hal0_root_uid",
+        "HAL0_ANSWERS_TEST_ROOT_UID",
+        "HAL0_INSTALL_TEST_ROOT_UID",
+    ):
         assert gone not in TEXT, gone
 
 
 def test_the_flag_is_set_only_when_the_document_won() -> None:
     block = _slice("# answers-models-dir: begin", "# answers-models-dir: end")
     assert block.count("MODELS_DIR_FROM_DOC=1") == 1
-    assert block.index("MODELS_DIR_FROM_DOC=1") > block.index("MODELS_DIR=\"${HAL0_MODELS_DIR}\"")
+    assert block.index("MODELS_DIR_FROM_DOC=1") > block.index('MODELS_DIR="${HAL0_MODELS_DIR}"')
     assert "MODELS_DIR_FROM_DOC=0" in TEXT[: TEXT.index("# answers-models-dir: begin")]
 
 
@@ -438,5 +482,9 @@ echo "FROM_DOC=${{MODELS_DIR_FROM_DOC}} DIR=${{MODELS_DIR}}"
 
 def test_the_flag_follows_who_chose_the_store() -> None:
     assert _seam(exported=["HAL0_MODELS_DIR"], flag=0) == "FROM_DOC=1 DIR=/doc"
-    assert _seam(exported=["HAL0_MODELS_DIR"], flag=1) == "FROM_DOC=0 DIR=/default"  # --models-dir won
-    assert _seam(exported=["HAL0_NONINTERACTIVE"], flag=0) == "FROM_DOC=0 DIR=/default"  # inherited env
+    assert (
+        _seam(exported=["HAL0_MODELS_DIR"], flag=1) == "FROM_DOC=0 DIR=/default"
+    )  # --models-dir won
+    assert (
+        _seam(exported=["HAL0_NONINTERACTIVE"], flag=0) == "FROM_DOC=0 DIR=/default"
+    )  # inherited env

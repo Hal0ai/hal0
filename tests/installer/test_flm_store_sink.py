@@ -152,7 +152,9 @@ def test_uid_1000_unusable_falls_back_to_hal0_hal0(tmp_path: Path) -> None:
     assert "WARN" not in out
 
 
-def test_existing_directory_from_the_environment_is_re_owned_through_nofollow(tmp_path: Path) -> None:
+def test_existing_directory_from_the_environment_is_re_owned_through_nofollow(
+    tmp_path: Path,
+) -> None:
     store = tmp_path / "flm"
     store.mkdir()
     calls, _ = _run(tmp_path, str(store), exported="HAL0_MODELS_DIR")
@@ -197,8 +199,9 @@ def test_the_comment_no_longer_calls_the_path_trusted() -> None:
 def test_a_document_folder_inside_the_store_is_created_through_nofollow(tmp_path: Path) -> None:
     (tmp_path / "models").mkdir()
     store = f"{tmp_path}/models/npu/a/flm"
-    calls, out = _run(tmp_path, store, exported=DOC, models_dir=f"{tmp_path}/models",
-                      chosen=f"{tmp_path}/models")
+    calls, out = _run(
+        tmp_path, store, exported=DOC, models_dir=f"{tmp_path}/models", chosen=f"{tmp_path}/models"
+    )
     assert _nofollow(calls) == [
         f"{PARENT} {tmp_path}/models/npu {tmp_path}/models/npu/a",
         f"{LEAF_1000} {store}",
@@ -208,26 +211,31 @@ def test_a_document_folder_inside_the_store_is_created_through_nofollow(tmp_path
 
 
 def test_existing_folders_between_the_store_and_the_npu_folder_are_not_re_moded(
-        tmp_path: Path) -> None:
+    tmp_path: Path,
+) -> None:
     (tmp_path / "models" / "npu").mkdir(parents=True)
     store = f"{tmp_path}/models/npu/flm"
-    calls, _ = _run(tmp_path, store, exported=DOC, models_dir=f"{tmp_path}/models/",
-                    chosen=f"{tmp_path}/models")
+    calls, _ = _run(
+        tmp_path, store, exported=DOC, models_dir=f"{tmp_path}/models/", chosen=f"{tmp_path}/models"
+    )
     assert _nofollow(calls) == [f"{LEAF_1000} {store}"]
 
 
 def test_a_document_folder_falls_back_to_hal0_hal0(tmp_path: Path) -> None:
     store = f"{tmp_path}/flm"
-    calls, out = _run(tmp_path, store, exported=DOC, nofollow_fail="--owner 1000:hal0",
-                      chosen=str(tmp_path))
+    calls, out = _run(
+        tmp_path, store, exported=DOC, nofollow_fail="--owner 1000:hal0", chosen=str(tmp_path)
+    )
     assert _nofollow(calls) == [f"{LEAF_1000} {store}", f"{LEAF_HAL0} {store}"]
     assert "WARN" not in out
 
 
-@pytest.mark.parametrize("models_dir", ["{t}/other", "{t}/flm", "{t}/fl", "/", "", "{t}/flm/x",
-                                        "relative"])
-def test_a_document_folder_outside_the_store_is_skipped_with_one_warning(tmp_path: Path,
-                                                                         models_dir: str) -> None:
+@pytest.mark.parametrize(
+    "models_dir", ["{t}/other", "{t}/flm", "{t}/fl", "/", "", "{t}/flm/x", "relative"]
+)
+def test_a_document_folder_outside_the_store_is_skipped_with_one_warning(
+    tmp_path: Path, models_dir: str
+) -> None:
     store = f"{tmp_path}/flm"
     calls, out = _run(tmp_path, store, exported=DOC, models_dir=models_dir.format(t=tmp_path))
     assert calls == []
@@ -312,12 +320,20 @@ def test_the_reviews_data_models_attack_creates_nothing(tmp_path: Path) -> None:
     var_dir = f"{tmp_path}/var/lib/hal0"
     (tmp_path / "var" / "lib" / "hal0").mkdir(parents=True)
     (tmp_path / "etc" / "systemd" / "system").mkdir(parents=True)
-    (tmp_path / "var" / "lib" / "hal0" / "models").symlink_to(tmp_path / "etc" / "systemd" / "system")
+    (tmp_path / "var" / "lib" / "hal0" / "models").symlink_to(
+        tmp_path / "etc" / "systemd" / "system"
+    )
     (tmp_path / "data").mkdir()
     (tmp_path / "data" / "models").symlink_to(f"{var_dir}/models")
     flm = f"{tmp_path}/data/models/sshd.service.d"
-    calls, out = _run(tmp_path, flm, exported=DOC, models_dir=f"{tmp_path}/data/models",
-                      var_dir=var_dir, owners={var_dir: "990 2775"})
+    calls, out = _run(
+        tmp_path,
+        flm,
+        exported=DOC,
+        models_dir=f"{tmp_path}/data/models",
+        var_dir=var_dir,
+        owners={var_dir: "990 2775"},
+    )
     _not_chosen(calls, out, flm)
     assert not (tmp_path / "etc" / "systemd" / "system" / "sshd.service.d").exists()
 
@@ -328,8 +344,14 @@ def test_a_folder_inside_the_default_store_is_created(tmp_path: Path) -> None:
     var_dir = f"{tmp_path}/var/lib/hal0"
     (tmp_path / "var" / "lib" / "hal0" / "models").mkdir(parents=True)
     flm = f"{var_dir}/models/npu/flm"
-    calls, out = _run(tmp_path, flm, exported=DOC, models_dir=f"{var_dir}/models", var_dir=var_dir,
-                      owners={var_dir: "990 2775", f"{var_dir}/models": "990 2775"})
+    calls, out = _run(
+        tmp_path,
+        flm,
+        exported=DOC,
+        models_dir=f"{var_dir}/models",
+        var_dir=var_dir,
+        owners={var_dir: "990 2775", f"{var_dir}/models": "990 2775"},
+    )
     assert _nofollow(calls) == [f"{PARENT} {var_dir}/models/npu", f"{LEAF_1000} {flm}"]
     assert "created FLM model directory" in out and "WARN" not in out
 
@@ -340,8 +362,14 @@ def test_a_link_inside_the_default_store_skips_the_folder(tmp_path: Path) -> Non
     (tmp_path / "etc").mkdir()
     (tmp_path / "var" / "lib" / "hal0" / "models").symlink_to(tmp_path / "etc")
     flm = f"{var_dir}/models/flm"
-    calls, out = _run(tmp_path, flm, exported=DOC, models_dir=f"{var_dir}/models", var_dir=var_dir,
-                      owners={var_dir: "990 2775"})
+    calls, out = _run(
+        tmp_path,
+        flm,
+        exported=DOC,
+        models_dir=f"{var_dir}/models",
+        var_dir=var_dir,
+        owners={var_dir: "990 2775"},
+    )
     _link_skipped(calls, out, flm, f"{var_dir}/models")
 
 
@@ -354,30 +382,55 @@ def test_a_folder_under_root_only_real_folders_is_no_longer_created(tmp_path: Pa
     _not_chosen(calls, out, flm)
 
 
-@pytest.mark.parametrize("owners", [{"{t}/data": "1000 755"}, {"{t}/data/store": "990 2775"},
-                                    {"{t}/data": "0 1777"}, {"/": "0 777"}])
-def test_outside_the_default_store_ownership_does_not_matter_any_more(tmp_path: Path,
-                                                                     owners: dict) -> None:
+@pytest.mark.parametrize(
+    "owners",
+    [
+        {"{t}/data": "1000 755"},
+        {"{t}/data/store": "990 2775"},
+        {"{t}/data": "0 1777"},
+        {"/": "0 777"},
+    ],
+)
+def test_outside_the_default_store_ownership_does_not_matter_any_more(
+    tmp_path: Path, owners: dict
+) -> None:
     (tmp_path / "data" / "store").mkdir(parents=True)
     flm = f"{tmp_path}/data/store/npu/flm"
-    calls, out = _run(tmp_path, flm, exported=DOC, models_dir=f"{tmp_path}/data/store",
-                      owners={k.format(t=tmp_path): v for k, v in owners.items()})
+    calls, out = _run(
+        tmp_path,
+        flm,
+        exported=DOC,
+        models_dir=f"{tmp_path}/data/store",
+        owners={k.format(t=tmp_path): v for k, v in owners.items()},
+    )
     _not_chosen(calls, out, flm)
 
 
 def test_an_uninspectable_folder_in_the_operators_store_skips_the_folder(tmp_path: Path) -> None:
     (tmp_path / "store" / "a").mkdir(parents=True)
     flm = f"{tmp_path}/store/a/flm"
-    calls, out = _run(tmp_path, flm, exported=DOC, models_dir=f"{tmp_path}/store",
-                      owners={f"{tmp_path}/store": ""}, chosen=f"{tmp_path}/store")
+    calls, out = _run(
+        tmp_path,
+        flm,
+        exported=DOC,
+        models_dir=f"{tmp_path}/store",
+        owners={f"{tmp_path}/store": ""},
+        chosen=f"{tmp_path}/store",
+    )
     assert _nofollow(calls) == [] and out.count("WARN:") == 1
     assert f"{tmp_path}/store cannot be inspected" in out and "FLM=unset" in out
 
 
 def test_a_refused_parent_skips_the_folder_with_one_warning(tmp_path: Path) -> None:
     store = f"{tmp_path}/a/flm"
-    calls, out = _run(tmp_path, store, exported=DOC, models_dir=str(tmp_path),
-                      nofollow_fail="--expect root", chosen=str(tmp_path))
+    calls, out = _run(
+        tmp_path,
+        store,
+        exported=DOC,
+        models_dir=str(tmp_path),
+        nofollow_fail="--expect root",
+        chosen=str(tmp_path),
+    )
     assert _nofollow(calls) == [f"{PARENT} {tmp_path}/a"]  # the folder itself is not attempted
     assert out.count("WARN:") == 1 and "could not create" in out and "DONE" in out
     assert "FLM=unset" in out
@@ -391,7 +444,7 @@ def test_a_refused_folder_warns_and_never_stops_the_install(tmp_path: Path) -> N
     assert _nofollow(calls) == [f"{LEAF_1000} {store}", f"{LEAF_HAL0} {store}"]
     assert out.count("WARN:") == 1 and "DONE" in out and "FLM=unset" in out
     assert "die" not in _block()
-    flm_helper = _helpers()[_helpers().index("hal0_doc_flm_prepare() {"):]
+    flm_helper = _helpers()[_helpers().index("hal0_doc_flm_prepare() {") :]
     assert "die " not in flm_helper
 
 
@@ -408,7 +461,7 @@ def test_a_document_folder_is_only_looked_at_and_never_re_owned(tmp_path: Path) 
 
 def test_the_check_runs_right_before_the_creation() -> None:
     # nothing but the walk sits between the text check and the first `nofollow`
-    helper = _helpers()[_helpers().index("hal0_doc_flm_prepare() {"):]
+    helper = _helpers()[_helpers().index("hal0_doc_flm_prepare() {") :]
     walk = helper.index("_hal0_doc_walk ")
     assert walk < helper.index("nofollow dir")
     assert '"${VAR_DIR}/models"' in _block()

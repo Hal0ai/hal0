@@ -24,8 +24,9 @@ DOC = {
 }
 
 
-def _bash(script: str, tmp_path: Path, nofollow_rc: int = 0,
-          dir_rc: int = 0) -> subprocess.CompletedProcess[str]:
+def _bash(
+    script: str, tmp_path: Path, nofollow_rc: int = 0, dir_rc: int = 0
+) -> subprocess.CompletedProcess[str]:
     """Source answers.sh with `nofollow` and `warn` stubbed.
 
     `nofollow write` logs its argv to nofollow.args and its body to nofollow.body;
@@ -43,7 +44,9 @@ nofollow() {{
 source "{ANSWERS_SH}"
 {script}
 """
-    return subprocess.run(["bash", "-c", full], capture_output=True, text=True, check=False, cwd=tmp_path)
+    return subprocess.run(
+        ["bash", "-c", full], capture_output=True, text=True, check=False, cwd=tmp_path
+    )
 
 
 def _doc(tmp_path: Path, doc: dict) -> Path:
@@ -54,7 +57,10 @@ def _doc(tmp_path: Path, doc: dict) -> Path:
 
 def test_saved_document_drops_terminal_tool_and_token(tmp_path: Path) -> None:
     doc = _doc(tmp_path, DOC)
-    proc = _bash(f'HAL0_ANSWERS_FILE="{doc}"; hal0_collect_answers; hal0_save_answers; echo "rc=$?"', tmp_path)
+    proc = _bash(
+        f'HAL0_ANSWERS_FILE="{doc}"; hal0_collect_answers; hal0_save_answers; echo "rc=$?"',
+        tmp_path,
+    )
     assert "rc=0" in proc.stdout, proc.stderr
     body = (tmp_path / "nofollow.body").read_text(encoding="utf-8")
     assert "hf_secret_value" not in body
@@ -95,7 +101,9 @@ def test_saved_document_reloads_with_file_origin(tmp_path: Path) -> None:
     def lines(path: Path, origin: str) -> list[str]:
         proc = subprocess.run(
             [sys.executable, "-I", str(READER), "--origin", origin, "--", str(path)],
-            capture_output=True, text=True, check=False,
+            capture_output=True,
+            text=True,
+            check=False,
         )
         assert proc.returncode == 0, proc.stderr
         return proc.stdout.splitlines()
@@ -152,15 +160,21 @@ def test_warnings_are_printed_once(tmp_path: Path) -> None:
 def test_saved_file_path_is_exported_by_collect_answers(tmp_path: Path) -> None:
     doc = _doc(tmp_path, DOC)
     for answers in (f'HAL0_ANSWERS_FILE="{doc}"; ', ""):
-        proc = _bash(f'{answers}hal0_collect_answers; echo "[$HAL0_SAVED_ANSWERS_FILE]"; '
-                     'bash -c \'echo "child:$HAL0_SAVED_ANSWERS_FILE"\'', tmp_path)
+        proc = _bash(
+            f'{answers}hal0_collect_answers; echo "[$HAL0_SAVED_ANSWERS_FILE]"; '
+            "bash -c 'echo \"child:$HAL0_SAVED_ANSWERS_FILE\"'",
+            tmp_path,
+        )
         want = f"{tmp_path}/var/lib/hal0/secrets/install-answers.json"
         assert proc.stdout.splitlines() == [f"[{want}]", f"child:{want}"], proc.stderr
 
 
 def test_saved_file_path_is_not_taken_from_the_environment(tmp_path: Path) -> None:
-    proc = _bash('HAL0_SAVED_ANSWERS_FILE=/etc/passwd; export HAL0_SAVED_ANSWERS_FILE; '
-                 'hal0_collect_answers; echo "$HAL0_SAVED_ANSWERS_FILE"', tmp_path)
+    proc = _bash(
+        "HAL0_SAVED_ANSWERS_FILE=/etc/passwd; export HAL0_SAVED_ANSWERS_FILE; "
+        'hal0_collect_answers; echo "$HAL0_SAVED_ANSWERS_FILE"',
+        tmp_path,
+    )
     assert proc.stdout.strip() == f"{tmp_path}/var/lib/hal0/secrets/install-answers.json"
 
 
@@ -179,8 +193,11 @@ def test_the_root_only_directory_is_ensured_before_the_write(tmp_path: Path) -> 
 
 def test_a_directory_that_is_not_root_owned_means_no_write_and_one_warning(tmp_path: Path) -> None:
     doc = _doc(tmp_path, DOC)
-    proc = _bash(f'HAL0_ANSWERS_FILE="{doc}"; hal0_collect_answers; hal0_save_answers; echo rc=$?',
-                 tmp_path, dir_rc=3)
+    proc = _bash(
+        f'HAL0_ANSWERS_FILE="{doc}"; hal0_collect_answers; hal0_save_answers; echo rc=$?',
+        tmp_path,
+        dir_rc=3,
+    )
     assert "rc=0" in proc.stdout and proc.stderr.count("WARN") == 1
     assert "not a root-owned directory" in proc.stderr
     assert not (tmp_path / "nofollow.args").exists()
@@ -209,9 +226,16 @@ env | grep -c '^HAL0_ANSWERS_APPLIED=' || true
 bash -c 'echo "child:[${{HAL0_ANSWERS_SAVED:-}}]"'
 """
     proc = subprocess.run(
-        ["bash", "-c", full], capture_output=True, text=True, check=False, cwd=tmp_path,
-        env={"PATH": os.environ["PATH"], "HAL0_ANSWERS_SAVED": "inherited-secret",
-             "HAL0_ANSWERS_APPLIED": "7"},
+        ["bash", "-c", full],
+        capture_output=True,
+        text=True,
+        check=False,
+        cwd=tmp_path,
+        env={
+            "PATH": os.environ["PATH"],
+            "HAL0_ANSWERS_SAVED": "inherited-secret",
+            "HAL0_ANSWERS_APPLIED": "7",
+        },
     )
     assert proc.stdout.splitlines() == ["rc=0", "0", "0", "child:[]"], proc.stderr
     assert "hf_secret_value" not in proc.stdout
@@ -237,7 +261,7 @@ def test_the_saved_file_is_exactly_the_decoded_payload(tmp_path: Path) -> None:
     )
     proc = _bash(
         f'_HAL0_ANSWERS_READER="{fake}"; HAL0_ANSWERS_FILE=/x/doc.json; hal0_collect_answers; '
-        'echo rc=$?; hal0_save_answers',
+        "echo rc=$?; hal0_save_answers",
         tmp_path,
     )
     assert "rc=0" in proc.stdout, proc.stderr
@@ -255,8 +279,11 @@ def test_the_real_reader_saved_line_and_the_saved_file_agree(tmp_path: Path) -> 
     assert proc.returncode == 0, proc.stderr
     payload = base64.b64decode((tmp_path / "b64").read_text(encoding="ascii"), validate=True)
     assert (tmp_path / "nofollow.body").read_bytes() == payload
-    emitted = subprocess.run([sys.executable, "-I", str(READER), "--emit-saved", str(doc)],
-                             capture_output=True, check=False)
+    emitted = subprocess.run(
+        [sys.executable, "-I", str(READER), "--emit-saved", str(doc)],
+        capture_output=True,
+        check=False,
+    )
     assert emitted.returncode == 0 and emitted.stdout == payload
 
 
@@ -295,26 +322,44 @@ source "{ANSWERS_SH}"
 HAL0_ANSWERS_FILE="{doc}"
 hal0_collect_answers
 """
-    env = {"PATH": os.environ["PATH"], "output": "x", "line": "x", "name": "x",
-           "value": "x", "names": "x", "values": "x", "saved": "x"}
-    subprocess.run(["bash", "-c", full], capture_output=True, text=True, check=False, cwd=tmp_path, env=env)
+    env = {
+        "PATH": os.environ["PATH"],
+        "output": "x",
+        "line": "x",
+        "name": "x",
+        "value": "x",
+        "names": "x",
+        "values": "x",
+        "saved": "x",
+    }
+    subprocess.run(
+        ["bash", "-c", full], capture_output=True, text=True, check=False, cwd=tmp_path, env=env
+    )
     dump = (tmp_path / "child.env").read_text(encoding="utf-8")
-    assert '"version"' not in dump and "HAL0_NONINTERACTIVE" not in dump.replace("HAL0_NONINTERACTIVE=1", "")
+    assert '"version"' not in dump and "HAL0_NONINTERACTIVE" not in dump.replace(
+        "HAL0_NONINTERACTIVE=1", ""
+    )
     assert "#saved" not in dump and "ewog" not in dump  # nor the base64 of '{\n'
     for name in ("output", "line", "name", "value", "names", "values", "saved"):
         assert f"\n{name}=x\n" in "\n" + dump  # the inherited value, not ours
 
 
 def test_saved_copy_keeps_install_and_meta(tmp_path: Path) -> None:
-    doc = _doc(tmp_path, {
-        "version": 1,
-        "install": {"type": "custom"},
-        "meta": {"saved_at": "2026-11-28T09:30:00Z", "saved_by": "1.9.0"},
-        "models": {"memory": "shared"},
-        "npu": {"opt_in": "auto"},
-        "huggingface": {"token_env": "HF_TOKEN"},
-    })
-    proc = _bash(f'HAL0_ANSWERS_FILE="{doc}"; hal0_collect_answers; hal0_save_answers; echo "rc=$?"', tmp_path)
+    doc = _doc(
+        tmp_path,
+        {
+            "version": 1,
+            "install": {"type": "custom"},
+            "meta": {"saved_at": "2026-11-28T09:30:00Z", "saved_by": "1.9.0"},
+            "models": {"memory": "shared"},
+            "npu": {"opt_in": "auto"},
+            "huggingface": {"token_env": "HF_TOKEN"},
+        },
+    )
+    proc = _bash(
+        f'HAL0_ANSWERS_FILE="{doc}"; hal0_collect_answers; hal0_save_answers; echo "rc=$?"',
+        tmp_path,
+    )
     assert "rc=0" in proc.stdout, proc.stderr
     saved = json.loads((tmp_path / "nofollow.body").read_text(encoding="utf-8"))
     assert saved == {

@@ -107,10 +107,13 @@ def _review_layout(base: Path) -> tuple[Path, Path, Path]:
 def test_the_reviews_data_models_attack_is_refused_by_both_sinks(base: Path) -> None:
     system, var_dir, data_models = _review_layout(base)
     # 1. the store sink refuses the document's store: a link is on the path
-    proc = _run(f'hal0_doc_store_prepare "{data_models}" "{var_dir}/models" && echo ACCEPTED'
-                ' || echo "REFUSED: ${_HAL0_STORE_WHY}"')
+    proc = _run(
+        f'hal0_doc_store_prepare "{data_models}" "{var_dir}/models" && echo ACCEPTED'
+        ' || echo "REFUSED: ${_HAL0_STORE_WHY}"'
+    )
     assert f"REFUSED: a link is on the path ({data_models} is a symbolic link)" in proc.stdout, (
-        proc.stdout + proc.stderr)
+        proc.stdout + proc.stderr
+    )
     # 2. the hal0 account swaps its models folder for a link to the systemd folder
     (var_dir / "models").rmdir()
     (var_dir / "models").symlink_to(system)
@@ -124,8 +127,10 @@ def test_the_reviews_data_models_attack_is_refused_by_both_sinks(base: Path) -> 
     # 4. even had the person chosen data/models on the screens, a link in front
     # of the NPU folder is refused: the kernel would follow its target through
     # the hal0 account's folder (the helper alone does not stop that)
-    proc = _run(f'hal0_doc_flm_prepare "{flm}" "{data_models}" "{var_dir}/models"; echo DONE',
-                chosen=str(data_models))
+    proc = _run(
+        f'hal0_doc_flm_prepare "{flm}" "{data_models}" "{var_dir}/models"; echo DONE',
+        chosen=str(data_models),
+    )
     assert "DONE" in proc.stdout and proc.stdout.count("WARN:") == 1, proc.stdout + proc.stderr
     assert f"a link is on the path ({data_models} is a symbolic link)" in proc.stdout
     assert sorted(system.iterdir()) == []
@@ -137,13 +142,15 @@ def test_the_npu_folder_inside_the_default_store_is_created(base: Path) -> None:
     flm = store / "npu" / "flm"
     proc = _run(f'hal0_doc_flm_prepare "{flm}" "{store}" "{store}"; echo DONE')
     assert "created FLM model directory" in proc.stdout and "WARN" not in proc.stdout, (
-        proc.stdout + proc.stderr)
+        proc.stdout + proc.stderr
+    )
     assert stat.S_IMODE(os.lstat(flm).st_mode) == 0o2775
     assert stat.S_IMODE(os.lstat(flm.parent).st_mode) == 0o755
 
 
 def test_a_link_planted_in_the_default_store_after_the_check_is_refused_by_the_helper(
-        base: Path) -> None:
+    base: Path,
+) -> None:
     # the window between the shell's walk and the helper: the hal0 account plants
     # npu -> etc/systemd/system; the helper opens it O_NOFOLLOW (its folder is not
     # root-only) and refuses, so nothing is created in the systemd folder
@@ -151,14 +158,15 @@ def test_a_link_planted_in_the_default_store_after_the_check_is_refused_by_the_h
     var_dir = _dir(base / "var" / "lib" / "hal0", 0o775)
     store = _dir(var_dir / "models", 0o2775)
     flm = store / "npu" / "flm"
-    proc = _run(f'hal0_doc_flm_prepare "{flm}" "{store}" "{store}"; echo DONE',
-                plant=f'ln -s "{system}" "{store}/npu"')
+    proc = _run(
+        f'hal0_doc_flm_prepare "{flm}" "{store}" "{store}"; echo DONE',
+        plant=f'ln -s "{system}" "{store}/npu"',
+    )
     assert "DONE" in proc.stdout and proc.stdout.count("WARN:") == 1, proc.stdout + proc.stderr
     assert sorted(system.iterdir()) == []
 
 
-def test_the_npu_folder_under_root_only_real_folders_needs_the_operators_choice(
-        base: Path) -> None:
+def test_the_npu_folder_under_root_only_real_folders_needs_the_operators_choice(base: Path) -> None:
     store = _dir(base / "data" / "store")
     flm = store / "npu" / "flm"
     body = f'hal0_doc_flm_prepare "{flm}" "{store}" "{base}/var/lib/hal0/models"; echo DONE'
@@ -167,7 +175,8 @@ def test_the_npu_folder_under_root_only_real_folders_needs_the_operators_choice(
     assert not flm.exists() and not flm.parent.exists()
     proc = _run(body, chosen=str(store))
     assert "created FLM model directory" in proc.stdout and "WARN" not in proc.stdout, (
-        proc.stdout + proc.stderr)
+        proc.stdout + proc.stderr
+    )
     assert stat.S_IMODE(os.lstat(flm).st_mode) == 0o2775
     assert stat.S_IMODE(os.lstat(flm.parent).st_mode) == 0o755
 
@@ -184,9 +193,12 @@ def test_the_npu_folder_under_a_writable_folder_is_skipped(base: Path) -> None:
 def test_a_link_between_root_only_real_folders_is_refused(base: Path) -> None:
     real = _dir(base / "real")
     (base / "data").symlink_to(real)
-    proc = _run(f'hal0_doc_store_prepare "{base}/data/m" "{base}/v/models" || echo "REFUSED: ${{_HAL0_STORE_WHY}}"')
+    proc = _run(
+        f'hal0_doc_store_prepare "{base}/data/m" "{base}/v/models" || echo "REFUSED: ${{_HAL0_STORE_WHY}}"'
+    )
     assert f"a link is on the path ({base}/data is a symbolic link)" in proc.stdout, (
-        proc.stdout + proc.stderr)
+        proc.stdout + proc.stderr
+    )
     proc = _run(f'hal0_doc_flm_prepare "{base}/data/flm" "{base}/data" "{base}/v/models"')
     assert "is not one you chose" in proc.stdout, proc.stdout + proc.stderr
     assert sorted(real.iterdir()) == []
@@ -195,10 +207,13 @@ def test_a_link_between_root_only_real_folders_is_refused(base: Path) -> None:
 @pytest.mark.parametrize("mode", [0o1777, 0o2775, 0o775])
 def test_an_existing_store_others_can_write_is_refused(base: Path, mode: int) -> None:
     shared = _dir(base / "shared", mode)
-    proc = _run(f'hal0_doc_store_prepare "{shared}" "{base}/v/models" && echo ACCEPTED'
-                ' || echo "REFUSED: ${_HAL0_STORE_WHY}"')
+    proc = _run(
+        f'hal0_doc_store_prepare "{shared}" "{base}/v/models" && echo ACCEPTED'
+        ' || echo "REFUSED: ${_HAL0_STORE_WHY}"'
+    )
     assert "REFUSED: it already exists and is not a folder only root can change" in proc.stdout, (
-        proc.stdout + proc.stderr)
+        proc.stdout + proc.stderr
+    )
 
 
 def test_an_existing_root_only_store_is_accepted_and_missing_ones_are_made(base: Path) -> None:
@@ -220,9 +235,12 @@ def test_a_store_inside_the_default_store_is_made_through_the_helper(base: Path)
     # (2775 stands for hal0:hal0 2775): the helper refuses it
     system = _dir(base / "etc")
     _dir(store / "h", 0o2775)
-    proc = _run(f'hal0_doc_store_prepare "{store}/h/c/d" "{store}" && echo ACCEPTED'
-                ' || echo "REFUSED: ${_HAL0_STORE_WHY}"',
-                plant=f'ln -s "{system}" "{store}/h/c"')
+    proc = _run(
+        f'hal0_doc_store_prepare "{store}/h/c/d" "{store}" && echo ACCEPTED'
+        ' || echo "REFUSED: ${_HAL0_STORE_WHY}"',
+        plant=f'ln -s "{system}" "{store}/h/c"',
+    )
     assert "REFUSED" in proc.stdout and "could not be created safely" in proc.stdout, (
-        proc.stdout + proc.stderr)
+        proc.stdout + proc.stderr
+    )
     assert sorted(system.iterdir()) == []

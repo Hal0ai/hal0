@@ -88,12 +88,20 @@ _URL_PATH = re.compile(r"^[A-Za-z0-9._~/%-]*$")
 # business (it refuses anything outside folders only root can change).
 DENIED_TREES = (
     "/etc",  # system configuration: root-owned files that run as root
-    "/usr", "/bin", "/sbin",  # programs and libraries root executes
-    "/lib", "/lib32", "/lib64", "/libx32",  # the same, and the loader
+    "/usr",
+    "/bin",
+    "/sbin",  # programs and libraries root executes
+    "/lib",
+    "/lib32",
+    "/lib64",
+    "/libx32",  # the same, and the loader
     "/boot",  # kernel and boot loader
     "/root",  # root's own home
-    "/proc", "/sys", "/dev",  # kernel interfaces, not storage
-    "/run", "/var/run",  # runtime state; /var/run is the same tree as /run
+    "/proc",
+    "/sys",
+    "/dev",  # kernel interfaces, not storage
+    "/run",
+    "/var/run",  # runtime state; /var/run is the same tree as /run
     "/var/log",  # logs other services own
     "/var/lib",  # service state (hal0's own models directory is the exception below)
 )
@@ -151,8 +159,16 @@ _GEN_MODES = ("off", "scaffold_only", "scaffold_and_download")
 # What a `slots` entry may carry: the keys src/hal0/install/answers.py
 # (_resolve_slots) reads. Each value is a flat scalar checked below.
 _SLOT_KEYS = frozenset(
-    {"capability", "name", "port", "model_id", "device", "profile", "context_size",
-     "enabled_on_pull"}
+    {
+        "capability",
+        "name",
+        "port",
+        "model_id",
+        "device",
+        "profile",
+        "context_size",
+        "enabled_on_pull",
+    }
 )
 _SLOT_CAPABILITIES = ("chat", "coder")  # _VALID_SLOT_CAPABILITIES in the loader
 _SLOT_NAME = re.compile(r"^[a-z0-9][a-z0-9_-]{0,31}$")  # slots/routing.py slot-name policy
@@ -207,9 +223,7 @@ def _q(value: Any) -> str:
 
 def _scrub(msg: str) -> str:
     """Last line of defence: no byte outside printable ASCII leaves in a message."""
-    return "".join(
-        ch if 0x20 <= ord(ch) < 0x7F else _esc(ch) for ch in msg
-    )
+    return "".join(ch if 0x20 <= ord(ch) < 0x7F else _esc(ch) for ch in msg)
 
 
 class _Problems:
@@ -366,8 +380,9 @@ def _section(doc: dict[str, Any], name: str, problems: _Problems) -> dict[str, A
     return value
 
 
-def _unknown(obj: dict[str, Any], known: frozenset[str], where: str, strict: bool,
-             problems: _Problems) -> None:
+def _unknown(
+    obj: dict[str, Any], known: frozenset[str], where: str, strict: bool, problems: _Problems
+) -> None:
     for key in sorted(set(obj) - known):
         full = f"{where}.{_esc(key)}" if where else _esc(key)
         if strict:
@@ -420,8 +435,9 @@ def _path_text_ok(value: str) -> bool:
     )
 
 
-def _path_text(obj: dict[str, Any], key: str, where: str,
-               problems: _Problems) -> tuple[bool, str | None]:
+def _path_text(
+    obj: dict[str, Any], key: str, where: str, problems: _Problems
+) -> tuple[bool, str | None]:
     """(given, normalised text) of a folder path; the text is None after an error.
 
     Purely lexical: the value is checked as text, normalised, and the normal
@@ -453,8 +469,9 @@ def _path_text(obj: dict[str, Any], key: str, where: str,
     return True, norm
 
 
-def _store_path(store: dict[str, Any], problems: _Problems,
-                default_store: str) -> tuple[bool, str | None]:
+def _store_path(
+    store: dict[str, Any], problems: _Problems, default_store: str
+) -> tuple[bool, str | None]:
     """model_store.path: (given, normalised text or None after an error)."""
     given, norm = _path_text(store, "path", "model_store", problems)
     if norm is None:
@@ -473,8 +490,13 @@ def _store_path(store: dict[str, Any], problems: _Problems,
     return True, norm
 
 
-def _flm_path(store: dict[str, Any], problems: _Problems, default_store: str,
-              store_given: bool, store_norm: str | None) -> str | None:
+def _flm_path(
+    store: dict[str, Any],
+    problems: _Problems,
+    default_store: str,
+    store_given: bool,
+    store_norm: str | None,
+) -> str | None:
     """model_store.flm_path: strictly inside the model store, or None after an error.
 
     The model store is the document's own model_store.path when it gives one,
@@ -556,8 +578,9 @@ def _shown(raw: str) -> str:
     return _q(scheme + _authority(text))
 
 
-def _http_url(raw: str, full: str, problems: _Problems, *, allow_path: bool,
-              bare_ok: bool) -> str | None:
+def _http_url(
+    raw: str, full: str, problems: _Problems, *, allow_path: bool, bare_ok: bool
+) -> str | None:
     """Validate like hal0.config.schema NetworkConfig.public_url / extra_origins."""
     text = raw.strip()
     if not text:
@@ -658,16 +681,25 @@ def _q_flat(value: Any) -> str:
     return _q(value)
 
 
-def _slot_text(entry: dict[str, Any], key: str, pattern: re.Pattern[str], full: str,
-               problems: _Problems, *, nullable: bool) -> None:
+def _slot_text(
+    entry: dict[str, Any],
+    key: str,
+    pattern: re.Pattern[str],
+    full: str,
+    problems: _Problems,
+    *,
+    nullable: bool,
+) -> None:
     if key not in entry:
         return
     value = entry[key]
     if value is None and nullable:
         return
     if not isinstance(value, str) or not pattern.match(value):
-        shape = "a name like 'chat-1' (a-z, 0-9, '_', '-')" if pattern is _SLOT_NAME else (
-            "plain text (letters, digits, '.', '_', '-', ':', '+', '/')"
+        shape = (
+            "a name like 'chat-1' (a-z, 0-9, '_', '-')"
+            if pattern is _SLOT_NAME
+            else ("plain text (letters, digits, '.', '_', '-', ':', '+', '/')")
         )
         problems.error(f"{full}.{key}: must be {shape} (got {_q_flat(value)})")
 
@@ -742,8 +774,15 @@ def _a(word: str) -> str:
     return ("an " if word[:1] in "aeiou" else "a ") + word
 
 
-def _model_id(value: Any, full: str, role: str, manifest: dict[str, set[str]] | None,
-              problems: _Problems, *, require_rows: bool = True) -> str | None:
+def _model_id(
+    value: Any,
+    full: str,
+    role: str,
+    manifest: dict[str, set[str]] | None,
+    problems: _Problems,
+    *,
+    require_rows: bool = True,
+) -> str | None:
     ident = _ident(value, full, problems)
     if ident is None:
         return None
@@ -761,8 +800,13 @@ def _model_id(value: Any, full: str, role: str, manifest: dict[str, set[str]] | 
     return ident
 
 
-def _build(doc: dict[str, Any], origin: str, problems: _Problems,
-           manifest_path: str = _MANIFEST, default_store: str = DEFAULT_STORE) -> dict[str, str]:
+def _build(
+    doc: dict[str, Any],
+    origin: str,
+    problems: _Problems,
+    manifest_path: str = _MANIFEST,
+    default_store: str = DEFAULT_STORE,
+) -> dict[str, str]:
     out: dict[str, str] = {"HAL0_NONINTERACTIVE": "1"}
 
     strict_raw = doc.get("strict", False)
@@ -859,8 +903,14 @@ def _build(doc: dict[str, Any], origin: str, problems: _Problems,
                     problems.error(f"gen.models: cannot be given with gen.mode '{mode}'")
                 else:
                     for i, item in enumerate(models):
-                        ident = _model_id(item, f"gen.models[{i}]", "image", manifest, problems,
-                                          require_rows=False)
+                        ident = _model_id(
+                            item,
+                            f"gen.models[{i}]",
+                            "image",
+                            manifest,
+                            problems,
+                            require_rows=False,
+                        )
                         if ident is not None:
                             ids.append(ident)
             if mode != "scaffold_and_download":
@@ -970,7 +1020,9 @@ def _build(doc: dict[str, Any], origin: str, problems: _Problems,
             problems.error("access: must be an object")
         else:
             for key in sorted(set(access) - {"admin_key"}):
-                problems.error(f"access.{_esc(key)}: not allowed (a document carries no key material)")
+                problems.error(
+                    f"access.{_esc(key)}: not allowed (a document carries no key material)"
+                )
             mode_word = access.get("admin_key")
             if "admin_key" in access:
                 if mode_word in ("generate", "none") and isinstance(mode_word, str):
@@ -979,8 +1031,9 @@ def _build(doc: dict[str, Any], origin: str, problems: _Problems,
                     problems.error("access.admin_key: must be the word 'generate' or 'none'")
 
     # maintenance
-    bench = _bool(_section(doc, "maintenance", problems), "weekly_benchmark",
-                  "maintenance", problems)
+    bench = _bool(
+        _section(doc, "maintenance", problems), "weekly_benchmark", "maintenance", problems
+    )
     if bench is not None:
         out["HAL0_ENABLE_BENCH_TIMER"] = "1" if bench else "0"
 
@@ -1096,8 +1149,7 @@ def _bad_default_store(value: str) -> bool:
     if _valid_default_store(value):
         return False
     sys.stderr.write(
-        "error: --default-store must be an absolute path of plain characters "
-        "with no '..' part\n"
+        "error: --default-store must be an absolute path of plain characters with no '..' part\n"
     )
     return True
 

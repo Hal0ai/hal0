@@ -85,7 +85,10 @@ def test_directory_made_root_0755_through_nofollow(tmp_path):
     assert proc.returncode == 0, proc.stderr
     calls = log.read_text().splitlines()
     assert any(
-        c.startswith("dir ") and "--owner root:root" in c and "--mode 0755" in c and str(var_dir) in c
+        c.startswith("dir ")
+        and "--owner root:root" in c
+        and "--mode 0755" in c
+        and str(var_dir) in c
         for c in calls
     ), calls
     assert any(

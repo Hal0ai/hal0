@@ -30,7 +30,7 @@ INSTALL_SH = ROOT / "installer" / "install.sh"
 TEXT = INSTALL_SH.read_text(encoding="utf-8")
 TOKEN = "hf_StubToken_0123-xyz"
 
-STUB = r'''
+STUB = r"""
 import json, os, sys
 argv = sys.argv[1:]
 def opt(name):
@@ -80,7 +80,7 @@ if "STUB_STDERR_HEX" in os.environ:
     sys.stderr.flush()
     sys.stderr.buffer.write(bytes.fromhex(os.environ["STUB_STDERR_HEX"]))
 sys.exit(int(os.environ.get("STUB_RC", "0")))
-'''
+"""
 
 
 def _slice(start: str, end: str) -> str:
@@ -231,10 +231,22 @@ def test_command_line_matches_contract(tmp_path: Path, stub: dict[str, str]) -> 
     given = tmp_path / "given.json"
     given.write_text(DOC, encoding="utf-8")
     _saved(tmp_path, {"version": 1})
-    args = ("--no-owui", "--models-dir=/srv/m", f"--answers={given}", "--reconfigure", "--bare",
-            "--summary-json=/tmp/s.json", "--no-start")
-    env = {**stub, "STUB_DOC": DOC, "HAL0_FACTS_FILE": str(facts), "HAL0_ANSWERS_FILE": str(given),
-           "HAL0_NONINTERACTIVE": "1"}
+    args = (
+        "--no-owui",
+        "--models-dir=/srv/m",
+        f"--answers={given}",
+        "--reconfigure",
+        "--bare",
+        "--summary-json=/tmp/s.json",
+        "--no-start",
+    )
+    env = {
+        **stub,
+        "STUB_DOC": DOC,
+        "HAL0_FACTS_FILE": str(facts),
+        "HAL0_ANSWERS_FILE": str(given),
+        "HAL0_NONINTERACTIVE": "1",
+    }
     proc = _collect(tmp_path, env, args=args, reconfigure=True)
     assert _state(proc)["RC"] == "0", proc.stdout + proc.stderr
     (rec,) = _records(tmp_path)
@@ -242,19 +254,32 @@ def test_command_line_matches_contract(tmp_path: Path, stub: dict[str, str]) -> 
     work = Path(argv[argv.index("--out") + 1]).parent
     assert work.parent == tmp_path / "prefix" / "run" / "hal0-install"
     assert argv == [
-        "--catalog", stub["HAL0_WIZARD_CATALOG"],
-        "--models", f"{ROOT}/installer/manifests/setup-models.json",
-        "--facts", str(facts),
-        "--out", f"{work}/answers.json",
-        "--secret-out", f"{work}/hf-token.env",
-        "--chosen-folder-out", f"{work}/chosen-folder",
-        "--hal0-version", "9.9.9",
-        "--saved", f"{work}/saved.json",
-        "--answers", f"{work}/given.json",
+        "--catalog",
+        stub["HAL0_WIZARD_CATALOG"],
+        "--models",
+        f"{ROOT}/installer/manifests/setup-models.json",
+        "--facts",
+        str(facts),
+        "--out",
+        f"{work}/answers.json",
+        "--secret-out",
+        f"{work}/hf-token.env",
+        "--chosen-folder-out",
+        f"{work}/chosen-folder",
+        "--hal0-version",
+        "9.9.9",
+        "--saved",
+        f"{work}/saved.json",
+        "--answers",
+        f"{work}/given.json",
         "--headless",
         "--reconfigure",
         "--",
-        "--no-owui", "--models-dir=/srv/m", "--bare", "--summary-json=/tmp/s.json", "--no-start",
+        "--no-owui",
+        "--models-dir=/srv/m",
+        "--bare",
+        "--summary-json=/tmp/s.json",
+        "--no-start",
     ]
     assert rec["isolated"] is True
     assert rec["dir_mode"] == "0o700"
@@ -281,8 +306,9 @@ def _given_refused(proc: subprocess.CompletedProcess[str], tmp_path: Path) -> li
     return lines[:-1]
 
 
-def test_a_given_fifo_is_refused_before_the_wizard_starts(tmp_path: Path,
-                                                          stub: dict[str, str]) -> None:
+def test_a_given_fifo_is_refused_before_the_wizard_starts(
+    tmp_path: Path, stub: dict[str, str]
+) -> None:
     fifo = tmp_path / "given.json"
     os.mkfifo(fifo)
     proc = _collect(tmp_path, {**stub, "STUB_DOC": DOC, "HAL0_ANSWERS_FILE": str(fifo)})
@@ -291,7 +317,8 @@ def test_a_given_fifo_is_refused_before_the_wizard_starts(tmp_path: Path,
 
 
 def test_a_given_oversized_file_is_refused_before_the_wizard_starts(
-        tmp_path: Path, stub: dict[str, str]) -> None:
+    tmp_path: Path, stub: dict[str, str]
+) -> None:
     big = tmp_path / "given.json"
     big.write_bytes(b'{"version": 1, "x": "' + b"a" * (1 << 20) + b'"}')
     proc = _collect(tmp_path, {**stub, "STUB_DOC": DOC, "HAL0_ANSWERS_FILE": str(big)})
@@ -300,7 +327,8 @@ def test_a_given_oversized_file_is_refused_before_the_wizard_starts(
 
 
 def test_a_given_invalid_document_is_refused_by_the_reader_first(
-        tmp_path: Path, stub: dict[str, str]) -> None:
+    tmp_path: Path, stub: dict[str, str]
+) -> None:
     bad = tmp_path / "given.json"
     bad.write_text('{"version": 1, "install": {"type": "bogus\\u001b[31m"}}', encoding="utf-8")
     proc = _collect(tmp_path, {**stub, "STUB_DOC": DOC, "HAL0_ANSWERS_FILE": str(bad)})
@@ -308,8 +336,9 @@ def test_a_given_invalid_document_is_refused_by_the_reader_first(
     assert reasons and "\x1b" not in proc.stderr
 
 
-def test_the_wizard_reads_a_checked_copy_of_the_given_file(tmp_path: Path,
-                                                           stub: dict[str, str]) -> None:
+def test_the_wizard_reads_a_checked_copy_of_the_given_file(
+    tmp_path: Path, stub: dict[str, str]
+) -> None:
     given = tmp_path / "given.json"
     body = b'{"version": 1, "memory": {"enabled": false}}\n'
     given.write_bytes(body)
@@ -328,12 +357,17 @@ def test_the_wizard_reads_a_checked_copy_of_the_given_file(tmp_path: Path,
 # ── what the wizard prints ──────────────────────────────────────────────────
 
 
-def test_the_wizards_output_is_filtered_before_the_log(tmp_path: Path,
-                                                       stub: dict[str, str]) -> None:
-    noise = ("\x1b[31mred\x07\n" + "A" * 5000 + "\n"
-             + "".join(f"line {i}\n" for i in range(100)))
-    env = {**stub, "STUB_RC": "2", "STUB_STDERR": noise, "STUB_STDOUT": "out\x1b]0;t\x07\n",
-           "STUB_STDERR_HEX": (b"nul\x00byte \xff\xfe tail").hex()}
+def test_the_wizards_output_is_filtered_before_the_log(
+    tmp_path: Path, stub: dict[str, str]
+) -> None:
+    noise = "\x1b[31mred\x07\n" + "A" * 5000 + "\n" + "".join(f"line {i}\n" for i in range(100))
+    env = {
+        **stub,
+        "STUB_RC": "2",
+        "STUB_STDERR": noise,
+        "STUB_STDOUT": "out\x1b]0;t\x07\n",
+        "STUB_STDERR_HEX": (b"nul\x00byte \xff\xfe tail").hex(),
+    }
     proc = _collect(tmp_path, env)
     assert _state(proc)["RC"] == "1"
     lines = proc.stderr.split("\n")
@@ -347,8 +381,10 @@ def test_the_wizards_output_is_filtered_before_the_log(tmp_path: Path,
     assert "out?]0;t?" in lines
     assert "?[31mred?" in lines and "A" * 300 in lines
     # the whole stays at 20 lines; a NUL and other bytes become '?'
-    proc = _collect(tmp_path, {**stub, "STUB_RC": "2",
-                               "STUB_STDERR_HEX": (b"nul\x00byte \xff\xfe tail\n").hex()})
+    proc = _collect(
+        tmp_path,
+        {**stub, "STUB_RC": "2", "STUB_STDERR_HEX": (b"nul\x00byte \xff\xfe tail\n").hex()},
+    )
     assert proc.stderr == "nul?byte ?? tail\n"
 
 
@@ -361,10 +397,12 @@ def test_no_headless_and_no_reconfigure_by_default(tmp_path: Path, stub: dict[st
     assert argv[argv.index("--") + 1 :] == []
 
 
-def test_reconfigure_flag_is_forwarded_before_the_separator(tmp_path: Path,
-                                                            stub: dict[str, str]) -> None:
-    proc = _collect(tmp_path, {**stub, "STUB_DOC": DOC}, args=("--reconfigure", "--no-pi"),
-                    reconfigure=True)
+def test_reconfigure_flag_is_forwarded_before_the_separator(
+    tmp_path: Path, stub: dict[str, str]
+) -> None:
+    proc = _collect(
+        tmp_path, {**stub, "STUB_DOC": DOC}, args=("--reconfigure", "--no-pi"), reconfigure=True
+    )
     assert _state(proc)["RC"] == "0", proc.stderr
     argv = _records(tmp_path)[0]["argv"]
     sep = argv.index("--")
@@ -430,8 +468,13 @@ NO_START=0
 {block}
 echo "LOOP DONE reconfigure=${{_HAL0_RECONFIGURE}} args=${{#_HAL0_INSTALL_ARGS[@]}}"
 """
-    return subprocess.run(["bash", "-c", script, "bash", *args], capture_output=True, text=True,
-                          env={"PATH": os.environ["PATH"], **env}, check=False)
+    return subprocess.run(
+        ["bash", "-c", script, "bash", *args],
+        capture_output=True,
+        text=True,
+        env={"PATH": os.environ["PATH"], **env},
+        check=False,
+    )
 
 
 def test_unknown_flag_stops_when_wizard_present(tmp_path: Path, stub: dict[str, str]) -> None:
@@ -451,12 +494,26 @@ def test_unknown_flag_stops_before_help_runs(tmp_path: Path, stub: dict[str, str
     assert proc.returncode == 1 and "Usage:" not in proc.stdout
 
 
-def test_every_accepted_flag_passes_when_wizard_present(tmp_path: Path,
-                                                         stub: dict[str, str]) -> None:
-    args = ["--dev", "--no-start", "--models-dir=/srv/m", "--summary-json=/tmp/x.json",
-            "--answers=/tmp/a.json", "--no-owui", "--no-comfyui", "--no-hermes", "--no-pi",
-            "--no-agents", "--no-memory", "--no-brain-model", "--bare", "--bare-inference",
-            "--reconfigure"]
+def test_every_accepted_flag_passes_when_wizard_present(
+    tmp_path: Path, stub: dict[str, str]
+) -> None:
+    args = [
+        "--dev",
+        "--no-start",
+        "--models-dir=/srv/m",
+        "--summary-json=/tmp/x.json",
+        "--answers=/tmp/a.json",
+        "--no-owui",
+        "--no-comfyui",
+        "--no-hermes",
+        "--no-pi",
+        "--no-agents",
+        "--no-memory",
+        "--no-brain-model",
+        "--bare",
+        "--bare-inference",
+        "--reconfigure",
+    ]
     proc = _flag_loop(tmp_path, args, stub)
     assert proc.returncode == 0, proc.stderr
     assert f"LOOP DONE reconfigure=1 args={len(args)}" in proc.stdout
@@ -489,8 +546,13 @@ def test_usage_text_says_a_piped_run_can_show_the_screens() -> None:
 
 
 def test_exit_0_applies_with_wizard_origin(tmp_path: Path, stub: dict[str, str]) -> None:
-    doc = json.dumps({"version": 1, "apps": {"hermes": {"enabled": True, "terminal_tool": True}},
-                      "memory": {"enabled": False}})
+    doc = json.dumps(
+        {
+            "version": 1,
+            "apps": {"hermes": {"enabled": True, "terminal_tool": True}},
+            "memory": {"enabled": False},
+        }
+    )
     proc = _collect(tmp_path, {**stub, "STUB_DOC": doc})
     state = _state(proc)
     assert state["RC"] == "0", proc.stdout + proc.stderr
@@ -500,8 +562,9 @@ def test_exit_0_applies_with_wizard_origin(tmp_path: Path, stub: dict[str, str])
     assert state["LEFT"] == ""
 
 
-def test_terminal_tool_from_a_given_document_stays_off(tmp_path: Path,
-                                                       stub: dict[str, str]) -> None:
+def test_terminal_tool_from_a_given_document_stays_off(
+    tmp_path: Path, stub: dict[str, str]
+) -> None:
     # A given document is run headless, so nobody chose on a screen: the
     # document the wizard wrote is applied with origin `file`.
     doc = json.dumps({"version": 1, "apps": {"hermes": {"enabled": True, "terminal_tool": True}}})
@@ -532,9 +595,15 @@ def test_a_document_the_reader_refuses_stops(tmp_path: Path, stub: dict[str, str
 
 
 def _seam_run(tmp_path: Path, env: dict[str, str]) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(["bash", "-c", _seam_script(tmp_path)], capture_output=True, text=True,
-                          timeout=60, env={"PATH": os.environ["PATH"], "HAL0_PLAIN": "1", **env},
-                          check=False, cwd=tmp_path)
+    return subprocess.run(
+        ["bash", "-c", _seam_script(tmp_path)],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        env={"PATH": os.environ["PATH"], "HAL0_PLAIN": "1", **env},
+        check=False,
+        cwd=tmp_path,
+    )
 
 
 def _seam_script(tmp_path: Path, pre: str = "") -> str:
@@ -564,14 +633,19 @@ echo "PAST THE SEAM"
 
 @pytest.mark.parametrize(
     "code,installer_code,report",
-    [(2, 1, True), (10, 10, False), (11, 1, True), (70, 1, True), (130, 130, False),
-     (3, 1, True)],
+    [(2, 1, True), (10, 10, False), (11, 1, True), (70, 1, True), (130, 130, False), (3, 1, True)],
 )
-def test_exit_code_mapping(tmp_path: Path, stub: dict[str, str], code: int, installer_code: int,
-                           report: bool) -> None:
+def test_exit_code_mapping(
+    tmp_path: Path, stub: dict[str, str], code: int, installer_code: int, report: bool
+) -> None:
     # the stub writes a document even so: a signal just after the write can do that
-    env = {**stub, "STUB_DOC": DOC, "STUB_RC": str(code), "STUB_SECRET": f"HF_TOKEN={TOKEN}\n",
-           "STUB_STDERR": "hal0 setup: stub says no\n"}
+    env = {
+        **stub,
+        "STUB_DOC": DOC,
+        "STUB_RC": str(code),
+        "STUB_SECRET": f"HF_TOKEN={TOKEN}\n",
+        "STUB_STDERR": "hal0 setup: stub says no\n",
+    }
     proc = _seam_run(tmp_path, env)
     assert proc.returncode == installer_code, proc.stdout + proc.stderr
     assert "PAST THE SEAM" not in proc.stdout
@@ -602,15 +676,22 @@ time.sleep(30)
 
 @pytest.mark.parametrize("stage", ["wizard", "reader"])
 def test_an_interrupt_before_the_wizard_handles_it_is_a_quiet_130(
-        tmp_path: Path, stub: dict[str, str], stage: str) -> None:
+    tmp_path: Path, stub: dict[str, str], stage: str
+) -> None:
     # Ctrl-C reaches the whole process group. The stub has no handler of its
     # own yet, so it dies of the signal, as the real wizard would before its
     # handler is installed; so does the reader checking a given file.
     import signal
     import time
+
     marker = tmp_path / "sleeping"
-    env = {"PATH": os.environ["PATH"], "HAL0_PLAIN": "1", **stub, "STUB_DOC": DOC,
-           "STUB_SLEEP": str(marker)}
+    env = {
+        "PATH": os.environ["PATH"],
+        "HAL0_PLAIN": "1",
+        **stub,
+        "STUB_DOC": DOC,
+        "STUB_SLEEP": str(marker),
+    }
     pre = ""
     if stage == "reader":
         slow = tmp_path / "slow_reader.py"
@@ -619,9 +700,15 @@ def test_an_interrupt_before_the_wizard_handles_it_is_a_quiet_130(
         given.write_text(DOC, encoding="utf-8")
         env["HAL0_ANSWERS_FILE"] = str(given)
         pre = f'_HAL0_ANSWERS_READER="{slow}"'
-    proc = subprocess.Popen(["bash", "-c", _seam_script(tmp_path, pre)], stdout=subprocess.PIPE,
-                            stderr=subprocess.PIPE, text=True, env=env, cwd=tmp_path,
-                            start_new_session=True)
+    proc = subprocess.Popen(
+        ["bash", "-c", _seam_script(tmp_path, pre)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env=env,
+        cwd=tmp_path,
+        start_new_session=True,
+    )
     try:
         deadline = time.monotonic() + 20
         while not marker.exists():
@@ -649,8 +736,7 @@ def test_the_installer_sets_no_interrupt_trap_of_its_own() -> None:
         assert not (stripped.startswith("trap ") and stripped.endswith(" INT")), line
 
 
-def test_without_the_wizard_a_bad_document_still_goes_through_the_err_trap(
-        tmp_path: Path) -> None:
+def test_without_the_wizard_a_bad_document_still_goes_through_the_err_trap(tmp_path: Path) -> None:
     bad = tmp_path / "bad.json"
     bad.write_text('{"version": 7}', encoding="utf-8")
     proc = _seam_run(tmp_path, {"HAL0_ANSWERS_FILE": str(bad)})
@@ -662,8 +748,11 @@ def test_without_the_wizard_a_bad_document_still_goes_through_the_err_trap(
 
 
 def test_secret_file_read_and_removed(tmp_path: Path, stub: dict[str, str]) -> None:
-    proc = _collect(tmp_path, {**stub, "STUB_DOC": DOC, "STUB_SECRET": f"HF_TOKEN={TOKEN}\n"},
-                    after='[[ "${_HAL0_WIZARD_HF_TOKEN}" == "' + TOKEN + '" ]] && echo MATCH')
+    proc = _collect(
+        tmp_path,
+        {**stub, "STUB_DOC": DOC, "STUB_SECRET": f"HF_TOKEN={TOKEN}\n"},
+        after='[[ "${_HAL0_WIZARD_HF_TOKEN}" == "' + TOKEN + '" ]] && echo MATCH',
+    )
     state = _state(proc)
     assert state["RC"] == "0" and state["TOKEN_SET"] == "yes", proc.stdout + proc.stderr
     assert "MATCH" in proc.stdout
@@ -672,16 +761,29 @@ def test_secret_file_read_and_removed(tmp_path: Path, stub: dict[str, str]) -> N
     assert "WARN" not in proc.stderr
 
 
-@pytest.mark.parametrize("text", [
-    f"OTHER={TOKEN}\n", f"HF_TOKEN={TOKEN} x\n", f"HF_TOKEN={TOKEN}\nHF_TOKEN=b\n",
-    "HF_TOKEN=\n", f"HF_TOKEN=$({TOKEN})\n", f"HF_TOKEN={TOKEN}\x1b[2J\n", f" HF_TOKEN={TOKEN}\n",
-    # a trailing '=' is refused, not dropped; so are a missing newline and a NUL
-    f"HF_TOKEN={TOKEN}=\n", f"HF_TOKEN={TOKEN}==\n", f"HF_TOKEN={TOKEN}", "HF_TOKEN\n",
-    f"HF_TOKEN={TOKEN[:6]}\x00{TOKEN[6:]}\n", f"HF_TOKEN={TOKEN}\n\x00",
-    f"HF_TOKEN={TOKEN}\n\n",
-])
-def test_secret_file_with_other_name_ignored(tmp_path: Path, stub: dict[str, str],
-                                             text: str) -> None:
+@pytest.mark.parametrize(
+    "text",
+    [
+        f"OTHER={TOKEN}\n",
+        f"HF_TOKEN={TOKEN} x\n",
+        f"HF_TOKEN={TOKEN}\nHF_TOKEN=b\n",
+        "HF_TOKEN=\n",
+        f"HF_TOKEN=$({TOKEN})\n",
+        f"HF_TOKEN={TOKEN}\x1b[2J\n",
+        f" HF_TOKEN={TOKEN}\n",
+        # a trailing '=' is refused, not dropped; so are a missing newline and a NUL
+        f"HF_TOKEN={TOKEN}=\n",
+        f"HF_TOKEN={TOKEN}==\n",
+        f"HF_TOKEN={TOKEN}",
+        "HF_TOKEN\n",
+        f"HF_TOKEN={TOKEN[:6]}\x00{TOKEN[6:]}\n",
+        f"HF_TOKEN={TOKEN}\n\x00",
+        f"HF_TOKEN={TOKEN}\n\n",
+    ],
+)
+def test_secret_file_with_other_name_ignored(
+    tmp_path: Path, stub: dict[str, str], text: str
+) -> None:
     proc = _collect(tmp_path, {**stub, "STUB_DOC": DOC, "STUB_SECRET_HEX": text.encode().hex()})
     state = _state(proc)
     assert state["RC"] == "0" and state["TOKEN_SET"] == "", proc.stdout + proc.stderr
@@ -692,8 +794,9 @@ def test_secret_file_with_other_name_ignored(tmp_path: Path, stub: dict[str, str
 
 def test_secret_never_printed(tmp_path: Path, stub: dict[str, str]) -> None:
     for rc in ("0", "2", "130"):
-        proc = _collect(tmp_path, {**stub, "STUB_DOC": DOC, "STUB_RC": rc,
-                                   "STUB_SECRET": f"HF_TOKEN={TOKEN}\n"})
+        proc = _collect(
+            tmp_path, {**stub, "STUB_DOC": DOC, "STUB_RC": rc, "STUB_SECRET": f"HF_TOKEN={TOKEN}\n"}
+        )
         assert TOKEN not in proc.stdout and TOKEN not in proc.stderr
         assert _state(proc)["TOKEN_IN_CHILD"] == "no"
     # nor does the wizard itself see one in its environment
@@ -746,79 +849,122 @@ def _store_doc(path: str, flm: str | None = None) -> str:
     return json.dumps({"version": 1, "model_store": store})
 
 
-CHECK = ('hal0_store_is_operator_choice "${HAL0_MODELS_DIR}" && echo OWN=yes || echo OWN=no')
+CHECK = 'hal0_store_is_operator_choice "${HAL0_MODELS_DIR}" && echo OWN=yes || echo OWN=no'
 
 
 def test_chosen_folder_honoured_only_when_equal(tmp_path: Path, stub: dict[str, str]) -> None:
-    proc = _collect(tmp_path, {**stub, "STUB_DOC": _store_doc("/home/alice/models"),
-                               "STUB_CHOSEN": "/home/alice/models\n"}, after=CHECK)
+    proc = _collect(
+        tmp_path,
+        {
+            **stub,
+            "STUB_DOC": _store_doc("/home/alice/models"),
+            "STUB_CHOSEN": "/home/alice/models\n",
+        },
+        after=CHECK,
+    )
     state = _state(proc)
     assert state["RC"] == "0", proc.stderr
     assert state["CHOSEN"] == "/home/alice/models" and state["OWN"] == "yes"
     assert state["LEFT"] == ""
-    for line in ("/home/alice/other\n", "/home/alice/models/\n", "/home/alice/models \n",
-                 "/home/alice/modelsX\n", ""):
-        proc = _collect(tmp_path, {**stub, "STUB_DOC": _store_doc("/home/alice/models"),
-                                   "STUB_CHOSEN": line}, after=CHECK)
+    for line in (
+        "/home/alice/other\n",
+        "/home/alice/models/\n",
+        "/home/alice/models \n",
+        "/home/alice/modelsX\n",
+        "",
+    ):
+        proc = _collect(
+            tmp_path,
+            {**stub, "STUB_DOC": _store_doc("/home/alice/models"), "STUB_CHOSEN": line},
+            after=CHECK,
+        )
         state = _state(proc)
         assert state["RC"] == "0" and state["CHOSEN"] == "" and state["OWN"] == "no", line
     # a file that is not exactly one line is refused (one warning), not read on
     # its first line; so is one with a NUL byte, which bash would drop
-    for raw in (b"/home/alice/models\nextra\n", b"/home/alice/models\n\n",
-                b"/home/alice/mo\x00dels\n", b"/home/alice/models\n\x00",
-                b"/home/alice/models"):
-        proc = _collect(tmp_path, {**stub, "STUB_DOC": _store_doc("/home/alice/models"),
-                                   "STUB_CHOSEN_HEX": raw.hex()}, after=CHECK)
+    for raw in (
+        b"/home/alice/models\nextra\n",
+        b"/home/alice/models\n\n",
+        b"/home/alice/mo\x00dels\n",
+        b"/home/alice/models\n\x00",
+        b"/home/alice/models",
+    ):
+        proc = _collect(
+            tmp_path,
+            {**stub, "STUB_DOC": _store_doc("/home/alice/models"), "STUB_CHOSEN_HEX": raw.hex()},
+            after=CHECK,
+        )
         state = _state(proc)
         assert state["RC"] == "0" and state["CHOSEN"] == "" and state["OWN"] == "no", raw
         assert proc.stderr.count("WARN") == 1 and "chosen" in proc.stderr, proc.stderr
         assert state["LEFT"] == ""
     # and the doubled slash the reader folds: compared with the exported text
-    proc = _collect(tmp_path, {**stub, "STUB_DOC": _store_doc("//home/alice/models"),
-                               "STUB_CHOSEN": "/home/alice/models\n"}, after=CHECK)
+    proc = _collect(
+        tmp_path,
+        {
+            **stub,
+            "STUB_DOC": _store_doc("//home/alice/models"),
+            "STUB_CHOSEN": "/home/alice/models\n",
+        },
+        after=CHECK,
+    )
     assert _state(proc)["OWN"] == "yes"
 
 
-def test_chosen_folder_ignored_when_headless_or_absent(tmp_path: Path,
-                                                       stub: dict[str, str]) -> None:
+def test_chosen_folder_ignored_when_headless_or_absent(
+    tmp_path: Path, stub: dict[str, str]
+) -> None:
     base = {**stub, "STUB_DOC": _store_doc("/home/alice/models")}
     proc = _collect(tmp_path, base, after=CHECK)
     assert _state(proc)["OWN"] == "no"
     for extra in ({"HAL0_NONINTERACTIVE": "1"},):
-        proc = _collect(tmp_path, {**base, **extra, "STUB_CHOSEN": "/home/alice/models\n"},
-                        after=CHECK)
+        proc = _collect(
+            tmp_path, {**base, **extra, "STUB_CHOSEN": "/home/alice/models\n"}, after=CHECK
+        )
         state = _state(proc)
         assert state["RC"] == "0" and state["CHOSEN"] == "" and state["OWN"] == "no"
     given = tmp_path / "given.json"
     given.write_text(_store_doc("/home/alice/models"), encoding="utf-8")
-    proc = _collect(tmp_path, {**base, "HAL0_ANSWERS_FILE": str(given),
-                               "STUB_CHOSEN": "/home/alice/models\n"}, after=CHECK)
+    proc = _collect(
+        tmp_path,
+        {**base, "HAL0_ANSWERS_FILE": str(given), "STUB_CHOSEN": "/home/alice/models\n"},
+        after=CHECK,
+    )
     assert _state(proc)["OWN"] == "no"
     # only on exit 0
-    proc = _collect(tmp_path, {**base, "STUB_RC": "130", "STUB_CHOSEN": "/home/alice/models\n"},
-                    after=CHECK)
+    proc = _collect(
+        tmp_path, {**base, "STUB_RC": "130", "STUB_CHOSEN": "/home/alice/models\n"}, after=CHECK
+    )
     assert _state(proc)["CHOSEN"] == ""
 
 
-def test_the_two_reasons_are_never_taken_from_the_environment(tmp_path: Path,
-                                                               stub: dict[str, str]) -> None:
-    env = {**stub, "STUB_DOC": _store_doc("/home/alice/models"),
-           "_HAL0_WIZARD_CHOSEN_STORE": "/home/alice/models",
-           "_HAL0_SAVED_STORE": "/home/alice/models"}
+def test_the_two_reasons_are_never_taken_from_the_environment(
+    tmp_path: Path, stub: dict[str, str]
+) -> None:
+    env = {
+        **stub,
+        "STUB_DOC": _store_doc("/home/alice/models"),
+        "_HAL0_WIZARD_CHOSEN_STORE": "/home/alice/models",
+        "_HAL0_SAVED_STORE": "/home/alice/models",
+    }
     proc = _collect(tmp_path, env, after=CHECK)
     state = _state(proc)
     assert state["RC"] == "0" and state["OWN"] == "no", proc.stdout + proc.stderr
     # nor when the wizard is absent
     env = {"_HAL0_WIZARD_CHOSEN_STORE": "/x/y", "_HAL0_SAVED_STORE": "/x/y"}
-    proc = _collect(tmp_path, env, after='hal0_store_is_operator_choice /x/y && echo OWN=yes'
-                                          ' || echo OWN=no')
+    proc = _collect(
+        tmp_path, env, after="hal0_store_is_operator_choice /x/y && echo OWN=yes || echo OWN=no"
+    )
     assert _state(proc)["OWN"] == "no"
 
 
 def test_existing_store_from_saved_answers_is_exempt(tmp_path: Path, stub: dict[str, str]) -> None:
     _saved(tmp_path, json.loads(_store_doc("/home/alice/models")))
-    proc = _collect(tmp_path, {**stub, "STUB_DOC": _store_doc("/home/alice/models"),
-                               "HAL0_NONINTERACTIVE": "1"}, after=CHECK)
+    proc = _collect(
+        tmp_path,
+        {**stub, "STUB_DOC": _store_doc("/home/alice/models"), "HAL0_NONINTERACTIVE": "1"},
+        after=CHECK,
+    )
     state = _state(proc)
     assert state["RC"] == "0", proc.stderr
     assert state["SAVED_STORE"] == "/home/alice/models" and state["OWN"] == "yes"
@@ -836,20 +982,26 @@ def test_existing_store_from_saved_answers_is_exempt(tmp_path: Path, stub: dict[
     assert _state(proc)["OWN"] == "no"
 
 
-def test_a_saved_copy_the_reader_refuses_gives_no_exemption(tmp_path: Path,
-                                                            stub: dict[str, str]) -> None:
+def test_a_saved_copy_the_reader_refuses_gives_no_exemption(
+    tmp_path: Path, stub: dict[str, str]
+) -> None:
     _saved(tmp_path, {"version": 1, "model_store": {"path": "/etc/models"}})
-    proc = _collect(tmp_path, {**stub, "STUB_DOC": _store_doc("/home/alice/models")},
-                    after='hal0_store_is_operator_choice /etc/models && echo OWN=yes'
-                          ' || echo OWN=no')
+    proc = _collect(
+        tmp_path,
+        {**stub, "STUB_DOC": _store_doc("/home/alice/models")},
+        after="hal0_store_is_operator_choice /etc/models && echo OWN=yes || echo OWN=no",
+    )
     assert _state(proc)["OWN"] == "no" and _state(proc)["SAVED_STORE"] == ""
 
 
 def test_store_from_given_document_is_not_exempt(tmp_path: Path, stub: dict[str, str]) -> None:
     given = tmp_path / "given.json"
     given.write_text(_store_doc("/home/alice/models"), encoding="utf-8")
-    proc = _collect(tmp_path, {**stub, "STUB_DOC": _store_doc("/home/alice/models"),
-                               "HAL0_ANSWERS_FILE": str(given)}, after=CHECK)
+    proc = _collect(
+        tmp_path,
+        {**stub, "STUB_DOC": _store_doc("/home/alice/models"), "HAL0_ANSWERS_FILE": str(given)},
+        after=CHECK,
+    )
     state = _state(proc)
     assert state["RC"] == "0" and state["MODELS"] == "/home/alice/models"
     assert state["OWN"] == "no"
@@ -882,8 +1034,9 @@ echo DONE
 
 
 @pytest.mark.parametrize("reason", ["chosen", "saved"])
-def test_a_store_inside_the_default_store_keeps_the_strict_rule(tmp_path: Path,
-                                                                 reason: str) -> None:
+def test_a_store_inside_the_default_store_keeps_the_strict_rule(
+    tmp_path: Path, reason: str
+) -> None:
     block = _slice('ui_step "Filesystem layout"', 'info "directories under')
     var = tmp_path / "var"
     (var / "models").mkdir(parents=True)
@@ -921,16 +1074,20 @@ echo DONE
     assert mkdirs and all(store not in ln for ln in mkdirs), mkdirs
     assert f"{var}/models" in mkdirs[0]
     calls = [ln for ln in out.splitlines() if ln.startswith("NOFOLLOW")]
-    assert calls and calls[-1].startswith("NOFOLLOW dir --create") and calls[-1].endswith(
-        f"--expect adopt {store}"), calls
+    assert (
+        calls
+        and calls[-1].startswith("NOFOLLOW dir --create")
+        and calls[-1].endswith(f"--expect adopt {store}")
+    ), calls
     assert "your own choice" not in out
 
 
 # ── the NPU folder from a document ──────────────────────────────────────────
 
 
-def _flm(tmp_path: Path, flm: str, store: str, default: str, *, chosen: str = "",
-         saved: str = "") -> subprocess.CompletedProcess[str]:
+def _flm(
+    tmp_path: Path, flm: str, store: str, default: str, *, chosen: str = "", saved: str = ""
+) -> subprocess.CompletedProcess[str]:
     script = f"""
 set -euo pipefail
 DEV_MODE=0
@@ -1003,8 +1160,9 @@ def test_no_npu_device_drops_a_documents_npu_folder() -> None:
 # ── Python first ────────────────────────────────────────────────────────────
 
 
-def _python_region(tmp_path: Path, *, usable: int, wizard: bool, have: str = "",
-                   answers: str = "") -> list[str]:
+def _python_region(
+    tmp_path: Path, *, usable: int, wizard: bool, have: str = "", answers: str = ""
+) -> list[str]:
     region = _slice("# file-origin: begin", "# file-origin: end")
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir(exist_ok=True)
@@ -1051,12 +1209,17 @@ def test_python_installed_first_when_missing(tmp_path: Path) -> None:
 
 def test_the_wizard_refuses_an_old_python(tmp_path: Path, stub: dict[str, str]) -> None:
     fake = tmp_path / "oldpy"
-    fake.write_text(f"#!/bin/bash\n[[ \"$*\" == *version_info* ]] && exit 1\nexec {sys.executable} \"$@\"\n",
-                    encoding="utf-8")
+    fake.write_text(
+        f'#!/bin/bash\n[[ "$*" == *version_info* ]] && exit 1\nexec {sys.executable} "$@"\n',
+        encoding="utf-8",
+    )
     fake.chmod(0o755)
     script_env = {**stub, "STUB_DOC": DOC}
     proc = subprocess.run(
-        ["bash", "-c", f"""
+        [
+            "bash",
+            "-c",
+            f"""
 set -u
 PY="{fake}" REPO_ROOT="{ROOT}" DEV_MODE=1 PREFIX="{tmp_path}/p2" VAR_DIR="{tmp_path}/v2"
 source "{ANSWERS_SH}"
@@ -1064,8 +1227,11 @@ err() {{ echo "ERR: $*" >&2; }}
 warn() {{ echo "WARN: $*" >&2; }}
 _HAL0_INSTALL_ARGS=()
 rc=0; hal0_run_wizard || rc=$?; echo "RC=$rc"
-"""],
-        capture_output=True, text=True, check=False,
+""",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
         env={"PATH": os.environ["PATH"], **script_env},
     )
     assert "RC=1" in proc.stdout and "3.12" in proc.stderr, proc.stdout + proc.stderr
@@ -1086,8 +1252,15 @@ def test_cpu_only_prompt_skipped_after_the_wizard() -> None:
 # ── a folder the flag or the environment chose stays theirs ─────────────────
 
 
-def _md(*, args: tuple[str, ...] = (), env_models: str | None = None, doc: str, ran: int,
-        pre_flm: str = "", doc_flm: str = "") -> str:
+def _md(
+    *,
+    args: tuple[str, ...] = (),
+    env_models: str | None = None,
+    doc: str,
+    ran: int,
+    pre_flm: str = "",
+    doc_flm: str = "",
+) -> str:
     """The real flag loop of install.sh (from MODELS_DIR= to the banner), then the
     answers-models-dir block, with what the seam leaves behind in between."""
     loop = _slice('MODELS_DIR="${HAL0_MODELS_DIR:-}"', "# Banner first")
@@ -1118,8 +1291,9 @@ echo "FROM_DOC=${{MODELS_DIR_FROM_DOC}} DIR=${{MODELS_DIR}} SAVED=${{HAL0_ANSWER
     env = {"PATH": os.environ["PATH"]}
     if env_models is not None:
         env["HAL0_MODELS_DIR"] = env_models
-    proc = subprocess.run(["bash", "-c", script, "bash", *args], capture_output=True, text=True,
-                          check=False, env=env)
+    proc = subprocess.run(
+        ["bash", "-c", script, "bash", *args], capture_output=True, text=True, check=False, env=env
+    )
     assert proc.returncode == 0, proc.stdout + proc.stderr
     return proc.stdout.strip()
 
@@ -1130,7 +1304,8 @@ def test_models_dir_flag_alone_agreeing_with_the_document_keeps_the_saved_copy()
     assert "LOOP flag=1 explicit=0" in out
     assert "WARN" not in out, out
     assert out.endswith(
-        "FROM_DOC=0 DIR=/home/a/m SAVED=abc EXPORTED=HAL0_NONINTERACTIVE HAL0_MODELS_DIR"), out
+        "FROM_DOC=0 DIR=/home/a/m SAVED=abc EXPORTED=HAL0_NONINTERACTIVE HAL0_MODELS_DIR"
+    ), out
 
 
 def test_models_dir_flag_alone_differing_from_the_document_warns_and_keeps_none() -> None:
@@ -1159,8 +1334,10 @@ def test_the_same_folder_is_compared_in_normal_form() -> None:
     out = _md(env_models="/home/alice/models/", doc="/home/alice/models", ran=1)
     assert "FROM_DOC=0 DIR=/home/alice/models/ SAVED=abc" in out and "WARN" not in out
     out = _md(args=("--models-dir=/home//alice/./models/",), doc="/home/alice/models", ran=1)
-    assert "FROM_DOC=0 SAVED=abc" in out.replace("DIR=/home//alice/./models/ ", "") \
-        and "WARN" not in out, out
+    assert (
+        "FROM_DOC=0 SAVED=abc" in out.replace("DIR=/home//alice/./models/ ", "")
+        and "WARN" not in out
+    ), out
     # a different folder in normal form is still different
     out = _md(env_models="/home/alice/models/", doc="/home/alice/models2", ran=1)
     assert "FROM_DOC=1 DIR=/home/alice/models2" in out
@@ -1180,10 +1357,19 @@ done
 """
     proc = subprocess.run(["bash", "-c", script], capture_output=True, text=True, check=False)
     got = dict(line.split("=", 1) for line in proc.stdout.splitlines())
-    assert got == {"/home/alice/models/": "/home/alice/models", "//a//b/": "/a/b",
-                   "/a/././b": "/a/b", "/a/./": "/a", "/.": "/", "/": "/", "/a/.": "/a",
-                   "/a/.b/": "/a/.b", "/a/../b": "/a/../b", "/a/b///": "/a/b"}
-    fn = _helpers()[_helpers().index("hal0_path_norm() {"):]
+    assert got == {
+        "/home/alice/models/": "/home/alice/models",
+        "//a//b/": "/a/b",
+        "/a/././b": "/a/b",
+        "/a/./": "/a",
+        "/.": "/",
+        "/": "/",
+        "/a/.": "/a",
+        "/a/.b/": "/a/.b",
+        "/a/../b": "/a/../b",
+        "/a/b///": "/a/b",
+    }
+    fn = _helpers()[_helpers().index("hal0_path_norm() {") :]
     fn = fn[: fn.index("\n}\n")]
     for call in ("stat", "readlink", "realpath", "cd ", "-e ", "-d "):
         assert call not in fn, call

@@ -153,7 +153,7 @@ def test_second_half_order() -> None:
         "preflight_venv",
         "preflight_container_runtime",
         "gpu_rc == HAL0_GPU_RC_BROKEN_GID",
-        "if [[ \"${HAL0_ANSWERS_APPLIED:-0}\" != \"1\" ]] && _interactive; then",
+        'if [[ "${HAL0_ANSWERS_APPLIED:-0}" != "1" ]] && _interactive; then',
         "resolve_hindsight_python",
         "preflight_writable",
         "preflight_ports",
@@ -301,7 +301,9 @@ def test_file_origin_dies_when_python_still_missing_after_install_try(tmp_path: 
     proc = _run(script)
     assert proc.returncode == 1
     calls = _calls(tmp_path)
-    assert any(c.startswith("die: python interpreter 'no-such-python-xyz' not found") for c in calls)
+    assert any(
+        c.startswith("die: python interpreter 'no-such-python-xyz' not found") for c in calls
+    )
     assert "seam" not in calls
 
 
@@ -448,8 +450,7 @@ def _file_branch_run(tmp_path, *, py: str, python3_version: str | None, answers_
         major, minor = python3_version.split(".")
         stub = bin_dir / "python3"
         stub.write_text(
-            "#!/bin/bash\n"
-            f"exit $(( {major} > 3 || ({major} == 3 && {minor} >= 10) ? 0 : 1 ))\n",
+            f"#!/bin/bash\nexit $(( {major} > 3 || ({major} == 3 && {minor} >= 10) ? 0 : 1 ))\n",
             encoding="utf-8",
         )
         stub.chmod(0o755)
@@ -459,7 +460,7 @@ set -u
 PATH="{bin_dir}"
 PY="{py}"
 {answers}
-source "{Path(__file__).resolve().parents[2] / 'installer' / 'lib' / 'answers.sh'}"
+source "{Path(__file__).resolve().parents[2] / "installer" / "lib" / "answers.sh"}"
 info() {{ echo "INFO: $*"; }}
 _hal0_resolve_main_python_or_die() {{ echo "INSTALL_ATTEMPTED $*"; }}
 _main_python_usable=0
@@ -487,6 +488,7 @@ def test_install_is_attempted_when_there_is_no_python_at_all(tmp_path) -> None:
 
 
 def test_no_install_without_an_answers_file(tmp_path) -> None:
-    out, attempted = _file_branch_run(tmp_path, py="/nonexistent/python", python3_version=None,
-                                      answers_file=False)
+    out, attempted = _file_branch_run(
+        tmp_path, py="/nonexistent/python", python3_version=None, answers_file=False
+    )
     assert not attempted, out

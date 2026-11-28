@@ -59,8 +59,14 @@ FULL = {
 }
 
 
-def run(doc: object, tmp_path: Path, origin: str = "wizard", raw: bytes | None = None,
-        manifest: Path | None = None, env: dict[str, str] | None = None):
+def run(
+    doc: object,
+    tmp_path: Path,
+    origin: str = "wizard",
+    raw: bytes | None = None,
+    manifest: Path | None = None,
+    env: dict[str, str] | None = None,
+):
     path = tmp_path / "answers.json"
     path.write_bytes(raw if raw is not None else json.dumps(doc).encode())
     seam = ["--models-manifest", str(manifest)] if manifest else []
@@ -87,7 +93,7 @@ def saved_of(proc: subprocess.CompletedProcess[str]) -> dict:
     assert proc.returncode == 0, proc.stderr
     last = proc.stdout.splitlines()[-1]
     assert last.startswith("#saved ")
-    return json.loads(base64.b64decode(last[len("#saved "):], validate=True).decode("utf-8"))
+    return json.loads(base64.b64decode(last[len("#saved ") :], validate=True).decode("utf-8"))
 
 
 def test_full_document_maps_every_key(tmp_path: Path) -> None:
@@ -183,8 +189,12 @@ def test_bind_host_warns_never_errors_and_is_not_emitted(tmp_path: Path, strict:
 
 
 def test_slots_and_huggingface_are_known_keys(tmp_path: Path) -> None:
-    doc = {"version": 1, "strict": True, "slots": [{"capability": "chat", "name": "c", "port": 8200}],
-           "huggingface": {"token_env": "HF_TOKEN"}}
+    doc = {
+        "version": 1,
+        "strict": True,
+        "slots": [{"capability": "chat", "name": "c", "port": 8200}],
+        "huggingface": {"token_env": "HF_TOKEN"},
+    }
     proc = run(doc, tmp_path)
     assert lines(proc) == ["HAL0_NONINTERACTIVE=1"]
     assert "huggingface" not in proc.stderr  # token_env alone is accepted silently
@@ -233,8 +243,14 @@ def test_image_ids_checked_against_manifest(tmp_path: Path) -> None:
 
 @pytest.mark.parametrize(
     "data",
-    [None, "missing", {"models": []}, {"model_ladder": [{"role": "starter"}]},
-     {"model_ladder": [{"model": "x"}]}, {"model_ladder": "x"}],
+    [
+        None,
+        "missing",
+        {"models": []},
+        {"model_ladder": [{"role": "starter"}]},
+        {"model_ladder": [{"model": "x"}]},
+        {"model_ladder": "x"},
+    ],
 )
 def test_manifest_unreadable_falls_back_to_pattern_with_one_warning(
     tmp_path: Path, data: object
@@ -248,11 +264,16 @@ def test_manifest_unreadable_falls_back_to_pattern_with_one_warning(
         m = _manifest(tmp_path, data)
     doc = {"version": 1, "models": {"starter": "any-id", "brain": "other-id"}}
     proc = run(doc, tmp_path, manifest=m)
-    assert lines(proc) == ["HAL0_NONINTERACTIVE=1", "HAL0_BRAIN_MODEL=other-id",
-                           "HAL0_PULL_AGENT_MODEL=1", "HAL0_AGENT_MODEL=any-id"]
+    assert lines(proc) == [
+        "HAL0_NONINTERACTIVE=1",
+        "HAL0_BRAIN_MODEL=other-id",
+        "HAL0_PULL_AGENT_MODEL=1",
+        "HAL0_AGENT_MODEL=any-id",
+    ]
     assert proc.stderr.count("model list") == 1
-    assert run({"version": 1, "models": {"starter": "Bad Id"}}, tmp_path,
-               manifest=m).returncode == 2
+    assert (
+        run({"version": 1, "models": {"starter": "Bad Id"}}, tmp_path, manifest=m).returncode == 2
+    )
 
 
 def test_default_manifest_is_found_beside_the_reader_not_the_cwd(tmp_path: Path) -> None:
@@ -271,13 +292,19 @@ def test_default_manifest_is_found_beside_the_reader_not_the_cwd(tmp_path: Path)
     elsewhere.mkdir()
     proc = subprocess.run(
         [sys.executable, "-I", str(lib / "answers_reader.py"), "--origin", "file", str(doc)],
-        capture_output=True, text=True, check=False, cwd=elsewhere,
+        capture_output=True,
+        text=True,
+        check=False,
+        cwd=elsewhere,
     )
     assert proc.returncode == 0 and proc.stderr == "", proc.stderr
     doc.write_text(json.dumps({"version": 1, "models": {"brain": "nope"}}), encoding="utf-8")
     proc = subprocess.run(
         [sys.executable, "-I", str(lib / "answers_reader.py"), "--origin", "file", str(doc)],
-        capture_output=True, text=True, check=False, cwd=elsewhere,
+        capture_output=True,
+        text=True,
+        check=False,
+        cwd=elsewhere,
     )
     assert proc.returncode == 2
 
@@ -293,8 +320,14 @@ HOSTILE_DOCS = [
     {"version": 1, "access": {HOSTILE_KEY: "x"}},
     {"version": 1, "model_store": {"path": "/mnt/" + HOSTILE_KEY}},
     {"version": 1, "models": {"starter": HOSTILE_KEY}},
-    {"version": 1, "network": {"hostname": HOSTILE_KEY, "public_url": HOSTILE_KEY,
-                                "allowed_origins": [HOSTILE_KEY]}},
+    {
+        "version": 1,
+        "network": {
+            "hostname": HOSTILE_KEY,
+            "public_url": HOSTILE_KEY,
+            "allowed_origins": [HOSTILE_KEY],
+        },
+    },
     {"version": 1, "gen": {"mode": HOSTILE_KEY}},
     {"version": 1, "access": {"admin_key": HOSTILE_KEY}},
     {"version": HOSTILE_KEY},
@@ -382,7 +415,9 @@ def test_reader_via_symlink_finds_manifest_beside_real_file(tmp_path: Path) -> N
     doc.write_text(json.dumps({"version": 1, "models": {"brain": "nope"}}), encoding="utf-8")
     proc = subprocess.run(
         [sys.executable, "-I", str(link), "--origin", "file", str(doc)],
-        capture_output=True, text=True, check=False,
+        capture_output=True,
+        text=True,
+        check=False,
     )
     assert proc.returncode == 2 and "models.brain" in proc.stderr
 
@@ -419,8 +454,7 @@ def test_terminal_tool_only_for_wizard_origin(tmp_path: Path) -> None:
     ],
 )
 def test_starter_three_ways(tmp_path: Path, value: str, expected: list[str]) -> None:
-    proc = run({"version": 1, "models": {"starter": value}}, tmp_path,
-               manifest=_manifest(tmp_path))
+    proc = run({"version": 1, "models": {"starter": value}}, tmp_path, manifest=_manifest(tmp_path))
     assert lines(proc) == expected
 
 
@@ -463,8 +497,16 @@ def test_relative_models_path_rejected(tmp_path: Path) -> None:
 
 @pytest.mark.parametrize(
     ("port", "ok"),
-    [(1, True), (65535, True), (0, False), (65536, False), (-1, False),
-     ("80", False), (True, False), (80.5, False)],
+    [
+        (1, True),
+        (65535, True),
+        (0, False),
+        (65536, False),
+        (-1, False),
+        ("80", False),
+        (True, False),
+        (80.5, False),
+    ],
 )
 def test_port_range(tmp_path: Path, port: object, ok: bool) -> None:
     proc = run({"version": 1, "network": {"port": port}}, tmp_path)
@@ -545,12 +587,15 @@ def test_partial_output_never_happens(tmp_path: Path) -> None:
 
 def test_bad_usage_and_missing_file(tmp_path: Path) -> None:
     for argv in ([], ["--origin", "other", "x"], ["--origin", "file"]):
-        proc = subprocess.run([sys.executable, "-I", str(READER), *argv],
-                              capture_output=True, text=True, check=False)
+        proc = subprocess.run(
+            [sys.executable, "-I", str(READER), *argv], capture_output=True, text=True, check=False
+        )
         assert proc.returncode == 2 and proc.stdout == ""
     proc = subprocess.run(
         [sys.executable, "-I", str(READER), "--origin", "file", str(tmp_path / "nope.json")],
-        capture_output=True, text=True, check=False,
+        capture_output=True,
+        text=True,
+        check=False,
     )
     assert proc.returncode == 2 and proc.stdout == ""
 
@@ -563,13 +608,16 @@ def test_only_allow_listed_names_are_printed(tmp_path: Path) -> None:
     assert names <= set(ns["ALLOWED_NAMES"])
 
 
-def _emit(doc: object, tmp_path: Path, *extra: str,
-          env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
+def _emit(
+    doc: object, tmp_path: Path, *extra: str, env: dict[str, str] | None = None
+) -> subprocess.CompletedProcess[str]:
     path = tmp_path / "doc.json"
     path.write_text(doc if isinstance(doc, str) else json.dumps(doc), encoding="utf-8")
     return subprocess.run(
         [sys.executable, "-I", str(READER), *extra, "--emit-saved", str(path)],
-        capture_output=True, text=True, check=False,
+        capture_output=True,
+        text=True,
+        check=False,
         env={**os.environ, **env} if env else None,
     )
 
@@ -584,9 +632,18 @@ def test_emit_saved_strips_grant_and_token_keeps_order(tmp_path: Path) -> None:
     proc = _emit(doc, tmp_path, "--origin", "wizard")
     assert proc.returncode == 0, proc.stderr
     assert "hf_x" not in proc.stdout
-    assert proc.stdout == json.dumps(
-        {"version": 1, "apps": {"hermes": {}, "pi": {"enabled": True}}, "network": {"port": 80}}, indent=2
-    ) + "\n"
+    assert (
+        proc.stdout
+        == json.dumps(
+            {
+                "version": 1,
+                "apps": {"hermes": {}, "pi": {"enabled": True}},
+                "network": {"port": 80},
+            },
+            indent=2,
+        )
+        + "\n"
+    )
 
 
 def test_emit_saved_drops_look_alike_spellings(tmp_path: Path) -> None:
@@ -613,7 +670,10 @@ def test_emit_saved_drops_unknown_keys_at_every_level(tmp_path: Path) -> None:
         "version": 1,
         "extra_thing": "hf_SECRETSECRET",
         "memory": {"enabled": True, "note": "hf_SECRETSECRET"},
-        "apps": {"pi": {"enabled": True, "x": "hf_SECRETSECRET"}, "mystery": {"a": "hf_SECRETSECRET"}},
+        "apps": {
+            "pi": {"enabled": True, "x": "hf_SECRETSECRET"},
+            "mystery": {"a": "hf_SECRETSECRET"},
+        },
         "access": {"admin_key": "generate"},
     }
     proc = _emit(doc, tmp_path)
@@ -641,7 +701,9 @@ def test_emit_saved_known_keys_round_trip(tmp_path: Path) -> None:
     assert proc.returncode == 0, proc.stderr
     expected = json.loads(json.dumps(doc))
     expected["apps"]["hermes"] = {"enabled": True}
-    expected["slots"] = [{"capability": "chat", "name": "a", "port": 9000}]  # unknown slot-entry keys are dropped
+    expected["slots"] = [
+        {"capability": "chat", "name": "a", "port": 9000}
+    ]  # unknown slot-entry keys are dropped
     assert json.loads(proc.stdout) == expected
     assert proc.stderr == ""
 
@@ -649,8 +711,25 @@ def test_emit_saved_known_keys_round_trip(tmp_path: Path) -> None:
 # ── model-store locations: never a system tree, never a file ────────────────
 
 _STORE_KEYS = ("path", "flm_path")
-_DENIED = ("/etc", "/usr", "/bin", "/sbin", "/lib", "/lib32", "/lib64", "/libx32", "/boot",
-           "/root", "/proc", "/sys", "/dev", "/run", "/var/run", "/var/log", "/var/lib")
+_DENIED = (
+    "/etc",
+    "/usr",
+    "/bin",
+    "/sbin",
+    "/lib",
+    "/lib32",
+    "/lib64",
+    "/libx32",
+    "/boot",
+    "/root",
+    "/proc",
+    "/sys",
+    "/dev",
+    "/run",
+    "/var/run",
+    "/var/log",
+    "/var/lib",
+)
 
 
 _OUTSIDE_STORE = "must be a folder inside the model store"
@@ -662,13 +741,16 @@ def test_store_path_in_a_system_tree_is_refused(tmp_path: Path, tree: str, suffi
     proc = run({"version": 1, "model_store": {"path": tree + suffix}}, tmp_path)
     assert proc.returncode == 2, proc.stdout
     assert proc.stdout == ""
-    assert "model_store.path" in proc.stderr and f"is inside {tree}, a system location" in proc.stderr
+    assert (
+        "model_store.path" in proc.stderr and f"is inside {tree}, a system location" in proc.stderr
+    )
 
 
 @pytest.mark.parametrize("tree", _DENIED)
 @pytest.mark.parametrize("suffix", ["", "/x", "/x/y"])
-def test_flm_path_in_a_system_tree_is_outside_the_store(tmp_path: Path, tree: str,
-                                                        suffix: str) -> None:
+def test_flm_path_in_a_system_tree_is_outside_the_store(
+    tmp_path: Path, tree: str, suffix: str
+) -> None:
     proc = run({"version": 1, "model_store": {"flm_path": tree + suffix}}, tmp_path)
     assert proc.returncode == 2 and proc.stdout == ""
     assert "model_store.flm_path" in proc.stderr and _OUTSIDE_STORE in proc.stderr
@@ -698,12 +780,24 @@ def test_the_rest_of_var_lib_hal0_is_refused(tmp_path: Path, bad: str) -> None:
     assert run({"version": 1, "model_store": {"path": bad}}, tmp_path).returncode == 2
 
 
-@pytest.mark.parametrize("ok", ["/mnt/disk/models", "/srv/hal0/models", "/home/someone/models",
-                                "/mnt/my models/a=b", "/opt/hal0", "/var/data/models"])
+@pytest.mark.parametrize(
+    "ok",
+    [
+        "/mnt/disk/models",
+        "/srv/hal0/models",
+        "/home/someone/models",
+        "/mnt/my models/a=b",
+        "/opt/hal0",
+        "/var/data/models",
+    ],
+)
 def test_ordinary_store_paths_are_accepted(tmp_path: Path, ok: str) -> None:
     proc = run({"version": 1, "model_store": {"path": ok, "flm_path": f"{ok}/flm"}}, tmp_path)
-    assert lines(proc) == ["HAL0_NONINTERACTIVE=1", f"HAL0_MODELS_DIR={ok}",
-                           f"HAL0_FLM_MODELS_DIR={ok}/flm"]
+    assert lines(proc) == [
+        "HAL0_NONINTERACTIVE=1",
+        f"HAL0_MODELS_DIR={ok}",
+        f"HAL0_FLM_MODELS_DIR={ok}/flm",
+    ]
 
 
 def test_what_is_on_disk_at_the_path_does_not_matter_to_the_reader(tmp_path: Path) -> None:
@@ -713,8 +807,12 @@ def test_what_is_on_disk_at_the_path_does_not_matter_to_the_reader(tmp_path: Pat
     (tmp_path / "etc-link").symlink_to("/etc")
     (tmp_path / "a-file").write_text("x")
     (tmp_path / "dangling").symlink_to(tmp_path / "nowhere")
-    for value in (f"{tmp_path}/etc-link", f"{tmp_path}/etc-link/hal0/models", f"{tmp_path}/a-file",
-                  f"{tmp_path}/dangling/models"):
+    for value in (
+        f"{tmp_path}/etc-link",
+        f"{tmp_path}/etc-link/hal0/models",
+        f"{tmp_path}/a-file",
+        f"{tmp_path}/dangling/models",
+    ):
         proc = run({"version": 1, "model_store": {"path": value}}, tmp_path)
         assert lines(proc) == ["HAL0_NONINTERACTIVE=1", f"HAL0_MODELS_DIR={value}"], value
         assert proc.stderr == ""
@@ -760,7 +858,9 @@ def test_credentials_message_names_the_key_only(tmp_path: Path, key: str) -> Non
 
 
 def test_other_url_messages_echo_scheme_and_host_only(tmp_path: Path) -> None:
-    proc = run({"version": 1, "network": {"public_url": "ftp://x.example.com:21/a/b?c=d"}}, tmp_path)
+    proc = run(
+        {"version": 1, "network": {"public_url": "ftp://x.example.com:21/a/b?c=d"}}, tmp_path
+    )
     assert "ftp://x.example.com:21" in proc.stderr
     assert "/a/b" not in proc.stderr and "c=d" not in proc.stderr
 
@@ -790,8 +890,12 @@ def test_deep_nesting_in_a_known_section_exits_2(tmp_path: Path) -> None:
 def test_deep_nesting_in_the_saved_form_run_exits_2(tmp_path: Path) -> None:
     path = tmp_path / "deep.json"
     path.write_bytes(b'{"version": 1, "x": ' + b"[" * 5000 + b"]" * 5000 + b"}")
-    proc = subprocess.run([sys.executable, "-I", str(READER), "--emit-saved", str(path)],
-                          capture_output=True, text=True, check=False)
+    proc = subprocess.run(
+        [sys.executable, "-I", str(READER), "--emit-saved", str(path)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
     assert proc.returncode == 2 and "Traceback" not in proc.stderr
 
 
@@ -807,7 +911,10 @@ def test_fifo_document_does_not_hang(tmp_path: Path) -> None:
     start = time.monotonic()
     proc = subprocess.run(
         [sys.executable, "-I", str(READER), "--origin", "file", "--", str(fifo)],
-        capture_output=True, text=True, check=False, timeout=10,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=10,
     )
     assert time.monotonic() - start < 2
     assert proc.returncode == 2 and "not a regular file" in proc.stderr
@@ -824,21 +931,65 @@ def test_the_document_is_read_through_one_nonblocking_descriptor() -> None:
 
 
 @pytest.mark.parametrize("strict", [False, True])
-@pytest.mark.parametrize("good", ["0.0.0.0", "127.0.0.1", "::1", "2001:db8::1", "box-1",
-                                  "box.example.com", "fe80::1%eth0", "fe80::1%a_b.c-9"])
+@pytest.mark.parametrize(
+    "good",
+    [
+        "0.0.0.0",
+        "127.0.0.1",
+        "::1",
+        "2001:db8::1",
+        "box-1",
+        "box.example.com",
+        "fe80::1%eth0",
+        "fe80::1%a_b.c-9",
+    ],
+)
 def test_valid_bind_host_is_kept_and_warns_once(tmp_path: Path, strict: bool, good: str) -> None:
     proc = run({"version": 1, "strict": strict, "network": {"bind_host": good}}, tmp_path)
     assert lines(proc) == ["HAL0_NONINTERACTIVE=1"]
     assert proc.stderr.count("network.bind_host is not applied at install") == 1
 
 
-@pytest.mark.parametrize("bad", ["-bad", "--help", "a b", "a;b", "$(x)", "x\ny", "x\x1b[31m", "",
-                                 "   ", "-1.2.3.4", "999.1.1.1", "bad_host", 5, True, [], {}, ["1.1.1.1"],
-                                 {"token": "secret"}, "a" * 300, " 192.0.2.5 ", "192.0.2.5 ", " box-1",
-                                 "192.0.2.5\u00a0", "\u2003box-1", "box-1\u3000", "\u200bbox-1",
-                                 "fe80::1%$(id)", "fe80::1%", "fe80::1%" + "a" * 17, "fe80::1%a b",
-                                 "fe80::1%eth0%x", "fe80::1%a;b", "fe80::1%a/b", "fe80::1%`id`",
-                                 "fe80::1%\u00e9th0"])
+@pytest.mark.parametrize(
+    "bad",
+    [
+        "-bad",
+        "--help",
+        "a b",
+        "a;b",
+        "$(x)",
+        "x\ny",
+        "x\x1b[31m",
+        "",
+        "   ",
+        "-1.2.3.4",
+        "999.1.1.1",
+        "bad_host",
+        5,
+        True,
+        [],
+        {},
+        ["1.1.1.1"],
+        {"token": "secret"},
+        "a" * 300,
+        " 192.0.2.5 ",
+        "192.0.2.5 ",
+        " box-1",
+        "192.0.2.5\u00a0",
+        "\u2003box-1",
+        "box-1\u3000",
+        "\u200bbox-1",
+        "fe80::1%$(id)",
+        "fe80::1%",
+        "fe80::1%" + "a" * 17,
+        "fe80::1%a b",
+        "fe80::1%eth0%x",
+        "fe80::1%a;b",
+        "fe80::1%a/b",
+        "fe80::1%`id`",
+        "fe80::1%\u00e9th0",
+    ],
+)
 @pytest.mark.parametrize("strict", [False, True])
 def test_invalid_bind_host_is_an_error(tmp_path: Path, strict: bool, bad: object) -> None:
     proc = run({"version": 1, "strict": strict, "network": {"bind_host": bad}}, tmp_path)
@@ -857,16 +1008,27 @@ def test_bind_host_survives_into_the_saved_copy(tmp_path: Path) -> None:
 
 # ── slots: only what the document format defines, flat, validated ───────────
 
-_SLOT = {"capability": "coder", "name": "code-1", "port": 8201, "model_id": "qwen3-8b",
-         "device": "auto", "profile": "auto", "context_size": 8192, "enabled_on_pull": True}
+_SLOT = {
+    "capability": "coder",
+    "name": "code-1",
+    "port": 8201,
+    "model_id": "qwen3-8b",
+    "device": "auto",
+    "profile": "auto",
+    "context_size": 8192,
+    "enabled_on_pull": True,
+}
 
 
 _REQUIRED = {"capability": "chat", "name": "a", "port": 9000}
 
 
 def test_a_full_slot_entry_is_accepted_and_kept(tmp_path: Path) -> None:
-    doc = {"version": 1, "strict": True, "slots": [_SLOT, {"capability": "chat", "name": "chat",
-                                                          "port": 8200, "model_id": "auto"}]}
+    doc = {
+        "version": 1,
+        "strict": True,
+        "slots": [_SLOT, {"capability": "chat", "name": "chat", "port": 8200, "model_id": "auto"}],
+    }
     proc = run(doc, tmp_path)
     assert lines(proc) == ["HAL0_NONINTERACTIVE=1"]  # slots emit no variable
     saved = _emit(doc, tmp_path)
@@ -876,17 +1038,44 @@ def test_a_full_slot_entry_is_accepted_and_kept(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     ("key", "bad"),
     [
-        ("capability", "embed"), ("capability", 3), ("capability", None), ("capability", ["chat"]),
-        ("name", "Has Space"), ("name", "UPPER"), ("name", "x" * 40), ("name", ""), ("name", 5),
-        ("name", "a\nb"), ("name", {"k": "v"}),
-        ("port", 0), ("port", 65536), ("port", True), ("port", "8080"), ("port", 1.5), ("port", [1]),
-        ("model_id", 5), ("model_id", "bad id"), ("model_id", "a\x00b"), ("model_id", {"x": 1}),
-        ("model_id", ["a"]), ("model_id", "-x"),
-        ("device", "a b"), ("device", 3), ("device", ["gpu"]), ("device", {"a": 1}),
-        ("profile", "a b"), ("profile", 3), ("profile", {"a": 1}),
-        ("context_size", 0), ("context_size", -1), ("context_size", True), ("context_size", "big"),
+        ("capability", "embed"),
+        ("capability", 3),
+        ("capability", None),
+        ("capability", ["chat"]),
+        ("name", "Has Space"),
+        ("name", "UPPER"),
+        ("name", "x" * 40),
+        ("name", ""),
+        ("name", 5),
+        ("name", "a\nb"),
+        ("name", {"k": "v"}),
+        ("port", 0),
+        ("port", 65536),
+        ("port", True),
+        ("port", "8080"),
+        ("port", 1.5),
+        ("port", [1]),
+        ("model_id", 5),
+        ("model_id", "bad id"),
+        ("model_id", "a\x00b"),
+        ("model_id", {"x": 1}),
+        ("model_id", ["a"]),
+        ("model_id", "-x"),
+        ("device", "a b"),
+        ("device", 3),
+        ("device", ["gpu"]),
+        ("device", {"a": 1}),
+        ("profile", "a b"),
+        ("profile", 3),
+        ("profile", {"a": 1}),
+        ("context_size", 0),
+        ("context_size", -1),
+        ("context_size", True),
+        ("context_size", "big"),
         ("context_size", [1]),
-        ("enabled_on_pull", "yes"), ("enabled_on_pull", 1), ("enabled_on_pull", None),
+        ("enabled_on_pull", "yes"),
+        ("enabled_on_pull", 1),
+        ("enabled_on_pull", None),
     ],
 )
 def test_invalid_slot_values_are_errors(tmp_path: Path, key: str, bad: object) -> None:
@@ -957,16 +1146,30 @@ def _reader_module():
 
 # ── a credential anywhere in a URL: rejected, nothing of it echoed ──────────
 
-_PASSWORDS = ["Sup3r/Secret", "Sup3r?Secret", "Sup3r#Secret", "Sup3r@Secret", "Sup3r Secret",
-              "Sup3rSecret/xyz"]
+_PASSWORDS = [
+    "Sup3r/Secret",
+    "Sup3r?Secret",
+    "Sup3r#Secret",
+    "Sup3r@Secret",
+    "Sup3r Secret",
+    "Sup3rSecret/xyz",
+]
 
 
 @pytest.mark.parametrize("pw", _PASSWORDS)
 @pytest.mark.parametrize("key", ["public_url", "allowed_origins"])
-@pytest.mark.parametrize("shape", ["{scheme}://admin:{pw}@host.example", "{scheme}://admin:{pw}/x@host.example",
-                                   "{scheme}://host.example/{pw}@x", "admin:{pw}@host.example"])
-def test_a_url_with_an_at_sign_anywhere_echoes_nothing_of_it(tmp_path: Path, pw: str, key: str,
-                                                              shape: str) -> None:
+@pytest.mark.parametrize(
+    "shape",
+    [
+        "{scheme}://admin:{pw}@host.example",
+        "{scheme}://admin:{pw}/x@host.example",
+        "{scheme}://host.example/{pw}@x",
+        "admin:{pw}@host.example",
+    ],
+)
+def test_a_url_with_an_at_sign_anywhere_echoes_nothing_of_it(
+    tmp_path: Path, pw: str, key: str, shape: str
+) -> None:
     url = shape.format(scheme="https", pw=pw)
     value = url if key == "public_url" else [url]
     proc = run({"version": 1, "network": {key: value}}, tmp_path)
@@ -977,8 +1180,10 @@ def test_a_url_with_an_at_sign_anywhere_echoes_nothing_of_it(tmp_path: Path, pw:
 
 
 def test_the_motivating_url_is_rejected_without_its_password(tmp_path: Path) -> None:
-    proc = run({"version": 1, "network": {"public_url": "https://admin:Sup3rSecret/xyz@host.example"}},
-               tmp_path)
+    proc = run(
+        {"version": 1, "network": {"public_url": "https://admin:Sup3rSecret/xyz@host.example"}},
+        tmp_path,
+    )
     assert proc.returncode == 2 and "Sup3rSecret" not in proc.stderr
 
 
@@ -995,9 +1200,16 @@ def test_a_scoped_address_is_not_a_url_host(tmp_path: Path) -> None:
 # ── slots: the loader's required keys, and no path-like model id ────────────
 
 
-@pytest.mark.parametrize("entry", [{}, {"capability": "chat"}, {"name": "a", "port": 9000},
-                                   {"capability": "chat", "port": 9000},
-                                   {"capability": "chat", "name": "a"}])
+@pytest.mark.parametrize(
+    "entry",
+    [
+        {},
+        {"capability": "chat"},
+        {"name": "a", "port": 9000},
+        {"capability": "chat", "port": 9000},
+        {"capability": "chat", "name": "a"},
+    ],
+)
 def test_a_slot_entry_needs_capability_name_and_port(tmp_path: Path, entry: dict) -> None:
     proc = run({"version": 1, "slots": [entry]}, tmp_path)
     assert proc.returncode == 2 and proc.stdout == ""
@@ -1065,7 +1277,9 @@ def _doc_with(path: tuple, value: object) -> dict:
 
 @pytest.mark.parametrize("path", _every_key(), ids=lambda p: ".".join(map(str, p)))
 @pytest.mark.parametrize("strict", [False, True])
-def test_a_nested_value_in_any_key_is_never_echoed(tmp_path: Path, path: tuple, strict: bool) -> None:
+def test_a_nested_value_in_any_key_is_never_echoed(
+    tmp_path: Path, path: tuple, strict: bool
+) -> None:
     doc = _doc_with(path, {"k": {"deeper": _MARK}, "m": [_MARK]})
     doc["strict"] = strict if path != ("strict",) else doc["strict"]
     proc = run(doc, tmp_path, manifest=_manifest(tmp_path))
@@ -1084,14 +1298,18 @@ def test_a_long_scalar_in_any_key_is_capped(tmp_path: Path) -> None:
 # ── values are exported and saved in normalised form ────────────────────────
 
 
-@pytest.mark.parametrize(("key", "given", "normal"), [
-    ("path", "/mnt//x/./", "/mnt/x"),
-    ("path", "//mnt/x///y/", "/mnt/x/y"),
-    ("path", "/mnt/./x", "/mnt/x"),
-    ("flm_path", "/var/lib/hal0/models//flm/./", "/var/lib/hal0/models/flm"),
-])
-def test_store_paths_are_exported_and_saved_normalised(tmp_path: Path, key: str, given: str,
-                                                        normal: str) -> None:
+@pytest.mark.parametrize(
+    ("key", "given", "normal"),
+    [
+        ("path", "/mnt//x/./", "/mnt/x"),
+        ("path", "//mnt/x///y/", "/mnt/x/y"),
+        ("path", "/mnt/./x", "/mnt/x"),
+        ("flm_path", "/var/lib/hal0/models//flm/./", "/var/lib/hal0/models/flm"),
+    ],
+)
+def test_store_paths_are_exported_and_saved_normalised(
+    tmp_path: Path, key: str, given: str, normal: str
+) -> None:
     doc = {"version": 1, "model_store": {key: given}}
     proc = run(doc, tmp_path)
     name = "HAL0_MODELS_DIR" if key == "path" else "HAL0_FLM_MODELS_DIR"
@@ -1137,7 +1355,9 @@ def _store(tmp_path: Path, key: str, value: str, *extra: str):
     path.write_text(json.dumps({"version": 1, "model_store": {key: value}}), encoding="utf-8")
     return subprocess.run(
         [sys.executable, "-I", str(READER), "--origin", "wizard", *extra, "--", str(path)],
-        capture_output=True, text=True, check=False,
+        capture_output=True,
+        text=True,
+        check=False,
     )
 
 
@@ -1152,15 +1372,19 @@ _HOSTILE_NAMES = [
 
 @pytest.mark.parametrize("hostile", _HOSTILE_NAMES)
 @pytest.mark.parametrize("origin", ["wizard", "file"])
-def test_a_hostile_folder_behind_a_link_never_reaches_the_output(tmp_path: Path, hostile: str,
-                                                                 origin: str) -> None:
+def test_a_hostile_folder_behind_a_link_never_reaches_the_output(
+    tmp_path: Path, hostile: str, origin: str
+) -> None:
     # The third pass's attack: the document's text is clean, the folder the link
     # leads to on disk has a newline, a quote or an escape in its NAME.
     real = tmp_path / "real" / hostile
     real.mkdir(parents=True)
     (tmp_path / "link").symlink_to(real)
     store = f"{tmp_path}/link"
-    doc = {"version": 1, "model_store": {"path": f"{store}/models", "flm_path": f"{store}/models/flm"}}
+    doc = {
+        "version": 1,
+        "model_store": {"path": f"{store}/models", "flm_path": f"{store}/models/flm"},
+    }
     proc = run(doc, tmp_path, origin=origin)
     assert lines(proc) == [
         "HAL0_NONINTERACTIVE=1",
@@ -1186,38 +1410,57 @@ def _no_disk_for(monkeypatch, reader, roots: tuple[str, ...]) -> list[str]:
     def guard(name, real):
         def wrapped(target, *args, **kwargs):
             text = os.fsdecode(target) if isinstance(target, (str, bytes, os.PathLike)) else ""
-            if any(text == root or text.startswith(root + "/") or root.startswith(text + "/")
-                   and text not in ("", "/") for root in roots):
+            if any(
+                text == root
+                or text.startswith(root + "/")
+                or root.startswith(text + "/")
+                and text not in ("", "/")
+                for root in roots
+            ):
                 seen.append(f"{name}({text})")
                 raise AssertionError(f"the reader called {name} on {text!r}")
             return real(target, *args, **kwargs)
+
         return wrapped
 
-    for mod, name in ((reader.os, "stat"), (reader.os, "lstat"), (reader.os, "open"),
-                      (reader.os, "listdir"), (reader.os, "scandir"), (reader.os, "access"),
-                      (reader.os.path, "exists"), (reader.os.path, "lexists"),
-                      (reader.os.path, "isdir"), (reader.os.path, "islink"),
-                      (reader.os.path, "realpath")):
+    for mod, name in (
+        (reader.os, "stat"),
+        (reader.os, "lstat"),
+        (reader.os, "open"),
+        (reader.os, "listdir"),
+        (reader.os, "scandir"),
+        (reader.os, "access"),
+        (reader.os.path, "exists"),
+        (reader.os.path, "lexists"),
+        (reader.os.path, "isdir"),
+        (reader.os.path, "islink"),
+        (reader.os.path, "realpath"),
+    ):
         monkeypatch.setattr(mod, name, guard(name, getattr(mod, name)))
     return seen
 
 
 @pytest.mark.parametrize("mode", ["apply", "saved"])
-def test_the_reader_makes_no_filesystem_call_for_either_path(tmp_path: Path, monkeypatch,
-                                                             capsys, mode: str) -> None:
+def test_the_reader_makes_no_filesystem_call_for_either_path(
+    tmp_path: Path, monkeypatch, capsys, mode: str
+) -> None:
     reader = _reader_module()
     existing = tmp_path / "probe-store"
     (existing / "flm").mkdir(parents=True)
     for store in (str(existing), "/srv/hal0-lexical-probe/models"):
         doc = tmp_path / "answers.json"
-        doc.write_text(json.dumps({"version": 1, "model_store": {
-            "path": store, "flm_path": f"{store}/flm"}}), encoding="utf-8")
+        doc.write_text(
+            json.dumps({"version": 1, "model_store": {"path": store, "flm_path": f"{store}/flm"}}),
+            encoding="utf-8",
+        )
         manifest = _manifest(tmp_path)
         with monkeypatch.context() as patch:
             seen = _no_disk_for(patch, reader, (store,))
-            argv = (["--origin", "wizard", "--models-manifest", str(manifest), "--", str(doc)]
-                    if mode == "apply" else
-                    ["--models-manifest", str(manifest), "--emit-saved", str(doc)])
+            argv = (
+                ["--origin", "wizard", "--models-manifest", str(manifest), "--", str(doc)]
+                if mode == "apply"
+                else ["--models-manifest", str(manifest), "--emit-saved", str(doc)]
+            )
             rc = reader.main(argv)
         out = capsys.readouterr()
         assert seen == [] and rc == 0, (seen, out.err)
@@ -1226,16 +1469,27 @@ def test_the_reader_makes_no_filesystem_call_for_either_path(tmp_path: Path, mon
 
 def test_the_reader_source_has_no_filesystem_probe_left() -> None:
     text = READER.read_text(encoding="utf-8")
-    for gone in ("_canonical", "_safe_location", "_unsafe_parent", "_denied_by_identity",
-                 "_identity", "HAL0_ANSWERS_TEST_ROOT_UID", "os.lstat", "os.stat(",
-                 "os.path.exists", "os.path.lexists", "os.path.isdir"):
+    for gone in (
+        "_canonical",
+        "_safe_location",
+        "_unsafe_parent",
+        "_denied_by_identity",
+        "_identity",
+        "HAL0_ANSWERS_TEST_ROOT_UID",
+        "os.lstat",
+        "os.stat(",
+        "os.path.exists",
+        "os.path.lexists",
+        "os.path.isdir",
+    ):
         assert gone not in text, gone
     # the one realpath left locates the reader's own manifest file, never a document path
     assert text.count("realpath") == 1 and "os.path.realpath(__file__)" in text
 
 
-@pytest.mark.parametrize("bad", ["/mnt/café", "/mnt/١٢", "/mnt/ａ",
-                                 "/mnt/a b", "/mnt/models\n", "/mnt/x y"])
+@pytest.mark.parametrize(
+    "bad", ["/mnt/café", "/mnt/١٢", "/mnt/ａ", "/mnt/a b", "/mnt/models\n", "/mnt/x y"]
+)
 def test_non_ascii_letters_and_a_trailing_newline_are_refused(tmp_path: Path, bad: str) -> None:
     for key in _STORE_KEYS:
         proc = run({"version": 1, "model_store": {key: bad}}, tmp_path)
@@ -1254,24 +1508,32 @@ def test_a_path_longer_than_4096_characters_is_refused(tmp_path: Path, key: str)
 # ── model_store.flm_path: only a folder inside the model store ──────────────
 
 
-@pytest.mark.parametrize(("store", "flm", "ok"), [
-    (None, "/var/lib/hal0/models/flm", True),
-    (None, "/var/lib/hal0/models/npu/flm", True),
-    (None, "/var/lib/hal0/models", False),       # the store itself is not inside it
-    (None, "/var/lib/hal0/modelsx/flm", False),  # a look-alike, compared by component
-    (None, "/var/lib/hal0/flm", False),
-    (None, "/mnt/disk/flm", False),
-    (None, "/home/alice/.config/systemd/user", False),
-    ("/mnt/disk/models", "/mnt/disk/models/flm", True),
-    ("/mnt/disk/models", "//mnt//disk/models/./flm/", True),
-    ("/mnt/disk/models", "/mnt/disk/models", False),
-    ("/mnt/disk/models", "/mnt/disk/modelsx/flm", False),
-    ("/mnt/disk/models", "/mnt/disk/flm", False),
-    ("/mnt/disk/models", "/var/lib/hal0/models/flm", False),  # the default store is not the store now
-    ("/mnt/disk/models/", "/mnt/disk/models/flm", True),
-])
-def test_flm_path_must_be_inside_the_model_store(tmp_path: Path, store: str | None, flm: str,
-                                                 ok: bool) -> None:
+@pytest.mark.parametrize(
+    ("store", "flm", "ok"),
+    [
+        (None, "/var/lib/hal0/models/flm", True),
+        (None, "/var/lib/hal0/models/npu/flm", True),
+        (None, "/var/lib/hal0/models", False),  # the store itself is not inside it
+        (None, "/var/lib/hal0/modelsx/flm", False),  # a look-alike, compared by component
+        (None, "/var/lib/hal0/flm", False),
+        (None, "/mnt/disk/flm", False),
+        (None, "/home/alice/.config/systemd/user", False),
+        ("/mnt/disk/models", "/mnt/disk/models/flm", True),
+        ("/mnt/disk/models", "//mnt//disk/models/./flm/", True),
+        ("/mnt/disk/models", "/mnt/disk/models", False),
+        ("/mnt/disk/models", "/mnt/disk/modelsx/flm", False),
+        ("/mnt/disk/models", "/mnt/disk/flm", False),
+        (
+            "/mnt/disk/models",
+            "/var/lib/hal0/models/flm",
+            False,
+        ),  # the default store is not the store now
+        ("/mnt/disk/models/", "/mnt/disk/models/flm", True),
+    ],
+)
+def test_flm_path_must_be_inside_the_model_store(
+    tmp_path: Path, store: str | None, flm: str, ok: bool
+) -> None:
     section = {"flm_path": flm} if store is None else {"path": store, "flm_path": flm}
     proc = run({"version": 1, "model_store": section}, tmp_path)
     if ok:
@@ -1279,7 +1541,9 @@ def test_flm_path_must_be_inside_the_model_store(tmp_path: Path, store: str | No
     else:
         assert proc.returncode == 2 and proc.stdout == ""
         assert "model_store.flm_path" in proc.stderr and _OUTSIDE_STORE in proc.stderr
-        assert "set HAL0_FLM_MODELS_DIR in the environment when running the installer" in proc.stderr
+        assert (
+            "set HAL0_FLM_MODELS_DIR in the environment when running the installer" in proc.stderr
+        )
 
 
 def reader_normal(path: str) -> str:
@@ -1287,7 +1551,9 @@ def reader_normal(path: str) -> str:
 
 
 def test_a_refused_store_path_does_not_add_a_second_error_for_flm(tmp_path: Path) -> None:
-    proc = run({"version": 1, "model_store": {"path": "/etc/m", "flm_path": "/etc/m/flm"}}, tmp_path)
+    proc = run(
+        {"version": 1, "model_store": {"path": "/etc/m", "flm_path": "/etc/m/flm"}}, tmp_path
+    )
     assert proc.returncode == 2
     assert proc.stderr.count("error:") == 1 and "model_store.path" in proc.stderr
 
@@ -1303,9 +1569,18 @@ def test_default_store_argument_moves_the_flm_rule_to_a_dev_prefix(tmp_path: Pat
     accepted = _store(tmp_path, "flm_path", value, "--default-store", f"{dev}/models")
     assert f"HAL0_FLM_MODELS_DIR={value}" in lines(accepted)
     saved = subprocess.run(
-        [sys.executable, "-I", str(READER), "--default-store", f"{dev}/models",
-         "--emit-saved", str(tmp_path / "answers.json")],
-        capture_output=True, text=True, check=False,
+        [
+            sys.executable,
+            "-I",
+            str(READER),
+            "--default-store",
+            f"{dev}/models",
+            "--emit-saved",
+            str(tmp_path / "answers.json"),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
     )
     assert saved.returncode == 0, saved.stderr
     assert json.loads(saved.stdout)["model_store"] == {"flm_path": value}
@@ -1313,16 +1588,37 @@ def test_default_store_argument_moves_the_flm_rule_to_a_dev_prefix(tmp_path: Pat
 
 def test_default_store_argument_is_the_only_exception_it_names(tmp_path: Path) -> None:
     # the literal /var/lib/hal0/models stops being special once another store is passed
-    proc = _store(tmp_path, "path", "/var/lib/hal0/models/x",
-                  "--default-store", str(tmp_path / "dev" / "models"))
+    proc = _store(
+        tmp_path,
+        "path",
+        "/var/lib/hal0/models/x",
+        "--default-store",
+        str(tmp_path / "dev" / "models"),
+    )
     assert proc.returncode == 2 and "system location" in proc.stderr
-    proc = _store(tmp_path, "path", f"{tmp_path}/dev/models/x",
-                  "--default-store", str(tmp_path / "dev" / "models"))
+    proc = _store(
+        tmp_path,
+        "path",
+        f"{tmp_path}/dev/models/x",
+        "--default-store",
+        str(tmp_path / "dev" / "models"),
+    )
     assert proc.returncode == 0, proc.stderr
 
 
-@pytest.mark.parametrize("bad", ["relative/models", "", "/mnt/with\nnewline", "/mnt/a;b",
-                                 "/mnt/../x", "/" + "a" * 5000, "/mnt/café", "/mnt"])
+@pytest.mark.parametrize(
+    "bad",
+    [
+        "relative/models",
+        "",
+        "/mnt/with\nnewline",
+        "/mnt/a;b",
+        "/mnt/../x",
+        "/" + "a" * 5000,
+        "/mnt/café",
+        "/mnt",
+    ],
+)
 def test_default_store_argument_is_validated_like_a_path(tmp_path: Path, bad: str) -> None:
     for mode in ("apply", "saved"):
         if mode == "apply":
@@ -1330,17 +1626,30 @@ def test_default_store_argument_is_validated_like_a_path(tmp_path: Path, bad: st
         else:
             (tmp_path / "answers.json").write_text('{"version": 1}', encoding="utf-8")
             proc = subprocess.run(
-                [sys.executable, "-I", str(READER), "--default-store", bad,
-                 "--emit-saved", str(tmp_path / "answers.json")],
-                capture_output=True, text=True, check=False)
+                [
+                    sys.executable,
+                    "-I",
+                    str(READER),
+                    "--default-store",
+                    bad,
+                    "--emit-saved",
+                    str(tmp_path / "answers.json"),
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
         assert proc.returncode == 2 and proc.stdout == "", (mode, bad)
         assert "default-store" in proc.stderr
         assert "newline" not in proc.stderr and "aaaa" not in proc.stderr
 
 
 def test_a_document_cannot_name_the_default_store(tmp_path: Path) -> None:
-    doc = {"version": 1, "model_store": {"path": "/mnt/disk/models", "default_store": "/etc"},
-           "default_store": "/etc"}
+    doc = {
+        "version": 1,
+        "model_store": {"path": "/mnt/disk/models", "default_store": "/etc"},
+        "default_store": "/etc",
+    }
     proc = run(doc, tmp_path)
     assert proc.returncode == 0 and "default_store" not in "".join(lines(proc))
     assert all("/etc" not in line for line in lines(proc))
@@ -1354,16 +1663,22 @@ def test_the_apply_run_ends_with_exactly_one_saved_line(tmp_path: Path) -> None:
     out = proc.stdout.splitlines()
     assert [x for x in out if x.startswith("#saved")] == [out[-1]]
     assert all(x.startswith("HAL0_") for x in out[:-1])
-    payload = out[-1][len("#saved "):]
-    assert payload and base64.b64encode(base64.b64decode(payload, validate=True)).decode() == payload
+    payload = out[-1][len("#saved ") :]
+    assert (
+        payload and base64.b64encode(base64.b64decode(payload, validate=True)).decode() == payload
+    )
     emitted = _emit(FULL, tmp_path, "--models-manifest", str(_manifest(tmp_path)))
     assert emitted.returncode == 0, emitted.stderr
     assert base64.b64decode(payload).decode("utf-8") == emitted.stdout  # the same saved form
 
 
 def test_the_saved_line_drops_the_grant_the_token_and_unknown_keys(tmp_path: Path) -> None:
-    doc = {"version": 1, "huggingface": {"token": "hf_secret"}, "mystery": "hf_secret2",
-           "apps": {"hermes": {"terminal_tool": True}}}
+    doc = {
+        "version": 1,
+        "huggingface": {"token": "hf_secret"},
+        "mystery": "hf_secret2",
+        "apps": {"hermes": {"terminal_tool": True}},
+    }
     proc = run(doc, tmp_path)
     assert "HAL0_HERMES_TERMINAL=1" in lines(proc)
     assert saved_of(proc) == {"version": 1, "apps": {"hermes": {}}}
@@ -1380,8 +1695,9 @@ def test_a_rejected_document_prints_no_saved_line(tmp_path: Path) -> None:
 
 @pytest.mark.parametrize(("strict", "kind"), [(False, "warning"), (True, "error")])
 @pytest.mark.parametrize("count", [20, 21, 500])
-def test_messages_are_capped_at_twenty_per_kind(tmp_path: Path, strict: bool, kind: str,
-                                                count: int) -> None:
+def test_messages_are_capped_at_twenty_per_kind(
+    tmp_path: Path, strict: bool, kind: str, count: int
+) -> None:
     doc = {"version": 1, "strict": strict, **{f"unknown{i:04d}": 1 for i in range(count)}}
     proc = run(doc, tmp_path)
     assert proc.returncode == (2 if strict else 0)
@@ -1544,8 +1860,15 @@ def test_meta_values(tmp_path: Path) -> None:
     for saved_by in ("unknown", "1.9.0-rc.1+g1a2b3c", "0" * 64):
         proc = run({"version": 1, "meta": {"saved_by": saved_by}}, tmp_path)
         assert lines(proc)
-    bad_at = ("2026-11-28 09:30:00Z", "2026-11-28T09:30:00", "2026-11-28T09:30:00Z\n",
-              "\u0662026-11-28T09:30:00Z", "", 5, None)
+    bad_at = (
+        "2026-11-28 09:30:00Z",
+        "2026-11-28T09:30:00",
+        "2026-11-28T09:30:00Z\n",
+        "\u0662026-11-28T09:30:00Z",
+        "",
+        5,
+        None,
+    )
     for bad in bad_at:
         proc = run({"version": 1, "meta": {"saved_at": bad}}, tmp_path)
         assert proc.returncode == 2 and proc.stdout == "", bad

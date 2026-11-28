@@ -193,7 +193,7 @@ hal0_json_string $'26.\\n04 "x"\\\\y\\t\\x01'
 
 def test_json_string_drops_non_ascii_bytes_in_the_file(tmp_path: Path) -> None:
     stubs = (
-        "_os_release_field() { case \"$1\" in VERSION_ID) printf 'a\\xffb\\xe2\\n\"q\\\\' ;; "
+        '_os_release_field() { case "$1" in VERSION_ID) printf \'a\\xffb\\xe2\\n"q\\\\\' ;; '
         "*) return 1 ;; esac; }"
     )
     proc, out = _run(tmp_path, stubs=stubs)
@@ -208,7 +208,19 @@ def test_json_string_drops_non_ascii_bytes_in_the_file(tmp_path: Path) -> None:
 def test_writer_needs_no_python(tmp_path: Path) -> None:
     bindir = tmp_path / "bin"
     bindir.mkdir()
-    for tool in ("bash", "mktemp", "chmod", "mv", "tr", "mkdir", "dirname", "rm", "cat", "head", "sort"):
+    for tool in (
+        "bash",
+        "mktemp",
+        "chmod",
+        "mv",
+        "tr",
+        "mkdir",
+        "dirname",
+        "rm",
+        "cat",
+        "head",
+        "sort",
+    ):
         found = shutil.which(tool)
         assert found
         (bindir / tool).symlink_to(found)
@@ -252,9 +264,7 @@ def test_gather_installs_nothing(tmp_path: Path) -> None:
     )
     podman.chmod(0o755)
     stubs = "unset -f podman command"
-    proc, out = _run(
-        tmp_path, stubs=stubs, path=f"{bindir}:{os.environ['PATH']}"
-    )
+    proc, out = _run(tmp_path, stubs=stubs, path=f"{bindir}:{os.environ['PATH']}")
     assert "write_rc=0" in proc.stdout, proc.stdout + proc.stderr
     assert not log.exists(), log.read_text()
     assert json.loads(out.read_text())["podman"] == {"present": True, "runs": True}
