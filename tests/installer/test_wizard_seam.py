@@ -125,25 +125,32 @@ def _saved(tmp_path: Path, doc: dict, *, mode: int = 0o600, dir_mode: int = 0o70
     return path
 
 
+def _kill_group(pid: int) -> None:
+    """SIGKILL a process group. The group can outlive its leader; an empty one is fine."""
+    with contextlib.suppress(ProcessLookupError):
+        os.killpg(pid, signal.SIGKILL)
+
+
 def _run_group(
     argv: list[str], *, timeout: float, **kwargs: object
 ) -> subprocess.CompletedProcess[str]:
-    """subprocess.run in its own session; on timeout kill the whole process group.
+    """subprocess.run in its own session; the whole process group is killed on every exit.
 
     subprocess.run kills only the direct child on timeout. A grandchild (the stub
-    wizard under bash) that is blocked would survive as an orphan, so the group
-    is killed before the timeout is raised again.
+    wizard under bash) that is blocked would survive as an orphan, and so would
+    one that outlives bash after a normal end. The group is killed on a timeout
+    (before it is raised again), on any other exception and on a normal end.
     """
     with subprocess.Popen(argv, start_new_session=True, **kwargs) as proc:  # type: ignore[call-overload]
         try:
             out, err = proc.communicate(timeout=timeout)
         except BaseException:
-            with contextlib.suppress(ProcessLookupError):
-                os.killpg(proc.pid, signal.SIGKILL)
+            _kill_group(proc.pid)
             # a pipe holder outside the group must not be waited on forever
             with contextlib.suppress(subprocess.TimeoutExpired):
                 proc.communicate(timeout=5)
             raise
+        _kill_group(proc.pid)
         return subprocess.CompletedProcess(argv, proc.returncode, out, err)
 
 
@@ -787,8 +794,10 @@ def test_an_interrupt_before_the_wizard_handles_it_is_a_quiet_130(
         os.killpg(proc.pid, signal.SIGINT)
         out, err = proc.communicate(timeout=20)
     finally:
-        if proc.poll() is None:
-            os.killpg(proc.pid, signal.SIGKILL)
+        # the group can outlive bash, so kill it whether or not bash has exited
+        _kill_group(proc.pid)
+        with contextlib.suppress(subprocess.TimeoutExpired):
+            proc.wait(timeout=5)
     assert proc.returncode == 130, (proc.returncode, out, err)
     assert "PAST THE SEAM" not in out
     log = (tmp_path / "report.log").read_text() if (tmp_path / "report.log").exists() else ""
@@ -806,31 +815,80 @@ open(sys.argv[1]).read()  # blocks on opening: nothing ever writes to the FIFO
 """
 
 
-def test_a_timed_out_run_leaves_no_process_behind(tmp_path: Path) -> None:
+def _wait_for_pid(pidfile: Path, seconds: float = 5) -> int:
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        text = pidfile.read_text(encoding="utf-8") if pidfile.exists() else ""
+        if text:
+            return int(text)
+        time.sleep(0.05)
+    raise AssertionError(f"the blocking child never wrote {pidfile}")
+
+
+def _wait_gone(pid: int, seconds: float = 5) -> bool:
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return True
+        time.sleep(0.1)
+    return False
+
+
+def _blocker(tmp_path: Path) -> tuple[str, Path]:
+    """The command line of a child that blocks opening a FIFO nobody writes to."""
     fifo = tmp_path / "blocker.fifo"
     os.mkfifo(fifo)
     pidfile = tmp_path / "blocker.pid"
     child = tmp_path / "blocked_on_fifo.py"
     child.write_text(BLOCKED_ON_FIFO, encoding="utf-8")
+    return f'"{sys.executable}" "{child}" "{fifo}" "{pidfile}"', pidfile
+
+
+def test_a_timed_out_run_leaves_no_process_behind(tmp_path: Path) -> None:
+    command, pidfile = _blocker(tmp_path)
     # not the last command, so bash forks it instead of exec-ing it: a grandchild
-    after = f'"{sys.executable}" "{child}" "{fifo}" "{pidfile}"; true'
+    after = f"{command}; true"
     pid = 0
+    gone = False
     try:
         with pytest.raises(subprocess.TimeoutExpired):
-            _collect(tmp_path, args=(), after=after, timeout=3)
-        pid = int(pidfile.read_text(encoding="utf-8"))
-        deadline = time.monotonic() + 5
-        gone = False
-        while time.monotonic() < deadline:
-            try:
-                os.kill(pid, 0)
-            except ProcessLookupError:
-                gone = True
-                break
-            time.sleep(0.1)
+            _collect(tmp_path, args=(), after=after, timeout=6)
+        pid = _wait_for_pid(pidfile)
+        gone = _wait_gone(pid)
         assert gone, f"process {pid} survived the timed-out run"
     finally:
-        if pid:
+        if pid and not gone:
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(pid, signal.SIGKILL)
+
+
+def test_a_grandchild_outliving_its_parent_is_killed_when_the_run_ends(tmp_path: Path) -> None:
+    # bash exits at once; the grandchild stays blocked, with its output sent
+    # away so that no pipe holds the run open. The group outlives its leader.
+    command, pidfile = _blocker(tmp_path)
+    script = (
+        f"{command} >/dev/null 2>&1 &\n"
+        f'for _ in $(seq 100); do [ -s "{pidfile}" ] && break; sleep 0.05; done\n'
+    )
+    pid = 0
+    gone = False
+    try:
+        proc = _run_group(
+            ["bash", "-c", script],
+            timeout=20,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            cwd=tmp_path,
+        )
+        assert proc.returncode == 0
+        pid = _wait_for_pid(pidfile)
+        gone = _wait_gone(pid)
+        assert gone, f"process {pid} survived the end of the run"
+    finally:
+        if pid and not gone:
             with contextlib.suppress(ProcessLookupError):
                 os.kill(pid, signal.SIGKILL)
 
