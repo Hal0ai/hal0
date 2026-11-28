@@ -840,11 +840,13 @@ create_rcfile="$(mktemp "${ART}/create-rc.XXXXXX")"
 (
   trap '' INT TERM HUP
   rc=0
-  # What pct create prints on its standard output (unpacking, host key
-  # fingerprints) goes to create.log in the run folder: this script's standard
-  # output carries the path of result.json and nothing else.
+  : >"${ART}/create.log"  # start empty; the appends below keep both streams in order
+  # What pct create prints (unpacking, host key fingerprints on its standard
+  # output; its errors on the standard error) goes to create.log in the run
+  # folder: this script's standard output carries the path of result.json and
+  # nothing else. A refusal's reason is written there too and is shown below.
   ct_create "$VMID" "$VOLID" "$SHAPE_UNPRIVILEGED" "$SHAPE_CORES" "$SHAPE_MEMORY_MB" "$SHAPE_DISK_GB" \
-    ${DEVS[@]+"${DEVS[@]}"} >"${ART}/create.log" || rc=$?
+    ${DEVS[@]+"${DEVS[@]}"} >>"${ART}/create.log" 2>&1 || rc=$?
   printf '%s' "$rc" >"$create_rcfile"
 ) &
 create_pid=$!
@@ -865,10 +867,14 @@ trap 'on_signal 1' HUP
 if [[ "$create_rc" != "0" ]]; then
   if [[ "$create_rc" == "$_CT_REFUSED" ]]; then
     create_detail="the create was refused before pct create ran"
+    # pct never ran: the reason is the library's own line(s) in create.log
+    head -c 2000 "${ART}/create.log" 1>&2 || true
+    create_msg="could not create container ${VMID}: refused before pct create ran"
   else
     create_detail="pct create failed (exit ${create_rc})"
+    create_msg="could not create container ${VMID}; pct's output is in ${ART}/create.log"
   fi
-  end_run create_failed "$create_detail" "could not create container ${VMID}; pct's output is in ${ART}/create.log"
+  end_run create_failed "$create_detail" "$create_msg"
 fi
 announce_container
 [[ "$DRY_RUN" == "1" ]] || start_watchdog

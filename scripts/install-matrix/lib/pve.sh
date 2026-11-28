@@ -21,10 +21,12 @@
 # The four features scripts/proxmox-ve/ct/hal0.sh declares (var_fuse, var_keyctl,
 # var_mknod, and nesting from the README); a test pins the equality.
 _PVE_FEATURES="nesting=1,keyctl=1,fuse=1,mknod=1"
-# Every command run in a guest starts with this, in the fixed command text: the C
-# locale needs no locale files, so no setlocale warning can be mistaken for the
-# error of a failed step. (The operator's own locale is not sent either; see _pve_ssh.)
-_PVE_GUEST_ENV="env LC_ALL=C LANG=C"
+# Every command run in a guest starts with this, in the fixed command text:
+# C.UTF-8 ships with every supported guest and needs no locale files, so no
+# setlocale warning can be mistaken for the error of a failed step, and the
+# installer's boxes line up as they do for a person (it counts bytes in plain C).
+# (The operator's own locale is not sent either; see _pve_ssh.)
+_PVE_GUEST_ENV="env LC_ALL=C.UTF-8 LANG=C.UTF-8"
 _PVE_TAG="hal0-matrix"
 _PVE_HOST_PREFIX="hal0-mx-"
 # ct_create returns this when it refused before running `pct create`: nothing
@@ -534,7 +536,8 @@ ct_create() {
   cmd+=" --cores ${cores} --memory ${mem} --swap 0"
   cmd+=" --rootfs $(_pve_q "${storage}:${disk}")"
   cmd+=" --net0 $(_pve_q "name=eth0,bridge=${bridge},ip=dhcp")"
-  [[ -z "$nameserver" ]] || cmd+=" --nameserver $(_pve_q "$nameserver")"
+  # pct(1) takes --nameserver as a comma-separated list; the checked value is spaced
+  [[ -z "$nameserver" ]] || cmd+=" --nameserver $(_pve_q "${nameserver// /,}")"
   cmd+=" --unprivileged ${unpriv}"
   cmd+=" --features $(_pve_q "$_PVE_FEATURES")"
   cmd+=" --onboot 0"
@@ -654,14 +657,21 @@ _ct_net_has_address() {
   return 1
 }
 
-# _ct_net_has_global <vmid>: the guest has a global IPv4 or IPv6 address. Two
-# guarded execs with fixed text; each answer is cut to 4096 characters before it
-# is looked at, and a call that fails counts as no address.
+# _ct_net_has_global <vmid>: does the guest have a global IPv4 or IPv6 address?
+# Two guarded execs with fixed text; each answer is cut to 4096 characters before
+# it is looked at. Returns 0 for yes and 1 for no (a call that fails counts as no
+# address). Returns 2 for unknown: the guest has no `ip` program (exit 127), so
+# the caller goes on to the name lookup, as the old wait did.
 _ct_net_has_global() {
-  local out=""
-  out="$(ct_exec "$1" 'ip -o -4 addr show scope global' 2>/dev/null)" || out=""
+  local out="" rc=0
+  out="$(ct_exec "$1" 'ip -o -4 addr show scope global' 2>/dev/null)" || rc=$?
+  [[ "$rc" -ne 127 ]] || return 2
+  [[ "$rc" -eq 0 ]] || out=""
   ! _ct_net_has_address <<<"${out:0:4096}" || return 0
-  out="$(ct_exec "$1" 'ip -o -6 addr show scope global' 2>/dev/null)" || out=""
+  rc=0
+  out="$(ct_exec "$1" 'ip -o -6 addr show scope global' 2>/dev/null)" || rc=$?
+  [[ "$rc" -ne 127 ]] || return 2
+  [[ "$rc" -eq 0 ]] || out=""
   _ct_net_has_address <<<"${out:0:4096}"
 }
 
@@ -691,14 +701,17 @@ _ct_net_report() {
 # PVE_NOTE_FILE (when set), says which state it found with advice for it, and
 # saves the guest's own report (see _ct_net_report).
 ct_wait_network() {
-  local vmid="${1:-}" limit="${2:-}" start now err="" state="no_address"
+  local vmid="${1:-}" limit="${2:-}" start now err="" state="no_address" has
   [[ -n "$limit" ]] || limit="$(_pve_t NETWORK 120)"
   _pve_uint_ok "$limit" || { _pve_err "bad timeout"; return 1; }
   _ct_require_owned "$vmid" "$CT_NONCE" || return 1
   CT_NET_STATE=""
   start="$(date +%s)"
   while :; do
-    if _ct_net_has_global "$vmid"; then
+    has=0
+    _ct_net_has_global "$vmid" || has=$?
+    # 0: has an address; 2: unknown (no `ip` program), so ask the resolver anyway
+    if [[ "$has" -eq 0 || "$has" -eq 2 ]]; then
       if err="$(ct_exec "$vmid" 'getent hosts hal0.dev' 2>&1 >/dev/null)"; then
         CT_NET_STATE="reachable"
         return 0

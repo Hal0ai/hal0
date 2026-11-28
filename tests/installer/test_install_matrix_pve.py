@@ -616,9 +616,12 @@ def test_pick_vmid_range_full(fake):
 
 ACTIONS = [
     ("ct_start 172", "pct start 172"),
-    ("ct_exec 172 'id'", "pct exec 172 -- env LC_ALL=C LANG=C bash -c"),
-    ("ct_push 172 /etc/hostname /root/x", "pct exec 172 -- env LC_ALL=C LANG=C bash -c"),
-    ("ct_pull 172 /root/x {tmp}", "pct exec 172 -- env LC_ALL=C LANG=C bash -c"),
+    ("ct_exec 172 'id'", "pct exec 172 -- env LC_ALL=C.UTF-8 LANG=C.UTF-8 bash -c"),
+    (
+        "ct_push 172 /etc/hostname /root/x",
+        "pct exec 172 -- env LC_ALL=C.UTF-8 LANG=C.UTF-8 bash -c",
+    ),
+    ("ct_pull 172 /root/x {tmp}", "pct exec 172 -- env LC_ALL=C.UTF-8 LANG=C.UTF-8 bash -c"),
     ("ct_apply_device_rules 172 0 226", "lxc.cgroup2.devices.allow"),
     ("ct_destroy 172 $CT_NONCE", "pct destroy 172 --force --purge"),
 ]
@@ -971,8 +974,25 @@ def test_create_passes_the_nameserver_quoted_when_one_is_set(fake):
     assert r.returncode == 0, r.stderr
     call = next(c for c in fake.calls() if "pct create" in c)
     tokens = shlex.split(call)
-    assert tokens[tokens.index("--nameserver") + 1] == NS
-    assert "--nameserver 192.0.2.53\\ 2001:db8::53 " in call, "one quoted word, like the others"
+    # pct(1) takes --nameserver as a comma-separated list: one argument, no spaces
+    assert tokens[tokens.index("--nameserver") + 1] == "192.0.2.53,2001:db8::53"
+    assert "--nameserver 192.0.2.53,2001:db8::53 " in call, "one plain word, like the others"
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("192.0.2.53", "192.0.2.53"),
+        ("192.0.2.53 2001:db8::53", "192.0.2.53,2001:db8::53"),
+        ("192.0.2.53 2001:db8::53 192.0.2.54", "192.0.2.53,2001:db8::53,192.0.2.54"),
+    ],
+)
+def test_create_sends_the_nameservers_to_pct_as_one_comma_joined_argument(fake, value, expected):
+    r = _create(fake, env={"HAL0_MATRIX_NAMESERVER": value})
+    assert r.returncode == 0, r.stderr
+    tokens = shlex.split(next(c for c in fake.calls() if "pct create" in c))
+    assert tokens.count("--nameserver") == 1
+    assert tokens[tokens.index("--nameserver") + 1] == expected
 
 
 @pytest.mark.parametrize("value", [None, ""])
@@ -983,11 +1003,11 @@ def test_create_passes_no_nameserver_when_unset_or_empty(fake, value):
     assert "--nameserver" not in next(c for c in fake.calls() if "pct create" in c)
 
 
-def test_create_takes_up_to_three_addresses_and_joins_them_with_single_spaces(fake):
+def test_create_takes_up_to_three_addresses_written_with_extra_spaces(fake):
     r = _create(fake, env={"HAL0_MATRIX_NAMESERVER": "192.0.2.53   2001:db8::53 192.0.2.54"})
     assert r.returncode == 0, r.stderr
     tokens = shlex.split(next(c for c in fake.calls() if "pct create" in c))
-    assert tokens[tokens.index("--nameserver") + 1] == "192.0.2.53 2001:db8::53 192.0.2.54"
+    assert tokens[tokens.index("--nameserver") + 1] == "192.0.2.53,2001:db8::53,192.0.2.54"
 
 
 @pytest.mark.parametrize(
@@ -1278,7 +1298,7 @@ def test_exec_quotes_command_as_one_argument(fake):
     fake.run(f"ct_exec 172 {shlex.quote(cmd)}")
     call = next(c for c in fake.calls() if "pct exec" in c)
     tokens = shlex.split(call)
-    assert tokens[-8:-2] == ["172", "--", "env", "LC_ALL=C", "LANG=C", "bash"]
+    assert tokens[-8:-2] == ["172", "--", "env", "LC_ALL=C.UTF-8", "LANG=C.UTF-8", "bash"]
     assert tokens[-2:] == ["-c", cmd]
     assert " -t" not in call.replace("testpve", "")
 
@@ -1342,6 +1362,41 @@ def test_wait_network_takes_an_ipv6_only_guest_as_having_an_address(fake):
     _net_rules(fake, v4="", v6=ADDR6)
     r = fake.run("ct_wait_network 172 5; echo rc=$? state=$CT_NET_STATE")
     assert "rc=0 state=reachable" in r.stdout
+
+
+def _no_ip_program_rules(fake, *, getent_rc: int):
+    # a guest without the `ip` program: the shell answers 127 for both address commands
+    _owned_rules(fake, 172)
+    fake.rule(IP4, "bash: ip: command not found\n", 127)
+    fake.rule(IP6, "bash: ip: command not found\n", 127)
+    fake.rule("getent", "", getent_rc)
+    fake.rule("pct exec 172", "")
+
+
+def test_wait_network_goes_on_to_the_name_lookup_when_the_guest_has_no_ip_program(fake):
+    _no_ip_program_rules(fake, getent_rc=0)
+    r = fake.run("ct_wait_network 172 5; echo rc=$? state=$CT_NET_STATE", env=NET_ENV)
+    assert "rc=0 state=reachable" in r.stdout
+    assert any("getent" in c for c in fake.calls())
+
+
+def test_wait_network_with_no_ip_program_and_no_resolver_is_no_resolver(fake):
+    _no_ip_program_rules(fake, getent_rc=2)
+    r = fake.run("ct_wait_network 172 1; echo rc=$? state=$CT_NET_STATE", env=NET_ENV)
+    assert "rc=1 state=no_resolver" in r.stdout
+    assert "no global address" not in r.stderr
+
+
+def test_wait_network_still_calls_a_failing_address_command_no_address(fake):
+    # exit 1 (not 127) is a real answer of "no address", not an unknown
+    _owned_rules(fake, 172)
+    fake.rule(IP4, "", 1)
+    fake.rule(IP6, "", 1)
+    fake.rule("getent", "", 0)
+    fake.rule("pct exec 172", "")
+    r = fake.run("ct_wait_network 172 1; echo rc=$? state=$CT_NET_STATE", env=NET_ENV)
+    assert "rc=1 state=no_address" in r.stdout
+    assert not any("getent" in c for c in fake.calls())
 
 
 def test_wait_network_tells_no_address_from_no_resolver(fake):
@@ -1469,7 +1524,7 @@ def test_the_wait_deadline_has_its_own_override(fake):
 # --- the guest's locale: commands run with LC_ALL=C, set in the command text --
 
 
-def test_guest_commands_carry_lc_all_c_in_the_remote_command_text(fake, tmp_path):
+def test_guest_commands_carry_lc_all_c_utf8_in_the_remote_command_text(fake, tmp_path):
     _owned_rules(fake, 172)
     fake.rule("pct exec 172", "")
     fake.run(
@@ -1480,7 +1535,7 @@ def test_guest_commands_carry_lc_all_c_in_the_remote_command_text(fake, tmp_path
     execs = [c for c in fake.calls() if "pct exec" in c]
     assert len(execs) == 3
     for call in execs:
-        assert "pct exec 172 -- env LC_ALL=C LANG=C bash -c" in call, call
+        assert "pct exec 172 -- env LC_ALL=C.UTF-8 LANG=C.UTF-8 bash -c" in call, call
 
 
 def test_the_local_locale_is_not_forwarded_to_the_host(fake):

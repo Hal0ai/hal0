@@ -108,6 +108,8 @@ case "$cmd" in
     # What a real pct create prints on its standard output (the unpacking, the
     # host key fingerprints); FAKE_CREATE_NOISE stands for it.
     [[ -z "${FAKE_CREATE_NOISE:-}" ]] || printf '%s\n' "$FAKE_CREATE_NOISE"
+    # What a real pct create prints on its standard error when it fails.
+    [[ -z "${FAKE_CREATE_ERR:-}" ]] || printf '%s\n' "$FAKE_CREATE_ERR" >&2
     [[ -z "${FAKE_CREATE_FAILS:-}" ]] || exit 1
     touch "$FAKE_STATE/create-started"
     [[ -z "${FAKE_CREATE_SLEEP:-}" ]] || sleep "$FAKE_CREATE_SLEEP"
@@ -362,7 +364,7 @@ def test_dry_run_plan_shows_the_nameserver_and_the_create_carries_it(host):
     lines = plan_lines(r)
     assert any(f"nameserver for the guest: {NS}" in ln for ln in lines), lines
     create = next(ln for ln in lines if ln.startswith("[dry-run] ssh pct create"))
-    assert "--nameserver 192.0.2.53\\ 2001:db8::53 " in create
+    assert "--nameserver 192.0.2.53,2001:db8::53 " in create
     none = plan_lines(host.dry("u2604-cpu-unattended"))
     assert any("nameserver for the guest: none set" in ln for ln in none)
     assert not any(
@@ -391,7 +393,7 @@ def test_a_real_run_passes_the_nameserver_to_pct_create(host):
     )  # fmt: skip
     assert r.returncode == 0, r.stderr
     create = next(c for c in host.calls() if "pct create" in c)
-    assert "--nameserver 192.0.2.53\\ 2001:db8::53 " in create
+    assert "--nameserver 192.0.2.53,2001:db8::53 " in create
 
 
 def test_a_guest_that_resolves_nothing_says_so_and_names_the_variable(host):
@@ -524,6 +526,32 @@ def test_a_failed_create_says_where_its_output_is(host):
     assert "extracting archive" in (host.out / "create.log").read_text()
 
 
+def test_a_failed_create_keeps_pcts_error_output_in_create_log_too(host):
+    err = "unable to create CT 172 - storage 'local' does not support container directories"
+    r = host.run(
+        "u2604-cpu-unattended", "--vmid", "172", "--out", str(host.out),
+        FAKE_CREATE_NOISE=NOISE, FAKE_CREATE_ERR=err, FAKE_CREATE_FAILS="1",
+    )  # fmt: skip
+    assert r.returncode == 1
+    log = (host.out / "create.log").read_text()
+    assert err in log and "extracting archive" in log, "both streams are kept"
+    assert f"pct's output is in {host.out}/create.log" in r.stderr
+
+
+def test_a_create_refused_before_pct_ran_does_not_point_at_create_log(host):
+    r = host.run(
+        "u2604-cpu-unattended", "--vmid", "172", "--out", str(host.out),
+        HAL0_MATRIX_BRIDGE="not a bridge",
+    )  # fmt: skip
+    assert r.returncode == 1
+    assert not any("pct create" in c for c in host.calls())
+    assert "pct's output is in" not in r.stderr
+    assert "create.log" not in r.stderr
+    assert "bad HAL0_MATRIX_BRIDGE" in r.stderr, (
+        "the reason for the refusal still reaches the person"
+    )
+
+
 def test_the_dry_run_creates_no_create_log(host):
     r = host.dry("u2604-cpu-unattended")
     assert r.returncode == 0, r.stderr
@@ -542,7 +570,7 @@ def test_every_guest_command_runs_with_lc_all_c_whatever_the_operators_locale(ho
     execs = [c for c in host.calls() if "pct exec 172" in c]
     assert execs
     for call in execs:
-        assert "pct exec 172 -- env LC_ALL=C LANG=C bash -c" in call, call
+        assert "pct exec 172 -- env LC_ALL=C.UTF-8 LANG=C.UTF-8 bash -c" in call, call
     seen = (host.state / "locale.log").read_text().split()
     assert seen and set(seen) == {"C"}, "no call to the host carries the operator's locale"
 
@@ -1170,7 +1198,7 @@ def test_oneliner_runs_in_a_terminal_and_passes_summary_flag(host):
     plan = "\n".join(plan_lines(r))
     assert "ssh -tt" in plan
     assert "| bash -s -- --summary-json=/root/hal0-summary.json" in plan
-    assert "pct exec 170 -- env LC_ALL=C LANG=C bash -c '" in plan
+    assert "pct exec 170 -- env LC_ALL=C.UTF-8 LANG=C.UTF-8 bash -c '" in plan
     assert "HAL0_NONINTERACTIVE" not in plan
     assert "cpu-consent.tsv" in plan
 
