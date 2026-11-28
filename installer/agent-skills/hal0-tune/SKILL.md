@@ -46,14 +46,14 @@ For a narrower, model-specific sweep, write an ad-hoc suite TOML and point `hal0
 run` at its path:
 
 ```toml
-# /tmp/tune-qwen.toml
+# /tmp/tune-model.toml
 [suite]
-id = "tune-qwen"
+id = "tune-model"
 exclusive = true
 
 [selector]
 include_only = true
-include = ["qwen3.8-27b"]              # registry id, not the gguf path
+include = ["<model-id>"]               # registry id (`model_list`), not the gguf path
 
 [matrix]
 lanes   = ["rocm", "vulkan_radv"]
@@ -73,9 +73,9 @@ max_age_days = 0        # always (re)measure — this is a one-off tuning run
 ```
 
 ```bash
-hal0 bench plan --suite /tmp/tune-qwen.toml         # sanity-check the worklist first
-hal0 bench run  --suite /tmp/tune-qwen.toml
-hal0 bench results --model qwen3.8-27b --json       # then compare configs
+hal0 bench plan --suite /tmp/tune-model.toml        # sanity-check the worklist first
+hal0 bench run  --suite /tmp/tune-model.toml
+hal0 bench results --model <model-id> --json        # then compare configs
 ```
 
 Allowed tuning flags (seam whitelist, enforced on the argv `hal0.bench.harness` composes
@@ -84,10 +84,12 @@ before the `hal0-benchctl` `exec` seam re-validates it): `-b -ub -ngl -fa -ctk -
 — only when nothing is serving; the runner stops/restarts the slots around the suite (see
 hal0-bench's GPU rule).
 
-## What's worth tuning on Strix Halo (gfx1151, Radeon 8060S)
+## What's worth tuning on Strix Halo (gfx1151)
 
-Priors from the production `hal0-slot@agent` config: `-b 8192 -ub 2048 -ctk q8_0 -ctv q8_0
--fa on -lm none`, threads 16/32. Start near these.
+Start from what the slot runs today, not from numbers in this guide. `hal0 slot show <slot>`
+names the slot's profile; `hal0 profile show <profile>` prints the profile's flags and context
+window; the `slot_resolved` admin tool (or `GET /api/slots/<slot>/resolved`) prints the effective
+command, each flag labelled with the layer that set it. Sweep around those values.
 
 | Flag | Effect | Notes |
 |------|--------|-------|
@@ -95,7 +97,7 @@ Priors from the production `hal0-slot@agent` config: `-b 8192 -ub 2048 -ctk q8_0
 | `-b` (batch) | prefill throughput | pair with ub; diminishing returns past 8192. |
 | `-fa` (flash-attn) | speed + memory at depth | usually a win on; verify on this gfx — Vulkan FA support has changed across versions. |
 | `-ctk`/`-ctv` (KV quant) | memory + bandwidth | `q8_0` ≈ big memory save, tiny quality cost; `f16` = baseline quality. Matters most at long context (decode is bandwidth bound). |
-| `-t` (threads) | CPU-side work | sweep around physical cores (16); rarely the bottleneck for GPU offload. |
+| `-t` (threads) | CPU-side work | sweep around the box's physical core count (`lscpu`); rarely the bottleneck for GPU offload. |
 | `-ngl` | set per lane, not per sweep | 99 (full offload) on `rocm`/`vulkan_radv`, 0 on the `cpu` lane. Only pass your own to study the CPU/GPU split — llama-bench APPENDS it to the lane's value as a second sweep row rather than replacing it. |
 
 Out of llama-bench scope (server-level, tune separately): **draft/MTP speculative decode**
@@ -124,9 +126,9 @@ reproduce here.
 ## Quality floor (don't trade quality blindly)
 
 Speed flags can hurt output — especially aggressive KV quant. Before recommending a config
-that touches `-ctk/-ctv` (or anything beyond ub/b), validate quality, e.g. the existing
-`/mnt/lab/qwen3coder-bench/` capability/eval runs on the tuned settings. Report speed **and**
-quality; if quality drops, the config is not a win.
+that touches `-ctk/-ctv` (or anything beyond ub/b), validate quality on the tuned settings with
+hal0's own agentic eval: `hal0 bench eval --models <id> [--task <id> ...]` (`--dry-run` prints the
+commands without running them). Report speed **and** quality; if quality drops, the config is not a win.
 
 ## Applying a winning config to a slot
 

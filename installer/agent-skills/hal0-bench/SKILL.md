@@ -94,7 +94,7 @@ regression detection.
   `ok` is a measured/publishable value; don't report the others as real numbers.
 
 **Sanity gate:** a real GPU run shows `lane`=`rocm`/`vulkan_radv` and a GPU device in the
-run's `host` block naming the Radeon 8060S. CPU-low t/s with no GPU device means the run
+run's `host` block naming the box's GPU. CPU-low t/s with no GPU device means the run
 landed on the `cpu` lane or was contended — don't report it as a GPU number.
 
 ## How this fits hal0 (D hardened-perms)

@@ -21,7 +21,7 @@ composition, no retries, no shell evaluation — the grant in
 | `/var/lib/hal0-bench/` | `hal0:hal0` | the v2 result store — `records.jsonl` (source of truth), `bench.db` (derived index), `artifacts/` (per-run sweep/server-ab logs, meta.json) |
 | `/var/lib/hal0/benchmarks/v2/artifacts/<run_id>/` | `root:root` | where the `telemetry` verb actually writes its 1 Hz GPU sampler JSON — a separate, older tree from the v2 result store above (see the `telemetry` verb note) |
 
-The seam script itself lives on a **local root-owned path** (not the `/mnt` NFS mount)
+The seam script itself lives on a **local root-owned path** (not a network mount)
 precisely so the agent can't tamper with a script that runs as root. There is no
 root-owned harness directory to protect any more — the harness is the ordinary
 `hal0.bench` package the unprivileged `hal0-api`/CLI process already runs; only the
