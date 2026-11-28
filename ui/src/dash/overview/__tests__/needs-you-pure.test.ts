@@ -147,6 +147,23 @@ describe('allClearLine', () => {
     expect(line).toContain('doctor unavailable')
     expect(line).not.toContain('doctor ok')
   })
+  it('does not say All clear before the feeds have answered (#4124)', () => {
+    const line = allClearLine({ ...base, state: 'checking', doctorKnown: false, slotsHealthy: [0, 0], diskFreeMb: null })
+    expect(line.startsWith('Checking…')).toBe(true)
+    expect(line).not.toContain('All clear')
+    // Not in yet is not the same as unavailable.
+    expect(line).toContain('doctor pending')
+    expect(line).not.toContain('doctor unavailable')
+    expect(line).not.toContain('0/0')
+  })
+  it('says Status unknown when the health feed failed', () => {
+    const line = allClearLine({ ...base, state: 'unknown', doctorKnown: false })
+    expect(line.startsWith('Status unknown')).toBe(true)
+    expect(line).not.toContain('All clear')
+    expect(line).toContain('doctor unavailable')
+  })
+  it('known is the default and reads as before', () =>
+    expect(allClearLine({ ...base, state: 'known' })).toBe(allClearLine(base)))
   it('omits the slot segment when no slot list is known', () =>
     expect(allClearLine({ ...base, slotsHealthy: [0, 0] })).not.toContain('slots healthy'))
   it('zero-pads the clock', () =>

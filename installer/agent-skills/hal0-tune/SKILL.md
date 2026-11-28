@@ -101,7 +101,7 @@ Priors from the production `hal0-slot@agent` config: `-b 8192 -ub 2048 -ctk q8_0
 Out of llama-bench scope (server-level, tune separately): **draft/MTP speculative decode**
 (`--spec-draft-*`) and `--parallel`/slots — `installer/bench/server_ab.py` (Tier B) covers
 that, talking to `hal0-api` + the slot port directly, no sudo. Its arms run under temporary
-profiles (`--variant "label[;ctx=N][;mtp=off]:<flags>"`, `--ctx-size`, `--mtp`).
+profiles (`--variant "label[;ctx=N][;speculation=off]:<flags>"`, `--ctx-size`, `--speculation`).
 
 ## External research (then verify locally)
 
@@ -133,7 +133,7 @@ quality; if quality drops, the config is not a win.
 A tune lives on a **profile**, not on the slot or the model (ADR-0029). The slot names
 its model and its profile; the profile holds the flags (`-b`, `-ub`, `-ctk`, `-ctv`,
 `-fa`, `--parallel`, sampling, ...), the context window (`ctx_size`), the thinking
-default, `vision` and `mtp` (`auto`/`off`). Never put flags in `/etc/hal0/slots/<slot>.toml`
+default, `vision` and `speculation` (`auto`/`off`/`ngram`). Never put flags in `/etc/hal0/slots/<slot>.toml`
 — a write carrying a tuning key is refused (`slot.tuning_key_denied`). To persist a
 validated winner:
 
@@ -141,7 +141,7 @@ validated winner:
    it; `hal0 profile show <profile>` prints its flags and window. Note it down for rollback.
 2. **Put the winner on a profile.**
    - Custom profile used only by this slot: `hal0 profile edit <profile> --flags "<flags>"
-     [--ctx-size N] [--mtp auto|off]`. The dashboard's Profiles page does the same.
+     [--ctx-size N] [--speculation auto|off|ngram]`. The dashboard's Profiles page does the same.
    - Seed profile (`chat`, `agent`, `utility`, `coding`, ... — read-only) or one other slots
      share: duplicate it, then edit the copy:
      `hal0 profile create <new-name> --from <profile> --flags "<flags>" [--ctx-size N]`,

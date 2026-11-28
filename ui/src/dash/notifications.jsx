@@ -100,7 +100,8 @@ function fmtWaiting(enqueuedAt) {
 
 // ─── the shared hook ─────────────────────────────────────────────────────────
 export function useNotifications() {
-  const slots = useSlots().data ?? []
+  const slotsQ = useSlots()
+  const slots = slotsQ.data ?? []
   const approvals = useApprovalList()?.data?.approvals ?? []
   const errorSlots = slots.filter((s) => s.state === 'error' || s.container_status === 'crashed')
 
@@ -115,6 +116,9 @@ export function useNotifications() {
   const hasUpdate = !!(hal0Ch && hal0Ch.available && hal0Ch.available !== hal0Ch.current)
   const drift = useSlotDrift()
   const driftCount = drift.data?.count ?? 0
+  // #4124: "nothing needs you" is a finding, so it waits for the two sources that can say a
+  // slot is broken. Until both have answered (or failed) the bell says it is still checking.
+  const settled = !slotsQ.isLoading && !drift.isLoading
   const driftErrors = (drift.data?.slots ?? []).filter((s) => s.render_error).map((s) => `${s.slot}: ${s.render_error}`).join('; ')
   const restartDrifted = useRestartDriftedSlots()
 
@@ -290,6 +294,7 @@ export function useNotifications() {
     updatableModels, updateAllModels,
     devMsgs, clearJob, restartDrifted,
     count,
+    settled,
     // normalized actionable subset — the dashboard card renders these
     actionableItems,
   }

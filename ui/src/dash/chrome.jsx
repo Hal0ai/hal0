@@ -189,7 +189,7 @@ function NotificationBell() {
     hasUpdate, hal0Ch, driftCount, driftErrors,
     updatableModels, updateAllModels,
     devMsgs, clearJob, restartDrifted,
-    count,
+    count, settled,
   } = useNotifications();
 
   // Close on outside click / Escape while open.
@@ -377,12 +377,16 @@ function NotificationBell() {
         <div className="notif-pop" data-testid="notif-pop" role="dialog" aria-label="Notifications">
           <div className="notif-pop-h mono">
             <span>Notifications</span>
-            <span className="ct">{count > 0 ? count : "all clear"}</span>
+            <span className="ct">{count > 0 ? count : settled ? "all clear" : "checking…"}</span>
           </div>
           <div className="notif-pop-body">
-            {sections.length > 0 ? sections : (
+            {sections.length > 0 ? sections : settled ? (
               <div className="notif-empty mono" data-testid="notif-empty">
                 nothing needs your attention
+              </div>
+            ) : (
+              <div className="notif-empty mono" data-testid="notif-checking">
+                checking…
               </div>
             )}
           </div>
