@@ -342,6 +342,52 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 nofollow() {
     "${PY}" -I "${REPO_ROOT}/src/hal0/security/nofollow.py" "$@"
 }
+
+# doc-path-helpers: begin
+# Directories the installer creates at a place an answers document chose. The
+# document is data and the hal0 account may control part of the path, so root
+# creates only what is safe to create there.
+#
+# _hal0_root_uid: the uid that counts as root for the ancestor rule below. It is
+# 0. HAL0_ANSWERS_TEST_ROOT_UID is a test seam (tests cannot make root-owned
+# directories); the allow-list never carries it, so no document can set it.
+_hal0_root_uid() {
+    local uid="${HAL0_ANSWERS_TEST_ROOT_UID:-0}"
+    [[ "${uid}" =~ ^[0-9]+$ ]] || uid=0
+    printf '%s\n' "${uid}"
+}
+
+# hal0_doc_dir_parent_ok PATH: succeeds when root may create PATH (a value that
+# came from a document): PATH lies inside ${VAR_DIR}/models, or the deepest
+# EXISTING ancestor of PATH is a real directory reached with no symlink
+# component, is owned by root and has no group-write and no other-write bit
+# (so neither the hal0 group nor another user can rename or replace anything
+# under it, and a directory made there cannot hand them somebody else's place).
+hal0_doc_dir_parent_ok() {
+    local path="${1:-}" walk="" part deepest="/" info owner mode
+    local -a parts=()
+    [[ "${path}" == /* ]] || return 1
+    if [[ -n "${VAR_DIR:-}" ]] \
+        && [[ "${path}" == "${VAR_DIR}/models" || "${path}" == "${VAR_DIR}/models/"* ]]; then
+        return 0
+    fi
+    IFS=/ read -r -a parts <<<"${path}"
+    for part in "${parts[@]+"${parts[@]}"}"; do
+        [[ -n "${part}" ]] || continue
+        [[ "${part}" != "." && "${part}" != ".." ]] || return 1
+        walk="${walk}/${part}"
+        [[ ! -L "${walk}" ]] || return 1
+        [[ -e "${walk}" ]] || break
+        [[ -d "${walk}" ]] || return 1
+        deepest="${walk}"
+    done
+    info="$(stat -c '%u %a' -- "${deepest}" 2>/dev/null)" || return 1
+    owner="${info%% *}"
+    mode="${info##* }"
+    [[ "${owner}" == "$(_hal0_root_uid)" ]] || return 1
+    (( (8#${mode} & 8#022) == 0 )) || return 1
+}
+# doc-path-helpers: end
 if [[ "${DEV_MODE}" -eq 1 ]]; then
     # Dev: editable checkout, everything under one prefix. `hal0 update`
     # hard-refuses in this mode (the updater detects the editable install via
@@ -3750,6 +3796,9 @@ else
             # never follows a link at the last component (or below an untrusted
             # directory). A directory that already exists and came from a
             # document keeps its owner and mode; the document cannot re-own it.
+            # A directory a document names that does not exist is made only
+            # under the default store or a root-owned, non-writable parent
+            # (hal0_doc_dir_parent_ok); otherwise one warning says how to make it.
             _flm_from_doc=0
             for _answered in "${HAL0_ANSWERS_EXPORTED[@]+"${HAL0_ANSWERS_EXPORTED[@]}"}"; do
                 [[ "${_answered}" == "HAL0_FLM_MODELS_DIR" ]] && _flm_from_doc=1
@@ -3762,6 +3811,12 @@ else
                         || nofollow dir --owner hal0:hal0 --mode 2775 --expect any "${HAL0_FLM_MODELS_DIR}" \
                         || warn "could not set the owner and mode of ${HAL0_FLM_MODELS_DIR}; 'hal0 doctor perms' reports why"
                 fi
+            elif [[ "${_flm_from_doc}" -eq 1 ]] && ! hal0_doc_dir_parent_ok "${HAL0_FLM_MODELS_DIR}"; then
+                # A document chose this place. Root makes a directory here only
+                # under the default store or a root-owned, non-writable parent;
+                # otherwise the hal0 group would get write access to a folder in
+                # somebody else's tree (a user's systemd or autostart folder).
+                warn "FLM model directory ${HAL0_FLM_MODELS_DIR} was not created: its parent folder is not owned by root alone. Create it yourself: mkdir -p $(printf '%q' "${HAL0_FLM_MODELS_DIR}") && chown 1000:hal0 $(printf '%q' "${HAL0_FLM_MODELS_DIR}") && chmod 2775 $(printf '%q' "${HAL0_FLM_MODELS_DIR}")"
             else
                 # Missing parents first, top-down, root-owned. `nofollow dir`
                 # makes only the last component, and re-modes what it opens, so

@@ -7,6 +7,7 @@ the installer runs it: ``python -I answers_reader.py --origin ... DOC``.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -58,7 +59,7 @@ FULL = {
 
 
 def run(doc: object, tmp_path: Path, origin: str = "wizard", raw: bytes | None = None,
-        manifest: Path | None = None):
+        manifest: Path | None = None, env: dict[str, str] | None = None):
     path = tmp_path / "answers.json"
     path.write_bytes(raw if raw is not None else json.dumps(doc).encode())
     seam = ["--models-manifest", str(manifest)] if manifest else []
@@ -67,6 +68,7 @@ def run(doc: object, tmp_path: Path, origin: str = "wizard", raw: bytes | None =
         capture_output=True,
         text=True,
         check=False,
+        env={**os.environ, **env} if env else None,
     )
 
 
@@ -927,3 +929,80 @@ def test_slot_messages_never_echo_a_nested_value(tmp_path: Path, key: str) -> No
     proc = run({"version": 1, "slots": [{key: {"token": "hf_nested_secret"}}]}, tmp_path)
     assert proc.returncode == 2 and f"slots[0].{key}" in proc.stderr
     assert "hf_nested_secret" not in proc.stderr
+
+
+# ── model_store.flm_path: the installer must be able to create it safely ────
+#
+# Mirrors the installer's sink rule so a person learns before the install starts.
+# Tests cannot make root-owned directories: HAL0_ANSWERS_TEST_ROOT_UID names the
+# uid that counts as root (default 0; the reader reads it from the environment,
+# never from a document).
+
+_ME = {"HAL0_ANSWERS_TEST_ROOT_UID": str(os.getuid())}
+
+
+def _flm(tmp_path: Path, value: str, env: dict[str, str] | None = None):
+    return run({"version": 1, "model_store": {"flm_path": value}}, tmp_path, env=env)
+
+
+def test_flm_path_in_another_persons_directory_is_refused(tmp_path: Path) -> None:
+    home = tmp_path / "home" / "alice"
+    (home / ".config").mkdir(parents=True)
+    for rel in (".config/systemd/user", ".local/bin", ".config/autostart"):
+        value = str(home / rel)
+        proc = _flm(tmp_path, value, env={"HAL0_ANSWERS_TEST_ROOT_UID": "0"})
+        assert proc.returncode == 2 and proc.stdout == "", value
+        assert "model_store.flm_path" in proc.stderr and "owned by root" in proc.stderr
+
+
+def test_flm_path_reason_never_echoes_a_resolved_path(tmp_path: Path) -> None:
+    (tmp_path / "real").mkdir()
+    (tmp_path / "link").symlink_to(tmp_path / "real")
+    proc = _flm(tmp_path, str(tmp_path / "link" / "flm"), env=_ME)
+    assert proc.returncode == 2 and "a link" in proc.stderr
+    assert str(tmp_path / "real") not in proc.stderr
+
+
+def test_flm_path_under_a_group_or_sticky_ancestor_is_refused(tmp_path: Path) -> None:
+    for mode in (0o775, 0o1777, 0o757):
+        parent = tmp_path / f"p{mode:o}"
+        parent.mkdir()
+        parent.chmod(mode)
+        proc = _flm(tmp_path, str(parent / "flm"), env=_ME)
+        assert proc.returncode == 2, oct(mode)
+        assert "model_store.flm_path" in proc.stderr and "writable" in proc.stderr
+
+
+def test_flm_path_under_a_file_is_refused(tmp_path: Path) -> None:
+    (tmp_path / "afile").write_text("x")
+    proc = _flm(tmp_path, str(tmp_path / "afile" / "flm"), env=_ME)
+    assert proc.returncode == 2 and "model_store.flm_path" in proc.stderr
+
+
+def test_flm_path_under_a_root_owned_ancestor_is_accepted(tmp_path: Path) -> None:
+    proc = _flm(tmp_path, str(tmp_path / "a" / "b" / "flm"), env=_ME)
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout.splitlines()[-1].startswith("HAL0_FLM_MODELS_DIR=")
+
+
+def test_flm_path_in_the_default_store_is_accepted_without_the_ancestor_rule(tmp_path: Path) -> None:
+    proc = _flm(tmp_path, "/var/lib/hal0/models/flm", env={"HAL0_ANSWERS_TEST_ROOT_UID": "4242"})
+    assert proc.returncode == 0, proc.stderr
+
+
+def test_an_existing_flm_directory_is_accepted_whoever_owns_it(tmp_path: Path) -> None:
+    (tmp_path / "mine").mkdir()
+    proc = _flm(tmp_path, str(tmp_path / "mine"), env={"HAL0_ANSWERS_TEST_ROOT_UID": "0"})
+    assert proc.returncode == 0, proc.stderr
+
+
+def test_the_model_store_path_is_not_subject_to_the_ancestor_rule(tmp_path: Path) -> None:
+    value = str(tmp_path / "x" / "store")
+    proc = run({"version": 1, "model_store": {"path": value}}, tmp_path,
+               env={"HAL0_ANSWERS_TEST_ROOT_UID": "0"})
+    assert proc.returncode == 0, proc.stderr
+
+
+def test_a_nonsense_seam_value_means_root_is_uid_0(tmp_path: Path) -> None:
+    proc = _flm(tmp_path, str(tmp_path / "flm"), env={"HAL0_ANSWERS_TEST_ROOT_UID": "abc"})
+    assert proc.returncode == 2 if os.getuid() != 0 else proc.returncode == 0

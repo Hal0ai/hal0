@@ -346,7 +346,8 @@ def _bool(obj: dict[str, Any], key: str, where: str, problems: _Problems) -> boo
     return value
 
 
-def _abs_path(obj: dict[str, Any], key: str, where: str, problems: _Problems) -> str | None:
+def _abs_path(obj: dict[str, Any], key: str, where: str, problems: _Problems,
+              *, installer_creates: bool = False) -> str | None:
     value = obj.get(key)
     if value is None:
         return None
@@ -366,7 +367,7 @@ def _abs_path(obj: dict[str, Any], key: str, where: str, problems: _Problems) ->
     if ".." in value.split("/"):
         problems.error(f"{full}: must not contain a '..' segment")
         return None
-    if not _safe_location(value, full, problems):
+    if not _safe_location(value, full, problems, installer_creates=installer_creates):
         return None
     return value
 
@@ -379,8 +380,60 @@ def _normal(path: str) -> str:
     return "/" + "/".join(part for part in path.split("/") if part not in ("", "."))
 
 
-def _safe_location(value: str, full: str, problems: _Problems) -> bool:
-    """Refuse a model-store path that is too shallow, in a system tree, or a file."""
+def _root_uid() -> int:
+    """The uid that counts as root for the ancestor rule: 0.
+
+    HAL0_ANSWERS_TEST_ROOT_UID is a test seam (tests cannot make root-owned
+    directories). It is read from the environment only, never from a document;
+    anything that is not a plain number leaves it at 0.
+    """
+    raw = os.environ.get("HAL0_ANSWERS_TEST_ROOT_UID", "")
+    return int(raw) if raw.isascii() and raw.isdigit() and len(raw) <= 10 else 0
+
+
+def _unsafe_parent(norm: str) -> str | None:
+    """Why root may not create `norm` here, or None when it may.
+
+    Mirrors hal0_doc_dir_parent_ok in installer/install.sh (the authority): the
+    deepest EXISTING ancestor must be a real directory reached with no symlink
+    component, owned by root, with no group-write and no other-write bit. The
+    reason never names a resolved path.
+    """
+    walk = ""
+    deepest: os.stat_result | None = None
+    for part in [p for p in norm.split("/") if p]:
+        walk = f"{walk}/{part}"
+        try:
+            info = os.lstat(walk)
+        except FileNotFoundError:
+            break
+        except (OSError, ValueError):
+            return "its parent folder cannot be inspected"
+        if stat.S_ISLNK(info.st_mode):
+            return "a link is on the way to it"
+        if not stat.S_ISDIR(info.st_mode):
+            return "a parent of it is not a folder"
+        deepest = info
+    if deepest is None:
+        try:
+            deepest = os.lstat("/")
+        except OSError:
+            return "its parent folder cannot be inspected"
+    if deepest.st_uid != _root_uid():
+        return "its closest existing parent folder is not owned by root"
+    if deepest.st_mode & 0o022:
+        return "its closest existing parent folder is writable by a group or by others"
+    return None
+
+
+def _safe_location(value: str, full: str, problems: _Problems, *,
+                   installer_creates: bool = False) -> bool:
+    """Refuse a model-store path that is too shallow, in a system tree, or a file.
+
+    With `installer_creates`, a path that does not exist yet must also be
+    something the installer will create: inside hal0's own models directory, or
+    under a root-owned parent that no group or other user can write to.
+    """
     norm = _normal(value)
     try:
         real = _normal(os.path.realpath(norm))
@@ -406,6 +459,14 @@ def _safe_location(value: str, full: str, problems: _Problems) -> bool:
     if exists and not is_dir:
         problems.error(f"{full}: {_q(value)} exists and is not a directory")
         return False
+    if installer_creates and not exists and not _inside(norm, ALLOWED_UNDER_DENIED):
+        reason = _unsafe_parent(norm)
+        if reason is not None:
+            problems.error(
+                f"{full}: {_q(value)} will not be created: {reason}. Create the folder "
+                "yourself first, or choose a path under a folder that only root can change"
+            )
+            return False
     return True
 
 
@@ -689,7 +750,7 @@ def _build(doc: dict[str, Any], origin: str, problems: _Problems,
     path = _abs_path(store, "path", "model_store", problems)
     if path is not None:
         out["HAL0_MODELS_DIR"] = path
-    flm = _abs_path(store, "flm_path", "model_store", problems)
+    flm = _abs_path(store, "flm_path", "model_store", problems, installer_creates=True)
     if flm is not None:
         out["HAL0_FLM_MODELS_DIR"] = flm
 
