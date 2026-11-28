@@ -344,7 +344,7 @@ def test_terminal_tool_defaults_off_and_review_prints_it_when_on(
     review = next(r for r in view(on).rows if r.id == "terminal_tool")
     assert (review.label, review.detail) == (
         "Terminal tool",
-        "on: the assistant can run commands on this machine",
+        "ON: the assistant can run commands as a root-equivalent user",
     )
 
 

@@ -48,6 +48,8 @@ _CPU_CONSENT_LINE = "set HAL0_ALLOW_CPU_ONLY=1 to continue without a GPU"
 _NO_TOKEN_PLACE = "no place to keep the token; add it later"
 _FOLDER_EXISTS = "--chosen-folder-out must name a path that does not exist"
 _SHOWN_EXISTS = "--screens-shown-out must name a path that does not exist"
+_SHOWN_SAME = "--screens-shown-out must not name the same path as another output file"
+_SHOWN_TAKEN = "cannot be created, something is already there"
 _SHOWN_TEXT = "shown\n"
 _FOLDER_NOT_RECORDED = "could not record the chosen folder"
 _ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
@@ -266,6 +268,18 @@ def _record_folder(folder: str, path: Path) -> None:
         print(f"hal0 setup: {_FOLDER_NOT_RECORDED}", file=sys.stderr)
 
 
+def _write_marker(state: State, path: Path) -> None:
+    """Create the marker as a new file; it is never put in place of anything."""
+    copy = flow.chosen(state).get(flow.SAVE_COPY_KEY)
+    if os.path.lexists(path) or (copy is not None and _same(str(copy), path)):
+        raise DocumentError(f"{path}: {_SHOWN_TAKEN}")
+    write_private_text(_SHOWN_TEXT, path)
+
+
+def _same(a: str | Path, b: str | Path) -> bool:
+    return os.path.abspath(a) == os.path.abspath(b)
+
+
 def _finish(
     inp: Inputs,
     state: State,
@@ -283,7 +297,7 @@ def _finish(
     if shown_out is not None:
         # First of all the files: a failure here (a DocumentError, exit 2) leaves the
         # answers, token and folder files unwritten.
-        write_private_text(_SHOWN_TEXT, shown_out)
+        _write_marker(state, shown_out)
     write_document(doc, out)
     _refresh_copy(state, doc)
     token = flow.secret(state)
@@ -312,6 +326,11 @@ def _require_absent(path: Path | None, message: str) -> None:
 def _run(args: argparse.Namespace, environ: Mapping[str, str]) -> int:
     _require_absent(args.chosen_folder_out, _FOLDER_EXISTS)
     _require_absent(args.screens_shown_out, _SHOWN_EXISTS)
+    others = (args.out, args.secret_out, args.chosen_folder_out)
+    if args.screens_shown_out is not None and any(
+        o is not None and _same(o, args.screens_shown_out) for o in others
+    ):
+        raise _Usage(_SHOWN_SAME)
     if args.catalog is None or args.out is None:
         raise _Usage("--catalog and --out are required")
     inp = _read_inputs(args, environ)

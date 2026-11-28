@@ -691,7 +691,7 @@ def test_a_disk_whose_folder_the_installer_would_refuse_is_not_offered(
     assert not any("My Disk" in str(x) or "/var/lib/pool" in str(x) for x in values)
 
 
-_TERMINAL_ON = "on: the assistant can run commands on this machine"
+_TERMINAL_ON = "ON: the assistant can run commands as a root-equivalent user"
 _TERMINAL_FIXED = [Override("apps.hermes.terminal_tool", True, "HAL0_HERMES_TERMINAL")]
 
 
@@ -721,12 +721,42 @@ def test_a_terminal_tool_fixed_on_shows_on_in_the_recommended_review(
     assert row.detail == _TERMINAL_ON
 
 
-def test_a_terminal_tool_fixed_on_does_not_show_when_the_assistant_is_off(
+def test_a_true_terminal_tool_is_shown_even_when_the_assistant_is_off(
     catalog: Catalog, usable_facts: Facts
 ) -> None:
     over = [*_TERMINAL_FIXED, Override("apps.hermes.enabled", False, "--no-hermes")]
     s = run(start(catalog, usable_facts, over=over), "ENTER", "ENTER")
-    assert _terminal_rows(view(s).rows) == []
+    (row,) = _terminal_rows(view(s).rows)
+    assert row.detail == _TERMINAL_ON
+
+
+def test_a_given_document_with_a_true_terminal_tool_and_no_assistant_shows_the_row(
+    catalog: Catalog, usable_facts: Facts
+) -> None:
+    given: dict[str, object] = {"apps": {"hermes": {"enabled": False, "terminal_tool": True}}}
+    s = run(start(catalog, usable_facts, given=given), "ENTER", "ENTER")
+    (row,) = _terminal_rows(view(s).rows)
+    assert row.detail == _TERMINAL_ON
+
+
+def test_the_review_reads_the_assistant_from_the_document_not_from_what_can_run(
+    catalog: Catalog, no_python_facts: Facts
+) -> None:
+    needy = tuple(
+        replace(c, needs=("memory_python",)) if c.id == "hermes" else c for c in catalog.components
+    )
+    s = run(start(replace(catalog, components=needy), no_python_facts), "ENTER", "ENTER")
+    rows = view(s).rows
+    assert any("Hermes" in r.detail and r.id == "warning" for r in rows)  # it cannot run here
+    (row,) = _terminal_rows(rows)
+    assert row.detail == "off"
+
+
+def test_the_terminal_tool_row_comes_right_after_the_installing_row(
+    catalog: Catalog, usable_facts: Facts
+) -> None:
+    ids = [r.id for r in _review(catalog, usable_facts)]
+    assert ids.index("terminal_tool") == ids.index("install") + 1
 
 
 def test_the_recommended_review_fits_a_terminal_of_80_by_24(

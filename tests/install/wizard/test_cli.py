@@ -1971,7 +1971,7 @@ def test_a_path_that_cannot_be_checked_is_refused_like_an_existing_one(
 SHOWN_EXISTS = "hal0 setup: --screens-shown-out must name a path that does not exist"
 
 
-def test_confirmed_screens_write_the_marker_before_the_document(
+def test_a_confirmed_run_leaves_the_marker_with_its_content_and_mode(
     catalog_path: Path,
     tmp_path: Path,
     pty_pair: tuple[int, str],
@@ -2108,25 +2108,106 @@ def test_a_marker_that_cannot_be_written_stops_the_run_with_no_files(
     catalog_path: Path,
     tmp_path: Path,
     pty_pair: tuple[int, str],
+    saved_path: Path,
     spawn: Callable[..., subprocess.Popen[str]],
 ) -> None:
     master, slave = pty_pair
     out, secret, folder = tmp_path / "a.json", tmp_path / "token", tmp_path / "folder"
+    shown = tmp_path / "missing" / "shown"
     p = spawn(
-        "--catalog", catalog_path, "--out", out, "--tty", slave,
-        "--secret-out", secret, "--chosen-folder-out", folder,
-        "--screens-shown-out", tmp_path / "missing" / "shown",
+        "--catalog", catalog_path, "--saved", saved_path, "--out", out, "--tty", slave,
+        "--secret-out", secret, "--chosen-folder-out", folder, "--screens-shown-out", shown,
         capture=True,
     )  # fmt: skip
     wait_for_output(master)
-    os.write(master, ENTER * 3)
+    for key in [*PICK_PRESET, ENTER]:  # the model folder is changed on screen
+        os.write(master, key)
     code, _ = wait_exit(p, master)
     assert p.stdout is not None and p.stderr is not None
     stdout, stderr = p.stdout.read(), p.stderr.read()
     assert code == 2  # the code an unwritable --out gives too
     assert stdout == ""
     assert len(stderr.strip().splitlines()) == 1 and stderr.startswith("hal0 setup: ")
+    assert str(shown) in stderr
     assert not out.exists() and not secret.exists() and not folder.exists()
+
+
+def test_a_marker_path_below_a_regular_file_is_a_usage_error(
+    catalog_path: Path, tmp_path: Path
+) -> None:
+    blocker = tmp_path / "blocker"
+    blocker.write_text("x")
+    out = tmp_path / "a.json"
+    r = wizard(
+        "--catalog", catalog_path, "--out", out, "--headless",
+        "--screens-shown-out", blocker / "shown",
+    )  # fmt: skip
+    assert r.returncode == 2 and r.stderr == SHOWN_EXISTS + "\n" and r.stdout == ""
+    assert not out.exists() and blocker.read_text() == "x"
+
+
+SAME_PATH = "hal0 setup: --screens-shown-out must not name the same path as another output file"
+
+
+@pytest.mark.parametrize("other", ["--out", "--secret-out", "--chosen-folder-out"])
+def test_the_marker_path_may_not_be_another_output_path(
+    other: str, catalog_path: Path, tmp_path: Path
+) -> None:
+    same = tmp_path / "same"
+    odd = tmp_path / "sub" / ".." / "same"  # the same file, written differently
+    args: dict[str, Path] = {
+        "--out": tmp_path / "a.json",
+        "--secret-out": tmp_path / "token",
+        "--chosen-folder-out": tmp_path / "folder",
+    }
+    args[other] = same
+    flat = [x for pair in args.items() for x in pair]
+    r = wizard("--catalog", catalog_path, "--headless", *flat, "--screens-shown-out", odd)
+    assert r.returncode == 2 and r.stderr == SAME_PATH + "\n" and r.stdout == ""
+    assert list(tmp_path.glob("**/*")) == []
+
+
+def test_a_saved_copy_named_like_the_marker_never_leaves_a_forged_marker(
+    catalog_path: Path,
+    tmp_path: Path,
+    pty_pair: tuple[int, str],
+    spawn: Callable[..., subprocess.Popen[str]],
+) -> None:
+    master, slave = pty_pair
+    out, shown = tmp_path / "a.json", tmp_path / "shown"
+    p = spawn(
+        "--catalog", catalog_path, "--out", out, "--tty", slave,
+        "--screens-shown-out", shown, capture=True,
+    )  # fmt: skip
+    wait_for_output(master)
+    typed = [c.encode() for c in str(shown)]
+    for key in [ENTER, ENTER, b"s", *typed, ENTER, ENTER]:
+        os.write(master, key)
+    code, _ = wait_exit(p, master)
+    assert p.stderr is not None
+    stderr = p.stderr.read()
+    assert code == 2 and not out.exists()
+    assert len(stderr.strip().splitlines()) == 1 and str(shown) in stderr
+    assert shown.read_bytes() != b"shown\n"  # the copy is there; no marker replaced it
+
+
+def test_a_copy_that_could_not_be_written_cannot_take_the_markers_place(
+    catalog: Catalog, usable_facts: Facts, tmp_path: Path
+) -> None:
+    from dataclasses import replace
+
+    from hal0.install.wizard import flow
+
+    state = flow.start(catalog, usable_facts)
+    for _ in range(3):
+        state = flow.press(state, "ENTER")
+    shown = tmp_path / "shown"
+    state = replace(state, answers={**state.answers, flow.SAVE_COPY_KEY: str(shown)})
+    inp = Inputs(catalog, usable_facts, None, None, (), "v")
+    out = tmp_path / "a.json"
+    with pytest.raises(DocumentError):
+        cli._finish(inp, state, out, None, None, shown)
+    assert not shown.exists() and not out.exists()
 
 
 def test_the_help_lists_the_marker_option() -> None:
