@@ -41,7 +41,9 @@ if [[ "$cmd" == "{ pct config "* ]]; then
   cmd="${cmd#*; \} && }"
   plain="${cmd//\\/}"
 fi
-[[ " $* " == *" -n "* || " $* " == *" -tt "* ]] || cat > "$FAKE_STATE/stdin.dump"
+if [[ " $* " != *" -n "* && " $* " != *" -tt "* ]]; then
+  if [[ "$cmd" == *"hal0-src.tgz"* ]]; then cat > "$FAKE_STATE/tree.tgz"; else cat > "$FAKE_STATE/stdin.dump"; fi
+fi
 case "$cmd" in
   "free -g"*)
     # FAKE_MEM_AFTER: what every read after the first one shows (the memory
@@ -532,11 +534,56 @@ def test_cosign_not_skipped(host, source):
         assert f"HAL0_CHANNEL={source} bash -s --" in plan
 
 
-def test_tree_source_packs_and_skips_verify_only_there(host, tmp_path):
+def _git_tree(tmp_path: Path) -> Path:
+    """A git work tree: one tracked file, one untracked file that is not
+    ignored, files that .gitignore hides, and an earlier report."""
     tree = tmp_path / "my tree"
     (tree / "installer").mkdir(parents=True)
     (tree / "installer" / "install.sh").write_text("echo hi\n")
-    (tree / ".git").mkdir()
+    (tree / ".gitignore").write_text(".env\nlocal-notes/\n")
+    (tree / ".env").write_text("SECRET=1\n")
+    (tree / "local-notes").mkdir()
+    (tree / "local-notes" / "plan.md").write_text("private\n")
+    (tree / "untracked.txt").write_text("new work\n")
+    reports = tree / "tests" / "harness" / "reports" / "install-matrix" / "run1"
+    reports.mkdir(parents=True)
+    (reports / "transcript.txt").write_text("a secret printed to a terminal\n")
+    (tree / "tests" / "harness" / "keep.sh").write_text("echo keep\n")
+    for args in (["init", "-q"], ["add", "installer/install.sh", ".gitignore"]):
+        subprocess.run(["git", "-C", str(tree), *args], check=True, timeout=30)
+    return tree
+
+
+def test_tree_source_leaves_out_ignored_files_and_earlier_reports(host, tmp_path):
+    import tarfile
+
+    tree = _git_tree(tmp_path)
+    r = host.run("u2404-cpu", "--vmid", "172", "--out", str(host.out), "--source", f"tree:{tree}")
+    assert r.returncode == 0, r.stderr
+    with tarfile.open(host.state / "tree.tgz") as tf:
+        names = {n.removeprefix("./") for n in tf.getnames()}
+    assert "installer/install.sh" in names and ".gitignore" in names
+    assert "untracked.txt" in names, "untracked files that are not ignored still go in"
+    assert "tests/harness/keep.sh" in names
+    assert ".env" not in names
+    assert not [n for n in names if n.startswith("local-notes")]
+    assert not [n for n in names if n.startswith("tests/harness/reports")]
+    assert not [n for n in names if n.startswith(".git/")]
+
+
+def test_tree_source_refuses_a_directory_that_is_not_a_git_work_tree(host, tmp_path):
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    (plain / "installer").mkdir()
+    for extra in ([], ["--dry-run"]):
+        r = host.run("u2404-cpu", "--out", str(host.out), "--source", f"tree:{plain}", *extra)
+        assert r.returncode == 2
+        assert "not a git work tree" in r.stderr
+    assert host.calls() == [], "refused before any host call"
+
+
+def test_tree_source_packs_and_skips_verify_only_there(host, tmp_path):
+    tree = _git_tree(tmp_path)
     r = host.dry("u2404-cpu", "--source", f"tree:{tree}")
     assert r.returncode == 0, r.stderr
     plan = "\n".join(plan_lines(r))

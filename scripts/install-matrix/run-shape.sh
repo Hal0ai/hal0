@@ -82,6 +82,8 @@ case "$SOURCE" in
   tree:*)
     TREE_DIR="${SOURCE#tree:}"
     [[ -n "$TREE_DIR" && -d "$TREE_DIR" ]] || die2 "--source tree: not a directory: ${TREE_DIR}"
+    [[ "$(git -C "$TREE_DIR" rev-parse --is-inside-work-tree 2>/dev/null)" == "true" ]] \
+      || die2 "--source tree: not a git work tree: ${TREE_DIR}"
     ;;
   *) die2 "--source must be stable, preview, nightly or tree:<dir> (got ${SOURCE})" ;;
 esac
@@ -509,8 +511,12 @@ if [[ "$SHAPE_HARDWARE" == "gpu" || "$SHAPE_HARDWARE" == "gpu+npu" ]]; then
 fi
 if [[ -n "$TREE_DIR" ]]; then
   TREE_TAR="$(mktemp)"
-  tar -C "$TREE_DIR" --exclude=.git --exclude=.venv --exclude=node_modules --exclude=ui/dist \
-    -czf "$TREE_TAR" . || die2 "could not pack ${TREE_DIR}"
+  # Only what git lists (tracked files, plus untracked ones that .gitignore does
+  # not hide): .env files, local notes and earlier reports never go into the guest.
+  git -C "$TREE_DIR" ls-files -z --cached --others --exclude-standard \
+    | tar -C "$TREE_DIR" --exclude=tests/harness/reports \
+      --exclude=.git --exclude=.venv --exclude=node_modules --exclude=ui/dist \
+      --ignore-failed-read --null -czf "$TREE_TAR" -T - || die2 "could not pack ${TREE_DIR}"
 fi
 
 # ── step 5: create, start, wait for the network ──────────────────────────────
