@@ -80,7 +80,9 @@ def _run(script_body: str, bin_dir: Path, extra_env: dict[str, str] | None = Non
         "set -euo pipefail\n" + _STUBS + f"source {shlex.quote(str(_PREFLIGHT))}\n" + script_body
     )
     env = {"PATH": str(bin_dir), **(extra_env or {})}
-    return subprocess.run(["bash", "-c", script], env=env, capture_output=True, text=True)
+    return subprocess.run(
+        ["bash", "-c", script], env=env, capture_output=True, text=True, timeout=60
+    )
 
 
 class TestPreflightPythonFloor:
@@ -155,6 +157,105 @@ class TestResolveMainPython:
         )
         proc = _run(script, d, extra_env={"HAL0_PY_AUTOINSTALL": "1"})
         assert proc.returncode != 0
+
+
+def _stub_apt_get_installing_312(bin_dir: Path) -> None:
+    """A stub ``apt-get`` that "installs" python3.12 by copying a staged fake
+    into ``bin_dir``. It touches nothing outside the test's temp dir (no real
+    apt, no network)."""
+    staged = bin_dir.parent / "staged"
+    staged.mkdir()
+    _write_fake_python(staged / "python3.12", "3.12")
+    cp = shutil.which("cp")
+    assert cp is not None
+    os.symlink(cp, bin_dir / "cp")
+    stub = bin_dir / "apt-get"
+    stub.write_text(
+        "#!/usr/bin/env bash\n"
+        '[[ " $* " == *" install "* ]] && '
+        f"cp {shlex.quote(str(staged / 'python3.12'))} "
+        f"{shlex.quote(str(bin_dir / 'python3.12'))}\n"
+        "exit 0\n",
+        encoding="utf-8",
+    )
+    stub.chmod(0o755)
+
+
+class TestResolveMainPythonStdout:
+    """resolve_main_python's stdout is captured by install.sh as the interpreter
+    name, so it must be exactly that and nothing else (#4005)."""
+
+    _AUTOINSTALL = (
+        "pkg_mgr() { echo apt-get; }\ndistro_family() { echo debian; }\nresolve_main_python\n"
+    )
+
+    def test_autoinstall_branch_prints_one_line_and_progress_goes_to_stderr(
+        self, tmp_path: Path
+    ) -> None:
+        d = tmp_path / "bin"
+        d.mkdir()
+        _write_fake_python(d / "python3", "3.11")
+        _stub_apt_get_installing_312(d)
+        proc = _run(self._AUTOINSTALL, d, extra_env={"HAL0_PY_AUTOINSTALL": "1"})
+        assert proc.returncode == 0, proc.stderr
+        assert proc.stdout == "python3.12\n"
+        assert "attempting to install python3.12" in proc.stderr
+        assert "installed python3.12 for the main hal0 venv" in proc.stderr
+
+    def test_already_on_path_branch_prints_one_line(self, tmp_path: Path) -> None:
+        d = tmp_path / "bin"
+        d.mkdir()
+        _write_fake_python(d / "python3", "3.11")
+        _write_fake_python(d / "python3.13", "3.13")
+        proc = _run(self._AUTOINSTALL, d, extra_env={"HAL0_PY_AUTOINSTALL": "1"})
+        assert proc.returncode == 0, proc.stderr
+        assert proc.stdout == "python3.13\n"
+
+
+class TestInstallShCallSiteGuard:
+    """The block in install.sh that takes resolve_main_python's output must stop
+    on a value that is not one line naming an executable."""
+
+    @staticmethod
+    def _guard_block() -> str:
+        text = _INSTALL_SH.read_text(encoding="utf-8")
+        m = re.search(r"if ! preflight_python; then.*?\nfi\n", text, re.DOTALL)
+        assert m is not None, "preflight_python guard block not found in install.sh"
+        return m.group(0)
+
+    def _run_guard(self, tmp_path: Path, printed: str, bin_files: tuple[str, ...]):
+        d = tmp_path / "bin"
+        d.mkdir()
+        _write_fake_python(d / "python3", "3.11")
+        for name in bin_files:
+            _write_fake_python(d / name, "3.12")
+        script = (
+            "IFS=$'\\n\\t'\n"
+            "preflight_python() { return 1; }\n"
+            "PY=python3\n"
+            f"resolve_main_python() {{ printf '%b' {shlex.quote(printed)}; }}\n"
+            + self._guard_block()
+            + 'echo "REACHED PY=${PY}"\n'
+        )
+        return _run(script, d)
+
+    def test_multi_line_value_stops_the_install(self, tmp_path: Path) -> None:
+        proc = self._run_guard(
+            tmp_path, "OK  attempting\\nOK  installed\\npython3.12\\n", ("python3.12",)
+        )
+        assert proc.returncode != 0
+        assert "REACHED" not in proc.stdout
+        assert "below hal0's floor" in proc.stderr
+
+    def test_name_that_is_not_an_executable_stops_the_install(self, tmp_path: Path) -> None:
+        proc = self._run_guard(tmp_path, "python3.99\\n", ())
+        assert proc.returncode != 0
+        assert "REACHED" not in proc.stdout
+
+    def test_one_line_executable_name_is_used(self, tmp_path: Path) -> None:
+        proc = self._run_guard(tmp_path, "python3.12\\n", ("python3.12",))
+        assert proc.returncode == 0, proc.stderr
+        assert "REACHED PY=python3.12" in proc.stdout
 
 
 class TestInstallShWiring:

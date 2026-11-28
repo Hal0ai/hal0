@@ -593,7 +593,8 @@ if ! preflight_python; then
     if ! command -v "${PY}" >/dev/null 2>&1; then
         die "python interpreter '${PY}' not found — install with: $(python_venv_hint)"
     fi
-    if resolved_py="$(HAL0_PY_AUTOINSTALL=1 resolve_main_python)" && [[ -n "${resolved_py}" ]]; then
+    if resolved_py="$(HAL0_PY_AUTOINSTALL=1 resolve_main_python)" && [[ -n "${resolved_py}" && "${resolved_py}" != *$'\n'* ]] \
+        && command -v "${resolved_py}" >/dev/null 2>&1; then
         info "using ${resolved_py} for the main hal0 venv (default ${PY} is below hal0's 3.12 floor)"
         PY="${resolved_py}"
         export HAL0_PYTHON="${PY}"
