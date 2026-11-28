@@ -202,12 +202,13 @@ def _refresh_copy(state: State, doc: Document) -> None:
 
 
 def _chosen_folder(inp: Inputs, state: State, doc: Document) -> str | None:
-    """The model folder the person chose at the terminal in this run, else None.
+    """The model folder the person changed at the terminal in this run, else None.
 
-    It enters the chosen answers only through the folder screen or the storage
-    screen, and never when a flag or variable fixes it. It must also be what the
-    document says. Anything doubtful is None, because this grants something to the
-    installer.
+    It attests to live input only: the folder must be in the chosen answers (never
+    one a flag or variable fixes), equal what the document says, and differ from
+    what the screens were pre-filled with. Pressing Enter on the pre-filled row
+    earns nothing, whichever layer it came from. Anything doubtful is None, because
+    this grants something to the installer.
     """
     question = inp.catalog.questions.get("model_store")
     if question is None:
@@ -216,9 +217,9 @@ def _chosen_folder(inp: Inputs, state: State, doc: Document) -> str | None:
     picked = flow.chosen(state).get(key)
     if not isinstance(picked, str) or not picked or picked != get(doc, key):
         return None
-    if any(o.key == key for o in inp.over) or any(ord(c) < 32 or ord(c) == 127 for c in picked):
+    if any(ord(c) < 32 or ord(c) == 127 for c in picked):
         return None
-    return picked
+    return None if picked == get(_document(inp, {}), key) else picked
 
 
 def _record_folder(folder: str, path: Path) -> None:
@@ -259,8 +260,10 @@ def _run(args: argparse.Namespace, environ: Mapping[str, str]) -> int:
     if args.chosen_folder_out is not None:
         try:
             os.lstat(args.chosen_folder_out)
-        except OSError:
+        except FileNotFoundError:
             pass
+        except OSError:
+            raise _Usage(_FOLDER_EXISTS) from None
         else:
             raise _Usage(_FOLDER_EXISTS)
     if args.catalog is None or args.out is None:

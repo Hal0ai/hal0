@@ -823,3 +823,13 @@ def test_an_npu_folder_outside_the_store_still_shows_as_fixed(
     assert row.state == "fixed"
     assert row.note == "set by HAL0_FLM_MODELS_DIR"
     assert "/elsewhere/flm" in row.detail
+
+
+@pytest.mark.parametrize("fixer", ["--models-dir", "HAL0_MODELS_DIR"])
+def test_a_storage_folder_fixed_by_a_flag_or_variable_never_enters_chosen(
+    catalog: Catalog, usable_facts: Facts, fixer: str
+) -> None:
+    over = [Override("model_store.path", "/mnt/m", fixer)]
+    s = run(custom(catalog, usable_facts, over=over), "ENTER", "ENTER", "SPACE", *"/srv/m", "ENTER")
+    s = run(s, "ENTER", "ENTER", "ENTER", "ENTER")
+    assert catalog.questions["model_store"].answer_key not in chosen(s)

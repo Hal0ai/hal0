@@ -1256,6 +1256,8 @@ def test_the_unchecked_wording_lives_in_one_place() -> None:
 
 NOT_THERE = "hal0 setup: --chosen-folder-out must name a path that does not exist"
 CUSTOM_KEYS = [DOWN, DOWN, ENTER]
+# With saved answers naming another folder, the second row is the preset's store.
+PICK_PRESET = [ENTER, DOWN, ENTER]
 
 
 def _screens_run(
@@ -1274,7 +1276,7 @@ def _screens_run(
     return wait_exit(p, master)[0]
 
 
-def test_three_enters_record_the_short_path_folder(
+def test_three_enters_on_the_short_path_record_nothing(
     catalog_path: Path,
     tmp_path: Path,
     pty_pair: tuple[int, str],
@@ -1287,6 +1289,30 @@ def test_three_enters_record_the_short_path_folder(
         [ENTER * 3],
         "--catalog",
         catalog_path,
+        "--out",
+        out,
+        "--chosen-folder-out",
+        mark,
+    )
+    assert code == 0 and out.exists() and not mark.exists()
+
+
+def test_picking_another_listed_folder_records_it(
+    catalog_path: Path,
+    tmp_path: Path,
+    pty_pair: tuple[int, str],
+    saved_path: Path,
+    spawn: Callable[..., subprocess.Popen[str]],
+) -> None:
+    out, mark = tmp_path / "a.json", tmp_path / "folder"
+    code = _screens_run(
+        spawn,
+        pty_pair,
+        [*PICK_PRESET, ENTER],
+        "--catalog",
+        catalog_path,
+        "--saved",
+        saved_path,
         "--out",
         out,
         "--chosen-folder-out",
@@ -1379,14 +1405,14 @@ def test_customize_with_the_folder_changed_records_the_new_folder(
     assert mark.read_text() == "/srv/m\n"
 
 
-def test_a_fresh_install_pressing_enter_on_a_prefilled_folder_records_it(
+def test_a_reinstall_pressing_enter_on_a_prefilled_folder_records_nothing(
     catalog_path: Path,
     tmp_path: Path,
     pty_pair: tuple[int, str],
     saved_path: Path,
     spawn: Callable[..., subprocess.Popen[str]],
 ) -> None:
-    mark = tmp_path / "folder"
+    out, mark = tmp_path / "a.json", tmp_path / "folder"
     code = _screens_run(
         spawn,
         pty_pair,
@@ -1396,11 +1422,12 @@ def test_a_fresh_install_pressing_enter_on_a_prefilled_folder_records_it(
         "--saved",
         saved_path,
         "--out",
-        tmp_path / "a.json",
+        out,
         "--chosen-folder-out",
         mark,
     )
-    assert code == 0 and mark.read_text() == f"{tmp_path}\n"
+    assert code == 0 and out.exists() and not mark.exists()
+    assert json.loads(out.read_text())["model_store"]["path"] == str(tmp_path)
 
 
 def test_a_run_without_screens_records_nothing(
@@ -1447,6 +1474,92 @@ def test_quit_interrupt_and_stop_record_nothing(
     )  # fmt: skip
     assert code == {"quit": 10, "interrupt": 130, "stop": 11}[how]
     assert not out.exists() and not mark.exists()
+
+
+@pytest.mark.parametrize("how", ["quit", "interrupt"])
+def test_quit_and_interrupt_on_the_review_screen_record_nothing(
+    how: str,
+    catalog_path: Path,
+    tmp_path: Path,
+    pty_pair: tuple[int, str],
+    saved_path: Path,
+    spawn: Callable[..., subprocess.Popen[str]],
+) -> None:
+    out, mark = tmp_path / "a.json", tmp_path / "folder"
+    code = _screens_run(
+        spawn,
+        pty_pair,
+        [*PICK_PRESET, b"q" if how == "quit" else b"\x03"],
+        "--catalog",
+        catalog_path,
+        "--saved",
+        saved_path,
+        "--out",
+        out,
+        "--chosen-folder-out",
+        mark,
+    )
+    assert code == {"quit": 10, "interrupt": 130}[how]
+    assert not out.exists() and not mark.exists()
+
+
+def test_the_signal_never_replaces_the_document(
+    catalog_path: Path,
+    tmp_path: Path,
+    pty_pair: tuple[int, str],
+    saved_path: Path,
+    spawn: Callable[..., subprocess.Popen[str]],
+) -> None:
+    same = tmp_path / "shared"
+    code = _screens_run(
+        spawn,
+        pty_pair,
+        [*PICK_PRESET, ENTER],
+        "--catalog",
+        catalog_path,
+        "--saved",
+        saved_path,
+        "--out",
+        same,
+        "--chosen-folder-out",
+        same,
+    )
+    assert code == 0
+    assert json.loads(same.read_text())["model_store"]["path"] == "/var/lib/hal0/models"
+
+
+def test_the_signal_never_replaces_the_secret_file(
+    catalog_path: Path,
+    ladder_models_path: Path,
+    big_pool_facts_path: Path,
+    tmp_path: Path,
+    pty_pair: tuple[int, str],
+    spawn: Callable[..., subprocess.Popen[str]],
+) -> None:
+    out, same = tmp_path / "a.json", tmp_path / "shared"
+    typed = [c.encode() for c in "/srv/m"]
+    keys = [DOWN, DOWN, ENTER, ENTER, DOWN, DOWN, ENTER, b"hf_SECRET", ENTER]
+    keys += [b" ", *typed, ENTER, ENTER * 4]
+    code = _screens_run(
+        spawn,
+        pty_pair,
+        keys,
+        "--catalog",
+        catalog_path,
+        "--models",
+        ladder_models_path,
+        "--facts",
+        big_pool_facts_path,
+        "--out",
+        out,
+        "--secret-out",
+        same,
+        "--chosen-folder-out",
+        same,
+    )
+    assert code == 0
+    assert json.loads(out.read_text())["model_store"]["path"] == "/srv/m"
+    assert same.read_text() == "HF_TOKEN=hf_SECRET\n"
 
 
 @pytest.mark.parametrize("fixer", ["flag", "variable"])
@@ -1507,15 +1620,18 @@ def test_the_folder_is_nowhere_in_the_document_but_its_own_key(
     catalog_path: Path,
     tmp_path: Path,
     pty_pair: tuple[int, str],
+    saved_path: Path,
     spawn: Callable[..., subprocess.Popen[str]],
 ) -> None:
     out, mark = tmp_path / "a.json", tmp_path / "folder"
     code = _screens_run(
         spawn,
         pty_pair,
-        [ENTER * 3],
+        [*PICK_PRESET, ENTER],
         "--catalog",
         catalog_path,
+        "--saved",
+        saved_path,
         "--out",
         out,
         "--chosen-folder-out",
@@ -1540,6 +1656,7 @@ def test_a_failed_signal_write_still_exits_0_with_the_document_and_no_partial_fi
     catalog_path: Path,
     tmp_path: Path,
     pty_pair: tuple[int, str],
+    saved_path: Path,
     spawn: Callable[..., subprocess.Popen[str]],
 ) -> None:
     out, mark = tmp_path / "a.json", tmp_path / "missing-parent" / "folder"
@@ -1547,6 +1664,8 @@ def test_a_failed_signal_write_still_exits_0_with_the_document_and_no_partial_fi
     p = spawn(
         "--catalog",
         catalog_path,
+        "--saved",
+        saved_path,
         "--out",
         out,
         "--tty",
@@ -1556,7 +1675,8 @@ def test_a_failed_signal_write_still_exits_0_with_the_document_and_no_partial_fi
         capture=True,
     )
     wait_for_output(master)
-    os.write(master, ENTER * 3)
+    for key in [*PICK_PRESET, ENTER]:
+        os.write(master, key)
     assert wait_exit(p, master)[0] == 0
     assert (
         p.stderr is not None
@@ -1630,3 +1750,16 @@ def test_a_given_file_still_stops_a_box_that_cannot_run(
         tty=pty_pair[1],
     )  # fmt: skip
     assert r.returncode == 11 and not out.exists() and read_all(pty_pair[0]) == b""
+
+
+def test_a_path_that_cannot_be_checked_is_refused_like_an_existing_one(
+    catalog_path: Path, tmp_path: Path
+) -> None:
+    blocker = tmp_path / "blocker"
+    blocker.write_text("x")
+    out = tmp_path / "a.json"
+    r = wizard(
+        "--catalog", catalog_path, "--out", out, "--headless",
+        "--chosen-folder-out", blocker / "folder",
+    )  # fmt: skip
+    assert r.returncode == 2 and r.stderr == NOT_THERE + "\n" and not out.exists()
