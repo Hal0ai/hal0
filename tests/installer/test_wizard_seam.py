@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import json
 import os
-import stat
 import subprocess
 import sys
 from pathlib import Path
@@ -130,13 +129,14 @@ def _collect(
     args: tuple[str, ...] = (),
     reconfigure: bool = False,
     after: str = "",
+    root: Path = ROOT,
 ) -> subprocess.CompletedProcess[str]:
     """Run hal0_collect_answers with the helpers of install.sh; print the state after it."""
     script = f"""
 set -euo pipefail
 IFS=$'\\n\\t'
 PY="{sys.executable}"
-REPO_ROOT="{ROOT}"
+REPO_ROOT="{root}"
 DEV_MODE=1
 PREFIX="{tmp_path}/prefix"
 VAR_DIR="{tmp_path}/var"
@@ -188,16 +188,59 @@ DOC = json.dumps({"version": 1, "install": {"type": "recommended"}})
 # ── wizard absent: nothing changes ──────────────────────────────────────────
 
 
-def test_not_run_when_wizard_absent(tmp_path: Path, stub: dict[str, str]) -> None:
-    env = {"STUB_LOG": stub["STUB_LOG"]}
-    proc = _collect(tmp_path, env)
+def _absent(tmp_path: Path) -> dict[str, str]:
+    """Make the wizard absent whatever the tree holds: both seams name nothing."""
+    nowhere = tmp_path / "no-wizard"
+    return {
+        "HAL0_WIZARD_ENTRY": str(nowhere / "__main__.py"),
+        "HAL0_WIZARD_CATALOG": str(nowhere / "setup-catalog.json"),
+    }
+
+
+def _tree_with_wizard(tmp_path: Path) -> Path:
+    """A release tree that holds the wizard, as the real one does once it is merged."""
+    tree = tmp_path / "tree"
+    entry = tree / "src" / "hal0" / "install" / "wizard" / "__main__.py"
+    entry.parent.mkdir(parents=True)
+    entry.write_text(STUB, encoding="utf-8")
+    catalog = tree / "installer" / "manifests" / "setup-catalog.json"
+    catalog.parent.mkdir(parents=True)
+    catalog.write_text("{}", encoding="utf-8")
+    return tree
+
+
+@pytest.fixture(params=["real-tree", "tree-with-wizard"])
+def root(request: pytest.FixtureRequest, tmp_path: Path) -> Path:
+    """What the installer code sees as its release tree.
+
+    Every test that means "the wizard is absent" runs against both: the real
+    repository (whatever it holds today) and a tree that holds the wizard's two
+    files. Such a test passes on both only if it makes the wizard absent itself,
+    through the seams (`_absent`), and not through the tree's contents.
+    """
+    return ROOT if request.param == "real-tree" else _tree_with_wizard(tmp_path)
+
+
+def test_the_tree_with_the_wizard_is_found_without_the_seams(tmp_path: Path) -> None:
+    # control for the `root` fixture: without `_absent` the second tree IS the wizard
+    tree = _tree_with_wizard(tmp_path)
+    proc = _collect(tmp_path, {"STUB_LOG": str(tmp_path / "stub.log")}, root=tree)
+    assert len(_records(tmp_path)) == 1, proc.stdout + proc.stderr
+    proc = _flag_loop(tmp_path, ["--no-tls"], {}, root=tree)
+    assert proc.returncode == 1, proc.stderr
+    assert "ERR: unknown flag: --no-tls" in proc.stderr
+
+
+def test_not_run_when_wizard_absent(tmp_path: Path, stub: dict[str, str], root: Path) -> None:
+    env = {"STUB_LOG": stub["STUB_LOG"], **_absent(tmp_path)}
+    proc = _collect(tmp_path, env, root=root)
     assert proc.returncode == 0, proc.stderr
     assert _state(proc)["RC"] == "0" and _state(proc)["APPLIED"] == "0"
     assert _records(tmp_path) == []
     # a given document takes today's path: origin file, no wizard
     doc = tmp_path / "given.json"
     doc.write_text(json.dumps({"version": 1, "memory": {"enabled": False}}), encoding="utf-8")
-    proc = _collect(tmp_path, {**env, "HAL0_ANSWERS_FILE": str(doc)})
+    proc = _collect(tmp_path, {**env, "HAL0_ANSWERS_FILE": str(doc)}, root=root)
     state = _state(proc)
     assert state["RC"] == "0" and state["APPLIED"] == "1" and state["RAN"] == "0"
     assert "HAL0_SKIP_HINDSIGHT" in proc.stdout
@@ -453,11 +496,13 @@ def test_a_good_saved_copy_is_handed_over_as_a_copy(tmp_path: Path, stub: dict[s
 # ── unknown flags ───────────────────────────────────────────────────────────
 
 
-def _flag_loop(tmp_path: Path, args: list[str], env: dict[str, str]) -> subprocess.CompletedProcess:
+def _flag_loop(
+    tmp_path: Path, args: list[str], env: dict[str, str], root: Path = ROOT
+) -> subprocess.CompletedProcess:
     block = _slice('SUMMARY_JSON_PATH=""', "# Banner first")
     script = f"""
 set -euo pipefail
-REPO_ROOT="{ROOT}"
+REPO_ROOT="{root}"
 source "{ANSWERS_SH}"
 info() {{ printf 'INFO: %s\\n' "$*"; }}
 warn() {{ printf 'WARN: %s\\n' "$*" >&2; }}
@@ -522,8 +567,8 @@ def test_every_accepted_flag_passes_when_wizard_present(
         assert proc.returncode == 0 and "--reconfigure" in proc.stdout
 
 
-def test_unknown_flag_only_warns_when_wizard_absent(tmp_path: Path) -> None:
-    proc = _flag_loop(tmp_path, ["--no-tls", "--no-owui"], {})
+def test_unknown_flag_only_warns_when_wizard_absent(tmp_path: Path, root: Path) -> None:
+    proc = _flag_loop(tmp_path, ["--no-tls", "--no-owui"], _absent(tmp_path), root=root)
     assert proc.returncode == 0, proc.stderr
     assert "WARN: unknown flag: --no-tls (ignored)" in proc.stderr
     assert "LOOP DONE reconfigure=0 args=2" in proc.stdout
@@ -594,9 +639,11 @@ def test_a_document_the_reader_refuses_stops(tmp_path: Path, stub: dict[str, str
 # ── exit codes, through the seam in install.sh ──────────────────────────────
 
 
-def _seam_run(tmp_path: Path, env: dict[str, str]) -> subprocess.CompletedProcess[str]:
+def _seam_run(
+    tmp_path: Path, env: dict[str, str], root: Path = ROOT
+) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
-        ["bash", "-c", _seam_script(tmp_path)],
+        ["bash", "-c", _seam_script(tmp_path, root=root)],
         capture_output=True,
         text=True,
         timeout=60,
@@ -606,13 +653,13 @@ def _seam_run(tmp_path: Path, env: dict[str, str]) -> subprocess.CompletedProces
     )
 
 
-def _seam_script(tmp_path: Path, pre: str = "") -> str:
+def _seam_script(tmp_path: Path, pre: str = "", root: Path = ROOT) -> str:
     seam = _slice("# answers-seam: begin", "# answers-seam: end")
     return f"""
 set -euo pipefail
 IFS=$'\\n\\t'
 PY="{sys.executable}"
-REPO_ROOT="{ROOT}"
+REPO_ROOT="{root}"
 DEV_MODE=1
 PREFIX="{tmp_path}/prefix"
 VAR_DIR="{tmp_path}/var"
@@ -736,10 +783,12 @@ def test_the_installer_sets_no_interrupt_trap_of_its_own() -> None:
         assert not (stripped.startswith("trap ") and stripped.endswith(" INT")), line
 
 
-def test_without_the_wizard_a_bad_document_still_goes_through_the_err_trap(tmp_path: Path) -> None:
+def test_without_the_wizard_a_bad_document_still_goes_through_the_err_trap(
+    tmp_path: Path, root: Path
+) -> None:
     bad = tmp_path / "bad.json"
     bad.write_text('{"version": 7}', encoding="utf-8")
-    proc = _seam_run(tmp_path, {"HAL0_ANSWERS_FILE": str(bad)})
+    proc = _seam_run(tmp_path, {**_absent(tmp_path), "HAL0_ANSWERS_FILE": str(bad)}, root=root)
     assert proc.returncode == 1
     assert "ERR TRAP" in (tmp_path / "report.log").read_text()
 
@@ -939,7 +988,7 @@ def test_chosen_folder_ignored_when_headless_or_absent(
 
 
 def test_the_two_reasons_are_never_taken_from_the_environment(
-    tmp_path: Path, stub: dict[str, str]
+    tmp_path: Path, stub: dict[str, str], root: Path
 ) -> None:
     env = {
         **stub,
@@ -947,13 +996,20 @@ def test_the_two_reasons_are_never_taken_from_the_environment(
         "_HAL0_WIZARD_CHOSEN_STORE": "/home/alice/models",
         "_HAL0_SAVED_STORE": "/home/alice/models",
     }
-    proc = _collect(tmp_path, env, after=CHECK)
+    proc = _collect(tmp_path, env, after=CHECK, root=root)
     state = _state(proc)
     assert state["RC"] == "0" and state["OWN"] == "no", proc.stdout + proc.stderr
     # nor when the wizard is absent
-    env = {"_HAL0_WIZARD_CHOSEN_STORE": "/x/y", "_HAL0_SAVED_STORE": "/x/y"}
+    env = {
+        **_absent(tmp_path),
+        "_HAL0_WIZARD_CHOSEN_STORE": "/x/y",
+        "_HAL0_SAVED_STORE": "/x/y",
+    }
     proc = _collect(
-        tmp_path, env, after="hal0_store_is_operator_choice /x/y && echo OWN=yes || echo OWN=no"
+        tmp_path,
+        env,
+        after="hal0_store_is_operator_choice /x/y && echo OWN=yes || echo OWN=no",
+        root=root,
     )
     assert _state(proc)["OWN"] == "no"
 
@@ -1030,7 +1086,7 @@ echo DONE
         proc = subprocess.run(["bash", "-c", script], capture_output=True, text=True, check=False)
         assert expect in proc.stdout, proc.stdout + proc.stderr
         if expect == "MKDIR":
-            assert f"MKDIR -p" in proc.stdout and store in proc.stdout and "DONE" in proc.stdout
+            assert "MKDIR -p" in proc.stdout and store in proc.stdout and "DONE" in proc.stdout
 
 
 @pytest.mark.parametrize("reason", ["chosen", "saved"])

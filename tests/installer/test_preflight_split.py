@@ -384,7 +384,7 @@ def _models_dir_script(
     # What the seam leaves behind: the document's value exported over any
     # inherited one, and the record of what the document exported.
     env = f'export HAL0_MODELS_DIR="{doc or inherited or ""}"\n' if (doc or inherited) else ""
-    start = f"/inherited" if inherited else ""
+    start = "/inherited" if inherited else ""
     return f"""
 set -uo pipefail
 warn() {{ echo "WARN: $*"; }}
