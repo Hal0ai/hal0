@@ -135,6 +135,12 @@ known-issues, or regressions, and add a line to the changelog below. A report re
 
 ### Kit changelog
 
+* **22** (2026-11-28) — Curation from the v1.8.1-nightly.20261127231904 run (6 verified findings: 1 filed #4051 retain cancel does not stop
+  extraction; 3 refuted or by-design; 1 cosmetic not filed under CLAUDE.md rule 3). `regressions.yaml`: new `retain-cancel-does-not-stop-extraction`;
+  `throughput-hero-stale-inflated` annotated (lump half refuted, read per_slot not total_tps); `serialize: true` on the identity-card entry (its repro
+  restarts hal0-api). `known-issues.yaml`: four rulings (hal0/<non-llm slot> anchor fallback, throughput backfill, empty profiles.toml residue, slot-write comment stripping).
+  Lane briefs: "Added in kit 22" in 10 briefs; the kit-19 profiles.toml expectation corrected. Lesson: judge throughput on per_slot, and attribute cancels by op id,
+  because total_tps and brain n_decoded both carry other lanes' traffic.
 * **21** (2026-11-27) — Curation from the v1.8.0-nightly.20261127015252 run (about 37 verified findings: 3 filed #3944-#3946,
   1 duplicate commented on #3654, ~12 known-open re-confirmations commented, the rest refuted or by-design). `regressions.yaml`: four new entries
   (#3944 #1792 auto-retry never runs, list limit 200 vs engine cap 100; #3945 memory status shared-bank only; #3946 agent peers untagged

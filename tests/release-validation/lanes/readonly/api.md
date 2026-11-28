@@ -160,3 +160,8 @@ cheapest place to catch a regression, so it should grow every release.
 
 * Count `grep -c 'Traceback (most recent'` in the hal0-api journal at lane entry and exit and attribute each new one to a lane before reporting (the MCP SSE one is #3654, known).
 * Anonymous GET on /api/memory/compat/* and /api/bridge/me returns 401 auth.required on an auth-off box: by-design baseline, record it.
+
+## Added in kit 22
+
+* HEAD / returns 405; record as intentional, not a finding.
+* Throughput: read `per_slot.<slot>`, never `total_tps`, when judging non-streaming spread (known `throughput-history-nonstream-backfill`).
