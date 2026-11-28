@@ -544,7 +544,7 @@ ct_apply_device_rules() {
   local vmid="${1:-}" unpriv="${2:-}" maj line cmd="" conf seen=" " _PVE_DEADLINE
   _PVE_DEADLINE="$(_pve_t EXEC 120)"
   shift 2 2>/dev/null || { _pve_err "ct_apply_device_rules: too few arguments"; return 1; }
-  _ct_require_owned "$vmid" || return 1
+  _ct_require_owned "$vmid" "$CT_NONCE" || return 1
   [[ "$unpriv" =~ ^[01]$ ]] || { _pve_err "unprivileged must be 0 or 1"; return 1; }
   [[ $# -gt 0 ]] || { _pve_err "ct_apply_device_rules: no device majors given"; return 1; }
   for maj in "$@"; do
@@ -563,15 +563,15 @@ ct_apply_device_rules() {
     line="lxc.apparmor.profile: unconfined"
     cmd+=" && { grep -qxF -- $(_pve_q "$line") ${conf} || printf '%s\\n' $(_pve_q "$line") >> ${conf}; }"
   fi
-  pve_run "$(ct_guard "$vmid")${cmd}"
+  pve_run "$(ct_guard "$vmid" "$CT_NONCE")${cmd}"
 }
 
 # ct_start <vmid>
 ct_start() {
   local _PVE_DEADLINE
   _PVE_DEADLINE="$(_pve_t START 120)"
-  _ct_require_owned "${1:-}" || return 1
-  pve_run "$(ct_guard "$1")pct start $1"
+  _ct_require_owned "${1:-}" "$CT_NONCE" || return 1
+  pve_run "$(ct_guard "$1" "$CT_NONCE")pct start $1"
 }
 
 # ct_exec <vmid> <command string>: root, no terminal. 120 s unless the caller
@@ -579,16 +579,16 @@ ct_start() {
 ct_exec() {
   local vmid="${1:-}" _PVE_DEADLINE
   _PVE_DEADLINE="$(_pve_t EXEC 120 "${CT_EXEC_TIMEOUT:-}")"
-  _ct_require_owned "$vmid" || return 1
+  _ct_require_owned "$vmid" "$CT_NONCE" || return 1
   [[ $# -ge 2 ]] || { _pve_err "ct_exec: no command given"; return 1; }
-  pve_run "$(ct_guard "$vmid")pct exec ${vmid} -- bash -c $(_pve_q "$2")"
+  pve_run "$(ct_guard "$vmid" "$CT_NONCE")pct exec ${vmid} -- bash -c $(_pve_q "$2")"
 }
 
 # ct_wait_network <vmid> [seconds=120]: the guest resolves hal0.dev.
 ct_wait_network() {
   local vmid="${1:-}" limit="${2:-120}" start now err=""
   _pve_uint_ok "$limit" || { _pve_err "bad timeout"; return 1; }
-  _ct_require_owned "$vmid" || return 1
+  _ct_require_owned "$vmid" "$CT_NONCE" || return 1
   start="$(date +%s)"
   while :; do
     if err="$(ct_exec "$vmid" 'getent hosts hal0.dev' 2>&1 >/dev/null)"; then
@@ -609,22 +609,22 @@ ct_wait_network() {
 ct_push() {
   local vmid="${1:-}" src="${2:-}" dst="${3:-}" _PVE_DEADLINE
   _PVE_DEADLINE="$(_pve_t PULL 300)"
-  _ct_require_owned "$vmid" || return 1
+  _ct_require_owned "$vmid" "$CT_NONCE" || return 1
   [[ -f "$src" ]] || { _pve_err "no such local file: ${src}"; return 1; }
   [[ -n "$dst" ]] || { _pve_err "ct_push: no remote path"; return 1; }
-  _pve_ssh 1 "$(ct_guard "$vmid")pct exec ${vmid} -- bash -c $(_pve_q "cat > $(_pve_q "$dst")")" <"$src"
+  _pve_ssh 1 "$(ct_guard "$vmid" "$CT_NONCE")pct exec ${vmid} -- bash -c $(_pve_q "cat > $(_pve_q "$dst")")" <"$src"
 }
 
 # ct_pull <vmid> <remote> <local>: stream a guest file out.
 ct_pull() {
   local vmid="${1:-}" src="${2:-}" dst="${3:-}" tmp rc _PVE_DEADLINE
   _PVE_DEADLINE="$(_pve_t PULL 300)"
-  _ct_require_owned "$vmid" || return 1
+  _ct_require_owned "$vmid" "$CT_NONCE" || return 1
   [[ -n "$src" && -n "$dst" ]] || { _pve_err "ct_pull: need a remote and a local path"; return 1; }
   tmp="$(mktemp "${dst}.XXXXXX")" || { _pve_err "cannot create a temporary file beside ${dst}"; return 1; }
   # The path may come from the guest: only a regular file is read (test -f is
   # false for a device, a FIFO or a symlink to one), in the same remote command.
-  if _PVE_STREAM="$(basename -- "$dst")" pve_run "$(ct_guard "$vmid")pct exec ${vmid} -- bash -c $(_pve_q "test -f $(_pve_q "$src") && cat $(_pve_q "$src")")" >"$tmp"; then
+  if _PVE_STREAM="$(basename -- "$dst")" pve_run "$(ct_guard "$vmid" "$CT_NONCE")pct exec ${vmid} -- bash -c $(_pve_q "test -f $(_pve_q "$src") && cat $(_pve_q "$src")")" >"$tmp"; then
     mv -f -- "$tmp" "$dst"
   else
     rc=$?

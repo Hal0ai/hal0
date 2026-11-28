@@ -705,8 +705,8 @@ fi
 
 install_in_terminal() {
   local remote tty_argv drv rc=0
-  ct_owned "$VMID" || { log "refusing: container ${VMID} is not harness-owned"; return 1; }
-  remote="$(ct_guard "$VMID")pct exec ${VMID} -- bash -c $(sq "$INSTALL_SCRIPT")"
+  ct_owned "$VMID" "$NONCE" || { log "refusing: container ${VMID} is not harness-owned"; return 1; }
+  remote="$(ct_guard "$VMID" "$NONCE")pct exec ${VMID} -- bash -c $(sq "$INSTALL_SCRIPT")"
   # -e none: no escape character, so nothing the guest prints or a reply types can be taken for one.
   tty_argv=(ssh -tt -e none -o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=15 -o ServerAliveCountMax=4
     -- "$PVE_ALIAS" "$remote")

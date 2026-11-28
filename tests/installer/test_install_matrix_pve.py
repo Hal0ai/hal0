@@ -1774,3 +1774,81 @@ def test_a_pull_never_follows_a_guest_path_to_a_device_or_fifo(fake, tmp_path, k
     assert "rc=0" not in r.stdout, "the pull must fail"
     assert not dst.exists()
     assert not list(tmp_path.glob("out.txt.*")), "no temporary file is left"
+
+
+# --- every action on a guest carries the run's nonce -------------------------
+# One ownership test (ct_guard, with the run's nonce from CT_NONCE) travels with
+# start, exec, push, pull, the device rules and the network wait, exactly as it
+# does with destroy.
+
+OTHER_RUN_CONF = (
+    "hostname: hal0-mx-172\ntags: hal0-matrix\ndescription: hal0-matrix run ffffffffffffffff%0A\n"
+)
+ACTIONS = [
+    "ct_start 172",
+    "ct_exec 172 id",
+    "ct_push 172 {src} /root/x",
+    "ct_pull 172 /root/x {dst}",
+    "ct_apply_device_rules 172 1 226",
+    "ct_wait_network 172 1",
+]
+ACTION_RE = r"pct (start|exec)|/etc/pve/lxc/172\.conf"
+
+
+def _acts(fake):
+    return [c for c in fake.calls() if re.search(ACTION_RE, c)]
+
+
+@pytest.mark.parametrize("conf", [BARE_CONF, OTHER_RUN_CONF], ids=["no-description", "other-nonce"])
+@pytest.mark.parametrize("action", ACTIONS)
+def test_an_action_refuses_and_sends_nothing_for_another_nonce_or_none(
+    fake, tmp_path, action, conf
+):
+    src = tmp_path / "src.txt"
+    src.write_text("x")
+    _owned_rules(fake, 172, conf)
+    body = f"CT_NONCE={NONCE}\n" + action.format(src=src, dst=tmp_path / "out")
+    assert fake.run(body).returncode != 0
+    assert _acts(fake) == []
+
+
+@pytest.mark.parametrize("action", ACTIONS)
+def test_an_action_carries_the_nonce_test_in_the_same_remote_command(fake, tmp_path, action):
+    src = tmp_path / "src.txt"
+    src.write_text("x")
+    _owned_rules(fake, 172)
+    fake.rule("pct start 172", "")
+    fake.rule("pct exec 172", "")
+    fake.rule("/etc/pve/lxc/172.conf", "")
+    body = f"CT_NONCE={NONCE}\n" + action.format(src=src, dst=tmp_path / "out")
+    fake.run(body)
+    acts = _acts(fake)
+    assert acts, action
+    want = f"grep -Eq '^description: hal0-matrix(%20| )run(%20| ){NONCE}(%0A)?$'"
+    for call in acts:
+        assert want in call, call
+        assert re.search(ACTION_RE, call.split(want, 1)[1]), call  # the action follows the test
+
+
+@pytest.mark.parametrize("action", ACTIONS[:5])
+def test_an_action_is_stopped_on_the_host_when_the_description_changes_under_us(
+    fake, tmp_path, action
+):
+    log = fake.dir / "executed.log"
+    conf_ok = shlex.quote(TAGGED_CONF.format(vmid=172))
+    conf_bad = shlex.quote(OTHER_RUN_CONF)
+    src = tmp_path / "src.txt"
+    src.write_text("x")
+    (fake.dir / "handler.sh").write_text(
+        "#!/usr/bin/env bash\n"
+        'cmd="$1"\n'
+        f'if [[ "$cmd" == "pct config 172" ]]; then printf "%s" {conf_ok}; exit 0; fi\n'
+        + GUARD_PREAMBLE.replace(
+            'conf="$(bash "$0" "pct config $vm")" || exit 1', f"conf={conf_bad}"
+        )
+        + f'echo "ran: $cmd" >> {shlex.quote(str(log))}; exit 0\n'
+    )
+    body = f"CT_NONCE={NONCE}\n" + action.format(src=src, dst=tmp_path / "out")
+    fake.run(body)
+    ran = log.read_text() if log.exists() else ""
+    assert not re.search(ACTION_RE, ran), ran
