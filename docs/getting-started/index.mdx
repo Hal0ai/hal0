@@ -31,8 +31,8 @@ A fresh install seeds slots such as `agent`, `brain`, `memory`, `coder`,
 allows; each runs in its own dedicated podman container. The slot name is the
 routing key (`hal0/<slot>`). `agent` is the capable default/fallback anchor,
 `brain` backs the dashboard's steward chat, and `memory` is the extraction
-slot for the memory engine. No chat model is chosen for you: only the small
-brain model is pulled by default.
+slot for the memory engine. The Recommended setup pulls the small brain model
+and a chat model picked for this box; Minimal pulls neither.
 
 ## Hardware support
 
@@ -60,9 +60,9 @@ backend selection degrades to CPU rather than refusing to run.
   assignments (built-in `saber`, `forge`, and `pi`) that you can load,
   clone, and re-apply as a single declarative unit.
 - **Component-aware install** — `install.sh` probes your hardware, seeds the
-  slots, and lets you opt out of Open WebUI, ComfyUI, the Hermes and Pi agents,
-  memory and the brain model (`--bare` installs inference only) — no separate
-  setup wizard to run afterward.
+  slots, and asks everything once, on a few setup screens at the start; flags
+  such as `--no-owui`, `--no-hermes` or `--bare` (inference only) settle a
+  choice for you — no separate setup program to run afterward.
 - **Prewired chat UI** — Open WebUI on port `3001`, zero config, with hal0's
   memory and agent-delegation tools attached.
 - **Agents and memory** — the bundled Hermes agent, an optional Pi coding

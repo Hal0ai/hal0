@@ -63,11 +63,11 @@ curl -fsSL https://hal0.dev/install.sh | sudo bash
 > [Upgrading from an older release](#upgrading-from-an-older-release) first.
 
 > **The installer is the whole setup.** There is no separate setup program
-> to run afterwards. On a terminal, `install.sh` shows a component checklist,
-> asks where models should live and optionally takes a Hugging Face token. It
-> seeds the curated slots, downloads the small hal0 brain steward model and
-> starts the API. When it finishes, open the dashboard and assign models to
-> slots.
+> to run afterwards. At a terminal, `install.sh` starts with a few setup
+> screens that ask everything once: the recommended path asks where models
+> are stored, shows a review, then installs without stopping. It seeds the
+> curated slots, downloads the small hal0 brain steward model and starts the
+> API. When it finishes, open the dashboard and assign models to slots.
 
 ## At a glance
 
@@ -157,21 +157,32 @@ curl -fsSL https://hal0.dev/install.sh | sudo HAL0_CHANNEL=preview bash
 5. **Brain steward model** — pulls the curated `lfm2.5-2.6b` (LiquidAI
    LFM2.5-2.6B-Q8_0, ~2.87 GB, 131k context) and binds it to the `brain`
    slot, so the dashboard's steward chat and its tool calls work out of the
-   box. On an interactive terminal only, it then *offers* the larger Qwen3.8
-   27B agent model (about 18.5 GB, size printed first, default **No**).
-6. **Starter image model** — on a box with a ROCm lane for ComfyUI, and on
-   an interactive terminal only, it *offers* the image models the API can
-   render, each with the GB it still has to download and the pick recommended
-   for this box's RAM (default: skip). The first model that lands becomes the
-   `img` model and starts the slot; ComfyUI creates its model tree under the
-   model store.
+   box. The larger chat model is a choice on the setup screens, not a
+   separate question.
+6. **Starter image model** — downloaded only when you asked for image models
+   (on the Customize screens, or with `HAL0_IMAGE_MODELS`) and the box has a
+   ROCm lane for ComfyUI. The first model that lands becomes the `img` model
+   and starts the slot; ComfyUI creates its model tree under the model store.
 7. **Service start** — enables and starts `hal0-api` + `hal0.target`, the
    Hindsight memory engine, OpenWebUI on `:3001`, and the bundled Hermes
-   agent, unless you skipped them (on a terminal a component checklist comes
-   first; see the knobs below). Hermes builds its own immutable release under
+   agent, unless you skipped them (on the setup screens or with the flags
+   below). Hermes builds its own immutable release under
    `/var/lib/hal0/hermes/releases/` on a uv-managed CPython 3.14, so that
    step needs network access on a first install. hal0 itself needs Python
    3.12-3.14; the Hindsight engine venv accepts 3.11-3.14.
+
+**The setup screens.** Right after its first checks the installer asks every
+question, once, on a few terminal screens; nothing is asked later. Pick
+Recommended (web chat, an assistant and memory, with models picked for this
+box), Minimal (only the model server) or Customize (choose each part). Then
+a review screen ("Ready to install") shows what will happen, and the install
+runs without stopping. The one-line `curl | sudo bash` install shows the
+screens too when a terminal can be opened. A script sets
+`HAL0_NONINTERACTIVE=1` or passes `--answers=FILE` instead. On a box that is
+already installed the installer reuses the answers saved by the last install
+and asks nothing; add `--reconfigure` to be asked again. A flag such as
+`--no-hermes` fixes that row on the screens instead of hiding every question,
+and an unknown flag stops the run with one line.
 
 Full step list and the complete env-var table:
 [`installer/README.md`](./installer/README.md).
@@ -183,12 +194,14 @@ Full step list and the complete env-var table:
 | `--models-dir=PATH` / `HAL0_MODELS_DIR=PATH` | Put model pulls somewhere other than `/var/lib/hal0/models` |
 | `HAL0_PORT=9090` | Bind the API somewhere other than `:8080` |
 | `HAL0_CHANNEL=preview` | Install from a channel other than `stable` |
-| `HAL0_NONINTERACTIVE=1` | Force flag/env defaults; never prompt, even on a TTY |
+| `HAL0_NONINTERACTIVE=1` | Never show the setup screens, even at a terminal; use the flags, variables and defaults |
+| `--answers=FILE` / `HAL0_ANSWERS_FILE=FILE` | Read the install choices from a JSON answers document instead of asking; it is checked in full before anything changes |
+| `--reconfigure` | On a box that is already installed, ask the setup questions again instead of reusing the saved answers |
 | `HAL0_SKIP_SETUP=1` | Skip first-run seeding **and** the brain, agent and image model steps |
 | `--no-brain-model` / `HAL0_SKIP_BRAIN_MODEL=1` | Keep the seeding, skip the brain pull (`brain` stays model-less) |
 | `HAL0_BRAIN_MODEL=<id>` | Force a specific curated brain quant |
-| `HAL0_PULL_AGENT_MODEL=1` / `=0` | Opt in to the big agent pull unattended / force-skip it on a TTY |
-| `HAL0_IMAGE_MODELS=recommended` / `=<id>,<id>` / `=none` | Download starter image models unattended / skip the image step on a TTY |
+| `HAL0_PULL_AGENT_MODEL=1` / `=0` | Download the chat model picked for this box / download none, without the screens |
+| `HAL0_IMAGE_MODELS=recommended` / `=<id>,<id>` / `=none` | Download starter image models / download none. Unset downloads none |
 | `HAL0_PY_AUTOINSTALL=1` | Let the installer install `python3.12` when the box has no Python in 3.12-3.14 |
 | `--no-owui` / `HAL0_SKIP_OPENWEBUI=1` | Skip Open WebUI |
 | `--no-comfyui` / `HAL0_IMAGE_MODELS=none` | Skip the starter image models (the `img` slot still exists, parked) |
@@ -196,7 +209,7 @@ Full step list and the complete env-var table:
 | `--no-pi` / `HAL0_SKIP_PI=1` | Skip the Pi agent (`HAL0_INSTALL_PI=1` installs it unattended) |
 | `--no-memory` / `HAL0_SKIP_HINDSIGHT=1` | Skip the Hindsight memory service |
 | `--no-agents` | Same as `--no-hermes --no-pi` |
-| `--bare` (or `--bare-inference`) | Turn every optional component off: inference only. On a terminal it still asks for the models dir, the Hugging Face token and the optional agent model `[y/N]`; set `HAL0_PULL_AGENT_MODEL=0` and `HAL0_NONINTERACTIVE=1` for a prompt-free bare install |
+| `--bare` (or `--bare-inference`) | Turn every optional component off: inference only |
 | `--no-start` | Provision everything, leave services stopped |
 | `--box` | Opt in to the [rootless podman box](./docs/getting-started/box.mdx): the verified tree is handed to the box launcher instead of installing on the host (consumed by `bootstrap.sh`; `curl ... \| sudo bash -s -- --box`) |
 | `--summary-json=PATH` | Write a versioned, machine-readable install summary (see [`installer/README.md`](./installer/README.md#--summary-jsonpath)) |

@@ -107,35 +107,41 @@ extras you choose. It checks your machine first and says what is missing.
 </Steps>
 
 The one-line form, `curl -fsSL https://hal0.dev/install.sh | sudo bash`,
-installs the same thing but **asks no questions** and takes every default,
-because the installer cannot read your keyboard while it is piped in.
+shows the same setup screens when you type it at a terminal. A script that
+cannot answer questions sets `HAL0_NONINTERACTIVE=1` and gets the defaults.
 
 ### What the installer asks
 
-Pressing Enter always takes the safe default.
+The installer asks everything once, at the start, on a few screens in your
+terminal. After you confirm the last one, it installs without stopping.
 
-1. **Where should downloaded models live?** The default is
-   `/var/lib/hal0/models`.
-2. **HuggingFace token.** Hugging Face is the website most models come
-   from. Open models need no token, so press Enter.
-3. **Which components should be installed?** Answer `a` (or Enter) for the
-   defaults below, `b` for none of them, or `p` to pick row by row.
+1. **How do you want to set up hal0?** Pick **Recommended** (web chat, an
+   assistant and memory, with models picked for this box), **Minimal** (only
+   the model server; it answers nothing until you add a model) or
+   **Customize** (choose what it does, models, storage and network).
+2. **Where should hal0 keep the models it downloads?** Models are large
+   files, so pick a disk with plenty of free space. The default is
+   `/var/lib/hal0/models`. Recommended and Minimal ask nothing else.
+3. **Ready to install.** A review of what will be downloaded and installed.
+   Press Enter to start, `b` to go back, or `q` to quit without changing
+   anything.
 
-   | Component | Default | What it is |
-   |---|---|---|
-   | Open WebUI | on | A chat app in your browser |
-   | ComfyUI | on | Image generation. Downloads nothing unless you pick a model |
-   | Hermes agent | on | An agent that can use tools and act for you |
-   | Pi agent | off | A coding agent you run in a terminal |
-   | Hindsight memory | on | Long-term memory for agents |
-   | Brain model | on | A small model (1 to 3 GB) so chat works straight away |
+Choose **Customize** and the installer adds screens before the review. They
+cover what the box does (chat in your browser, an assistant, memory, images,
+the NPU), which models to download, where to keep them, the network name and
+port, and whether the assistant may run commands on the machine. Leave that
+last one off: with it on, the assistant can run any command with full
+control of the machine.
 
-4. **Enable Hermes' terminal tool?** Leave it at No. With it on, the agent
-   can run commands with full control of the machine.
-5. **Download the agent model now?** Offered only when your machine can run
-   it. It is a large model (about 18.5 GB). The default is No.
-6. **Image models to download.** Offered only where the image engine can
-   run. Enter skips it.
+Hugging Face is the website most models come from. Open models need no
+account, so leave its token blank unless a model you want asks for one.
+
+If the machine has no usable graphics card, a screen before these asks whether
+to continue without one. hal0 works without one, but answers are slow.
+
+On a machine that already has hal0, the installer reuses the answers from the
+last install and asks nothing. Run it again with `--reconfigure` to answer
+the questions again.
 
 A skipped component can be added later, and these choices never remove
 something already installed.

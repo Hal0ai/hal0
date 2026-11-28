@@ -30,6 +30,29 @@ applying. Add those subsections to a version's section to surface them; see
 
 ## [Unreleased]
 
+### Highlights
+
+- **The installer asks its questions once, at the start, on a few screens.** Right after its first checks it shows how you want to set up hal0 (Recommended, Minimal or Customize), asks where models are stored, shows a review, and then installs without stopping. It used to ask up to seven questions at three separate moments. (#4049, #4050)
+- **A flag fixes one row on the screens instead of hiding every question.** `--no-hermes`, `--no-owui`, `--bare` and the other component flags show their row as set by the flag; the rest of the screens work as usual.
+- **A box that already has hal0 is not asked again.** An upgrade reuses the answers saved by the last install; `--reconfigure` asks again.
+
+### Breaking
+
+- **The one-line install now shows the setup screens to a person at a terminal.** `curl -fsSL https://hal0.dev/install.sh | sudo bash` used to take every default when piped. A script or a CI job that runs it must set `HAL0_NONINTERACTIVE=1` or pass `--answers=FILE` with a JSON answers document, or it waits for a person.
+- **An unknown installer flag now stops the run.** The installer used to warn and carry on with its defaults. It now prints one line (`unknown flag: ... (run with --help for the list)`) and exits with status 1 before anything changes, so fix a mistyped flag in your script.
+- **`HAL0_IMAGE_MODELS` unset now means no image models.** An install with the variable unset downloads none; set it to `recommended` or to a list of image model ids to get them, as before.
+- **`hal0 setup` run by hand asks nothing.** It prints one line and stops. To change what was chosen at install, run the installer again with `--reconfigure`. The unattended forms the installer itself uses (`--auto`, `--answers`, `--plan`, `--emit-answers`) are unchanged.
+
+### Added
+
+- **`--answers=FILE` (`HAL0_ANSWERS_FILE`)** reads the install choices from a JSON answers document instead of asking. The file is checked in full first, and a bad one stops the install before anything changes. It never carries a key or a token.
+- **`--reconfigure`** shows the setup screens again on a box that already has hal0, instead of reusing the saved answers.
+
+### Changed
+
+- **The installer's component checklist, model-folder question, Hugging Face token question, terminal-tool question and its agent-model and image-model offers are now screens of the one setup flow.** The Recommended path asks one thing, where models are stored; Customize adds screens for what the box does, models, storage, network and the assistant and memory.
+- **Getting started and the README describe the setup screens.** The install page, the beginner's guide, the first-model page and the README's flag table no longer describe the separate prompts.
+
 ## [1.8.2] — 2026-11-28
 
 ### Highlights

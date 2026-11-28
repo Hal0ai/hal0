@@ -21,6 +21,48 @@ unit directory. If you pipe through plain `bash` (no `sudo`), it re-execs
 itself under `sudo` automatically — as long as `sudo` is on `PATH`.
 </Aside>
 
+## The setup screens
+
+Right after its first checks, the installer asks every question it has, once,
+on a few screens in your terminal. Nothing is asked later, so after you
+confirm the review the install runs without stopping.
+
+The one-line command above shows the screens too, when a terminal can be
+opened. Piping the script into `bash` does not stop them, because they talk to
+your terminal directly.
+
+The first screen asks how you want to set up hal0:
+
+```text
+How do you want to set up hal0?
+  Recommended  web chat, an assistant and memory, with models picked for this box
+  Minimal      only the model server; it answers nothing until you add a model
+  Customize    choose what it does, models, storage and network
+```
+
+- **Recommended** then asks one thing, where hal0 should keep the models it
+  downloads, and goes to the review.
+- **Minimal** asks the same, and installs only the model server.
+- **Customize** adds screens for what the box does, models, storage, network
+  and access, and the assistant and memory.
+
+If the box has no usable graphics card, a screen before these asks whether to
+continue without one, or says why hal0 cannot go on. The last screen, "Ready to install", lists what will be
+downloaded and installed. Press Enter to start, `b` to go back, `s` to save a
+copy of your answers, or `q` to quit; quitting changes nothing.
+
+Not at a terminal, or running from a script? Set `HAL0_NONINTERACTIVE=1` to
+skip the screens and take the defaults, or pass `--answers=FILE` with a JSON
+answers document. The installer checks the whole file before it changes
+anything. On a box that already has hal0, the installer reuses the answers
+saved by the last install and asks nothing; add `--reconfigure` to be asked
+again.
+
+A flag such as `--no-hermes` settles that row for you: the screens show it
+as fixed instead of skipping every question. A flag the installer does not
+know stops the run with one line, so a typo never turns into a different
+install.
+
 ## Channels
 
 By default the bootstrap fetches the latest `stable` release manifest.
@@ -84,11 +126,11 @@ in order:
     `/etc/hal0/hardware.json`, and scaffolds the capability slots
     (chat, embed, rerank, speech, vision) with no model bound.
 11. **Steward + agent models** — pulls the small brain model that backs the
-    dashboard's steward chat (skip with `--no-brain-model`), offers the
-    optional agent model `[y/N]` with its download size shown, and offers a
-    starter image model (see
-    [Starter image model](#starter-image-model)). The installer does not
-    pick a chat model for you.
+    dashboard's steward chat (skip with `--no-brain-model`), then the chat and
+    image models your answers named, with their download sizes shown on the
+    review screen (see [Starter image model](#starter-image-model)). On the
+    Recommended path the chat model is the one picked for this box, when one
+    fits.
 12. **NPU prerequisites** — installs the FastFlowLM runtime on
     AMDXDNA/apt hosts (fail-soft elsewhere).
 13. **Bundle picker manifests** — writes the dashboard's first-run bundle
@@ -125,32 +167,31 @@ does not assign it to the memory slot automatically.
 
 ## Starter image model
 
-On a box that can run the ComfyUI image engine (it needs a ROCm lane: `/dev/kfd`
-and a render node), step 11 also offers a starter image model. Other boxes are
-not asked, and the installer says why. The menu lists the image models the API
-can render, each with the GB still to download and the time per image, and marks
-the one that suits the box's memory as `[recommended]`: Stable Diffusion 1.5
-below 16 GB, SDXL Lightning from 16 GB, Qwen-Image Lightning from 96 GB. The
-memory counted is the box's memory pool (unified GPU memory when it has any,
-otherwise system RAM), held down to the RAM limit of an LXC guest or container
-when that is lower, because the image engine loads the weights into memory the
-guest is charged for.
+Image models are not part of the Recommended or Minimal setup. To get them,
+choose Customize, switch on "Make images (ComfyUI)" on the "What this box
+does" screen and pick an image model on the models screen, or set
+`HAL0_IMAGE_MODELS`. They need a box that can run the ComfyUI image engine (it
+needs a ROCm lane: `/dev/kfd` and a render node); on other boxes the installer
+says why it skipped them. The screen marks the model that suits the box's
+memory: Stable Diffusion 1.5 below 16 GB, SDXL Lightning from 16 GB,
+Qwen-Image Lightning from 96 GB. The memory counted is the box's memory pool
+(unified GPU memory when it has any, otherwise system RAM), held down to the
+RAM limit of an LXC guest or container when that is lower, because the image
+engine loads the weights into memory the guest is charged for.
 
-Answer with menu numbers, catalog ids or `recommended`, separated by commas or
-spaces, or press Enter to download nothing. A bad answer is asked again. The
-first model that finishes downloading becomes the `img` capability's model,
-and the installer starts the image slot with it, which downloads the ComfyUI
-runtime on first start and can take several minutes. Open WebUI's environment
-is re-rendered to match: a running Open WebUI restarts to pick it up, and one
-you skipped or stopped stays down. If an image model is already selected it
-stays selected, and the installer starts nothing. `--no-start` skips the step,
-since it starts the image slot, and the installer prints how to do it later. A
-failed download is reported and the install carries on; install a model later
-with `hal0 comfyui models install <id>` or from the dashboard.
+The first model that finishes downloading becomes the `img` capability's
+model, and the installer starts the image slot with it, which downloads the
+ComfyUI runtime on first start and can take several minutes. Open WebUI's
+environment is re-rendered to match: a running Open WebUI restarts to pick it
+up, and one you skipped or stopped stays down. If an image model is already
+selected it stays selected, and the installer starts nothing. `--no-start`
+skips the step, since it starts the image slot, and the installer prints how
+to do it later. A failed download is reported and the install carries on;
+install a model later with `hal0 comfyui models install <id>` or from the
+dashboard.
 
-An unattended install (no terminal, or `HAL0_NONINTERACTIVE=1`) downloads
-nothing unless `HAL0_IMAGE_MODELS` is set. Set it to `recommended` or a list of
-ids to opt in, and to `none` to skip even on a terminal; see
+`HAL0_IMAGE_MODELS` unset means no image models. Set it to `recommended` or a
+list of ids to get them, and to `none` to skip them whatever else says; see
 [Install-time overrides](/docs/reference/env-vars-install/#install-time-overrides).
 
 ## Flags and environment variables
@@ -163,16 +204,18 @@ curl -fsSL https://hal0.dev/install.sh | sudo bash -s -- --no-start --models-dir
 |---|---|
 | `--dev` | Local-only editable install under `$PWD/.hal0ai` — no systemd, no host package changes |
 | `--no-start` | Set everything up but do not enable/start the units |
-| `--models-dir=PATH` | Absolute path where Hugging Face pulls land (same as `HAL0_MODELS_DIR`) |
+| `--models-dir=PATH` | Absolute path where Hugging Face pulls land (same as `HAL0_MODELS_DIR`); the setup screens show the folder as fixed |
+| `--answers=FILE` | Read the install choices from a JSON answers document instead of asking (same as `HAL0_ANSWERS_FILE=FILE`). The file is checked in full first, and a bad one stops the install before anything changes. It never carries a key or a token |
+| `--reconfigure` | On a box that already has hal0, show the setup screens again instead of reusing the answers saved by the last install |
 | `--summary-json=PATH` | Write a versioned, machine-readable install summary to `PATH` once the install finishes (see below) |
 | `--no-owui` | Skip Open WebUI (same as `HAL0_SKIP_OPENWEBUI=1`) |
-| `--no-comfyui` | Skip the starter image models (same as `HAL0_IMAGE_MODELS=none`); the `img` slot still exists, parked. Left on, the installer offers the starter image-model menu, whose default is none, so Enter downloads nothing |
+| `--no-comfyui` | Skip the starter image models (same as `HAL0_IMAGE_MODELS=none`); the `img` slot still exists, parked |
 | `--no-hermes` | Skip the Hermes agent and the Operator Board that goes with it (same as `HAL0_SKIP_HERMES=1`) |
 | `--no-pi` | Skip the Pi agent (same as `HAL0_SKIP_PI=1`) |
 | `--no-agents` | Skip both agents; same as `--no-hermes --no-pi` |
 | `--no-memory` | Skip the Hindsight memory service (same as `HAL0_SKIP_HINDSIGHT=1`) |
 | `--no-brain-model` | Skip the brain model pull (same as `HAL0_SKIP_BRAIN_MODEL=1`) |
-| `--bare`, `--bare-inference` | Synonyms: turn every optional component above off. On a terminal a bare install still asks for the models dir, the Hugging Face token and the optional agent model `[y/N]`; set `HAL0_PULL_AGENT_MODEL=0` and `HAL0_NONINTERACTIVE=1` for a prompt-free bare install |
+| `--bare`, `--bare-inference` | Synonyms: turn every optional component above off. Add `HAL0_NONINTERACTIVE=1` for an install that shows no screens |
 
 | Variable | Default | Purpose |
 |---|---|---|
@@ -180,49 +223,30 @@ curl -fsSL https://hal0.dev/install.sh | sudo bash -s -- --no-start --models-dir
 | `HAL0_PORT` | `8080` | API bind port |
 | `HAL0_PYTHON` | `python3` | Python interpreter to build the venv from |
 | `HAL0_MODELS_DIR` | `/var/lib/hal0/models` | Where Hugging Face pulls land |
-| `HAL0_NONINTERACTIVE` | _(unset)_ | Set to `1` to force flag/env values everywhere instead of prompting on a terminal |
+| `HAL0_NONINTERACTIVE` | _(unset)_ | Set to `1` to never show the setup screens, even at a terminal; the installer uses the flags, variables and defaults |
 | `HAL0_NO_PROBE` | _(unset)_ | Set to `1` to skip the hardware probe / first-run seeding |
 | `HAL0_SKIP_HINDSIGHT` | _(unset)_ | Set to `1` to skip installing the Hindsight memory service |
 | `HAL0_PY_AUTOINSTALL` | _(unset)_ | The installer already sets this itself when the default Python is below 3.12, so you rarely need it; it allows installing `python3.12` via apt or dnf when no 3.12-3.14 is on `PATH`. Other distros need `HAL0_PYTHON` pointed at a newer interpreter |
 | `HAL0_HINDSIGHT_PYTHON` | _(auto)_ | Interpreter (Python 3.11-3.14) for the Hindsight memory engine venv; use it when the installer reports none usable |
 | `HAL0_SKIP_HERMES` | _(unset)_ | Set to `1` to skip provisioning the bundled Hermes agent; install it later with `hal0 agent install hermes` |
-| `HAL0_INSTALL_PI` | _(unset)_ | Set to `1` to install the Pi agent unattended; the checklist sets it when the Pi row is on |
-| `HAL0_IMAGE_MODELS` | _(unset)_ | Starter image models to download without a prompt: `recommended` or a list of ids; `none` skips the step |
+| `HAL0_INSTALL_PI` | _(unset)_ | Set to `1` to install the Pi agent unattended; the setup screens set it when Pi is turned on |
+| `HAL0_IMAGE_MODELS` | _(unset)_ | Starter image models to download: `recommended` or a list of ids. Unset downloads none; `none` skips the step |
 
 ### Choosing components
 
-On an interactive fresh install the installer shows a checklist of the six
-optional components before it installs them:
+The Recommended setup installs Open WebUI (chat in your browser), the Hermes
+assistant and Hindsight memory, with models picked for this box. Minimal
+installs none of them. Customize lets you switch each part on or off on its
+"What this box does" screen. A part this machine cannot run is shown with the
+reason and cannot be turned on.
 
-- Open WebUI: on
-- ComfyUI (starter image models): on (the starter image-model menu is offered; its default is none, so Enter downloads nothing)
-- Hermes agent: on
-- Pi agent: off
-- Hindsight memory: on
-- Brain model: on
+A component flag fixes that row on the screens. `--no-hermes`, for example,
+shows the Hermes row as off and set by the flag, and the rest of the screens
+work as usual. The flags and the screens apply at install time only. They never
+remove a component that is already installed.
 
-Flags and the checklist apply at install time only. They never remove a
-component that is already installed.
-
-Pick a preset: `a` keeps the defaults, `b` is bare inference (everything off),
-`p` lets you pick row by row. Enter alone is `a`. A row whose precondition
-fails on this machine is shown greyed with the reason and cannot be turned on.
-
-The answer on screen wins over the environment: a row toggled on overrides an env
-knob that would have skipped it (the installer unsets the matching
-`HAL0_SKIP_<X>`, or `HAL0_IMAGE_MODELS=none` for ComfyUI). `HAL0_SKIP_SETUP=1` is
-not a per-row knob: it skips the brain and image-model steps whatever those rows
-say, so the checklist shows the Brain model and ComfyUI rows greyed as unavailable
-(`HAL0_SKIP_SETUP=1`) and they cannot be ticked on. The chosen set is written to the install log as one line.
-
-The checklist does not appear on an upgrade, with `--dev` or `--no-start`,
-without a terminal, with `HAL0_NONINTERACTIVE=1`, or when you pass any
-component flag; those installs use the flags and variables above.
-
-Like every other installer prompt, the checklist needs stdin to be a terminal.
-`curl … | sudo bash` never shows it, even when typed at a terminal: stdin is
-the pipe, so the install takes the defaults. To get the checklist, download the
-script and run `sudo bash install.sh`, or pass the flags above.
+`HAL0_SKIP_SETUP=1` is not a per-row knob: it skips the brain and image-model
+steps whatever the screens say.
 
 To add a skipped component later:
 `hal0 app install openwebui`, `hal0 agent install hermes`,

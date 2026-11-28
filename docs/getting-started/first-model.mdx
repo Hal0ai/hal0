@@ -7,8 +7,10 @@ sidebar:
 
 import { Steps, Aside, Tabs, TabItem } from '@astrojs/starlight/components';
 
-The installer seeds slots and starts services, and pulls only the small brain
-model (skip it with `--no-brain-model`); it does not pick a chat model for you.
+The installer seeds slots and starts services, and pulls the small brain
+model (skip it with `--no-brain-model`). The chat model is one of its setup
+screens: Recommended downloads the one picked for this box when one fits, and
+Minimal or "No chat model for now" leaves it for you to add here.
 Models in hal0 live in a local registry, the single source of truth for
 Hugging Face coordinates, SHA-256 digests, and curated filenames. Populate it
 from the dashboard or directly from the CLI.
