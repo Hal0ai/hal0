@@ -317,6 +317,35 @@ def test_refuses_when_any_guest_sits_in_the_range(host):
     assert not any("pct create" in c for c in host.calls())
 
 
+def test_refuses_a_privileged_shape_before_any_host_call(host):
+    r = host.run("u2604-gpu-privileged", "--out", str(host.out))
+    assert r.returncode == 2
+    assert "equal to root on the host" in r.stderr
+    assert "no production guests" in r.stderr
+    assert "HAL0_MATRIX_ALLOW_PRIVILEGED=1" in r.stderr
+    assert host.calls() == []
+    assert not host.out.exists()
+
+
+def test_a_privileged_shape_is_allowed_only_with_the_explicit_variable(host):
+    r = host.dry("u2604-gpu-privileged", HAL0_MATRIX_ALLOW_PRIVILEGED="1")
+    assert r.returncode == 0, r.stderr
+    assert "--unprivileged 0" in "\n".join(plan_lines(r))
+    bad = host.run(
+        "u2604-gpu-privileged", "--out", str(host.out), HAL0_MATRIX_ALLOW_PRIVILEGED="yes"
+    )
+    assert bad.returncode == 2 and host.calls() == []
+
+
+def test_a_dry_run_of_a_privileged_shape_still_prints_the_plan(host):
+    r = host.dry("u2604-gpu-privileged")
+    assert r.returncode == 0, r.stderr
+    plan = "\n".join(plan_lines(r))
+    assert "pct create 170" in plan and "--unprivileged 0" in plan
+    assert "equal to root on the host" in r.stderr  # the warning is still shown
+    assert host.calls() == []
+
+
 def test_refuses_a_vmid_outside_the_range(host):
     r = host.run("u2404-cpu", "--vmid", "100", "--out", str(host.out))
     assert r.returncode == 2

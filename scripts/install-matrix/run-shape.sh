@@ -116,6 +116,17 @@ case "$SHAPE_ENTRY" in
   *) die2 "shape ${SHAPE_ID}: unsupported entry type ${SHAPE_ENTRY}" ;;
 esac
 [[ -z "$TREE_DIR" || "$SHAPE_ENTRY" != "box" ]] || die2 "--source tree: cannot be combined with the box entry"
+# A privileged, unconfined guest (the GPU shape) is as strong as root on the
+# host: refuse it, before any call to the host, unless the operator says so.
+# A dry run only warns, so the plan can still be read.
+if [[ "$SHAPE_UNPRIVILEGED" == "0" && "${HAL0_MATRIX_ALLOW_PRIVILEGED:-}" != "1" ]]; then
+  privileged_msg="shape ${SHAPE_ID} runs a privileged, unconfined guest: its root is equal to root on the host. It belongs on a host with no production guests. Set HAL0_MATRIX_ALLOW_PRIVILEGED=1 to run it there."
+  if [[ "$DRY_RUN" == "1" ]]; then
+    log "warning: ${privileged_msg}"
+  else
+    die2 "refusing: ${privileged_msg}"
+  fi
+fi
 ANSWERS_FILE="/dev/null"
 if [[ -n "$SHAPE_ANSWERS" ]]; then
   [[ "$SHAPE_ANSWERS" =~ ^[A-Za-z0-9._-]+\.tsv$ && -f "${HERE}/answers/${SHAPE_ANSWERS}" ]] \
