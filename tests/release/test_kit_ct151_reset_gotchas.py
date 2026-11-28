@@ -24,7 +24,7 @@ README = Path("tests/release-validation/README.md")
 
 
 def _ct151_notes() -> str:
-    return tomllib.loads(BOXES.read_text())["boxes"]["ct151-cpu-fresh"]["notes"]
+    return tomllib.loads(BOXES.read_text())["boxes"]["ct151-fresh"]["notes"]
 
 
 def test_ct151_notes_say_rollback_deletes_dev_passthrough() -> None:

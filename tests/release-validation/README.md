@@ -34,7 +34,7 @@ not content: each agent reads its own brief, `CONTEXT.md`, `known-issues.yaml`, 
 
 ```sh
 # 1. Reset and install the RC on the target boxes (operator, out of band):
-#    ct151-cpu-fresh  -> pct rollback 151 pristine, then the POST-ROLLBACK CHECKLIST in
+#    ct151-fresh      -> pct rollback 151 pristine, then the POST-ROLLBACK CHECKLIST in
 #                        boxes.toml (rollback DELETES the dev0/dev3 passthrough entries —
 #                        re-add + confirm gid=991; `pct set 151 --nameserver`, never an
 #                        in-container resolv.conf edit; `apt install -y curl jq`), then
@@ -49,7 +49,7 @@ Invoke the `rc-validate` workflow with args:
 ```json
 {
   "version": "1.0.0-rc.5",
-  "boxes": ["ct151-cpu-fresh", "ct150-update"],
+  "boxes": ["ct151-fresh", "ct150-update"],
   "mode": "file",
   "repo": "/abs/path/to/hal0/worktree"
 }
@@ -58,6 +58,12 @@ Invoke the `rc-validate` workflow with args:
 * `mode: "report"` — findings, verification, and a written report. Nothing is filed.
 * `mode: "file"` — the above, plus a GitHub issue per confirmed finding. **Default.**
 * `lanes: ["api","cli",…]` — restrict the run (smoke re-check after a hotfix).
+
+The box ids are fixed in the script's `BOX_ROLES` table and mirrored in `boxes.example.toml`. Your
+own `boxes.toml` is untracked, so a rename in the kit does not reach it: its `[boxes.<id>]` keys
+must match. A box id the script does not know stops the run before any agent starts. A known id
+with no table in your `boxes.toml` stops the run at preflight for that box. Neither is skipped
+in silence.
 
 The fix wave is deliberately a **separate** workflow (`rc-fix-fleet`) and only runs when the
 operator asks for it. It takes the filed issue numbers, works ~6 agents wide (see *Process
@@ -135,6 +141,12 @@ known-issues, or regressions, and add a line to the changelog below. A report re
 
 ### Kit changelog
 
+* **23** (2026-11-28) — Box registry (#4084); no run behind this one. The fresh box id `ct151-cpu-fresh` is now `ct151-fresh`: the box has had a
+  render node since rc.6 and serves the Vulkan lane, so the old id read as proof that a CPU-only fresh install was tested. `ct163-cpu-fresh` and
+  its `fresh-alt` role are removed (the box was destroyed 2026-11-27). `boxes.example.toml`: a FLEET COVERAGE note listing what the fleet cannot
+  test. `rc-validate.js`: an unknown box id stops the run before Preflight (it used to stop at Sweep, one preflight agent per box later), and
+  preflight blocks when the operator's `boxes.toml` has no table for its box. No lane brief, known-issues or regressions entry changed. Reports
+  up to kit 22 name the fresh box `ct151-cpu-fresh`. Lesson: keep hardware out of a box id; this one was wrong from rc.6 (2026-08-15) on.
 * **22** (2026-11-28) — Curation from the v1.8.1-nightly.20261127231904 run (6 verified findings: 1 filed #4051 retain cancel does not stop
   extraction; 3 refuted or by-design; 1 cosmetic not filed under CLAUDE.md rule 3). `regressions.yaml`: new `retain-cancel-does-not-stop-extraction`;
   `throughput-hero-stale-inflated` annotated (lump half refuted, read per_slot not total_tps); `serialize: true` on the identity-card entry (its repro
