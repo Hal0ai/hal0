@@ -99,8 +99,9 @@ _hal0_default_store_arg() {
 # letter can fall inside it.
 _hal0_answers_path_ok() {
     local LC_ALL=C
-    [[ "${1:-}" == /* \
-        && "${1}" != *[!ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_.+@,:~=/\ -]* ]]
+    local value="${1:-}"
+    [[ "${value}" == /* \
+        && "${value}" != *[!ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_.+@,:~=/\ -]* ]]
 }
 
 # Apply the answers document at PATH; ORIGIN is `file` or `wizard`.
