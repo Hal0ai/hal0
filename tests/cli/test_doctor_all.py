@@ -334,12 +334,12 @@ def test_api_env_entries_groups_every_finding_in_one_row(tmp_path: Path) -> None
 @pytest.fixture
 def _trusted_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """Treat the test user as root and ``tmp_path`` as the trusted top (as test_tls_trust_env)."""
-    from hal0.api import _env_store
+    from hal0.config import env_guard
 
     root = tmp_path.resolve() / "trust"
     root.mkdir(mode=0o755)
-    monkeypatch.setattr(_env_store, "_TRUSTED_UID", os.getuid())
-    monkeypatch.setattr(_env_store, "_TRUST_ANCHOR", root.parent)
+    monkeypatch.setattr(env_guard, "_TRUSTED_UID", os.getuid())
+    monkeypatch.setattr(env_guard, "_TRUST_ANCHOR", root.parent)
     return root
 
 
