@@ -100,6 +100,14 @@ source "$(dirname "${BASH_SOURCE[0]}")/lib/distro.sh"
 # shellcheck source=lib/preflight.sh
 source "$(dirname "${BASH_SOURCE[0]}")/lib/preflight.sh"
 
+# Pre-flight detection facts (the facts file a wizard reads) and the one place
+# answers enter the install (hal0_collect_answers). Both come after
+# preflight.sh because they call its detection helpers.
+# shellcheck source=lib/facts.sh
+source "$(dirname "${BASH_SOURCE[0]}")/lib/facts.sh"
+# shellcheck source=lib/answers.sh
+source "$(dirname "${BASH_SOURCE[0]}")/lib/answers.sh"
+
 # Non-interactive apt for every apt-get call in this installer (FLM
 # runtime libs, FLM .deb) — without this a debconf prompt can hang a
 # tty install or fail a CI/non-tty run. Only meaningful on apt hosts;
@@ -458,6 +466,26 @@ trap 'err "install failed at line ${LINENO} during: ${CURRENT_STEP:-pre-init}"
     [[ -n "${_hal0_report_path}" ]] && warn "Failure report saved: ${_hal0_report_path} — attach it to a bug report."
     exit 1' ERR
 
+# ── Main Python: resolve or auto-install ────────────────────────────────────
+# The block below ran in line in the pre-flight step before the step was split
+# into detection, then checks that depend on the answers. It still runs once,
+# in the second half. It is a function only so the file-origin branch of the
+# first half can run it ahead of the answers seam (a person who passes an
+# answers file has already chosen to let the installer install Python).
+_hal0_resolve_main_python_or_die() {
+    if ! command -v "${PY}" >/dev/null 2>&1; then
+        die "python interpreter '${PY}' not found — install with: $(python_venv_hint)"
+    fi
+    if resolved_py="$(HAL0_PY_AUTOINSTALL=1 resolve_main_python)" && [[ -n "${resolved_py}" ]]; then
+        info "using ${resolved_py} for the main hal0 venv (default ${PY} is below hal0's 3.12 floor)"
+        PY="${resolved_py}"
+        export HAL0_PYTHON="${PY}"
+    else
+        die "python '${PY}' is below hal0's floor (pyproject.toml requires-python >=3.12) and no compatible interpreter could be found or installed.
+  install one manually, e.g.: $(pkg_install_cmd python3.12 python3.12-venv 2>/dev/null || echo 'install python3.12'), then re-run with HAL0_PYTHON=python3.12"
+    fi
+}
+
 ui_step "Pre-flight checks" "~5-10s"
 
 if [[ "${DEV_MODE}" -eq 0 && "$(id -u)" -ne 0 ]]; then
@@ -556,14 +584,6 @@ check_upgrade_floor
 # bare "command not found" deep in the install.
 preflight_bootstrap_prereqs || die "missing base prereqs — see above (installer/bootstrap.sh's one-liner preflight requires the same tools)"
 
-# Persist bootstrap's digest-pinned cosign so the updater's signature
-# gate works on the very first `hal0 update` (#2052). Soft: warns and
-# continues when there is nothing to persist. Dev installs manage their
-# own tools.
-if [[ "${DEV_MODE}" -eq 0 ]]; then
-    persist_bootstrap_cosign
-fi
-
 # Architecture is a hard requirement in every mode — all shipped binaries
 # (FastFlowLM .deb, toolbox container images) are amd64-only.
 preflight_arch || die "hal0 requires an x86_64 host (see the message above)"
@@ -579,6 +599,64 @@ if [[ "${DEV_MODE}" -eq 0 ]]; then
     preflight_systemd || die "systemd not found — hal0 v1 requires systemctl on PATH"
 fi
 
+# Detection only: is the default Python usable? The comment on
+# _hal0_resolve_main_python_or_die (above this step) and the second half of this
+# step cover what happens when it is not.
+_main_python_usable=1
+preflight_python || _main_python_usable=0
+
+# ── Detection: GPU / NPU device visibility (capture only) ───────────────────
+# Same call the gate used to make further down; its return code is only
+# recorded here. The branches that act on it (hard stop, CPU-only consent, the
+# /dev/kfd group repair) run in the second half of this step, after the answers
+# seam. Skipped in dev mode, as the gate always was: nothing to detect, so 0.
+gpu_rc=0
+if [[ "${DEV_MODE}" -eq 0 ]]; then
+    HAL0_GPU_GATE=1 preflight_gpu || gpu_rc=$?
+fi
+
+# ── Facts file ──────────────────────────────────────────────────────────────
+# Everything above only read the machine. Write what it found to a JSON file a
+# terminal wizard reads before it asks anything. It is an aid, not a
+# requirement: an unattended install does not need it, so a failure to write it
+# warns and the install goes on. In --dev mode the tree lives under a prefix
+# and has no `current` link, so point the writer at the installer's own paths.
+if [[ "${DEV_MODE}" -eq 1 ]]; then
+    HAL0_FACTS_VAR_DIR="${VAR_DIR}"
+    HAL0_FACTS_FHS_ROOT="${PREFIX}"
+else
+    HAL0_FACTS_VAR_DIR="${VAR_DIR}"
+    HAL0_FACTS_FHS_ROOT="${HAL0_FHS_ROOT}"
+fi
+export HAL0_FACTS_VAR_DIR HAL0_FACTS_FHS_ROOT
+hal0_facts_gather "${gpu_rc}"
+hal0_facts_write "${HAL0_FACTS_FILE:-/run/hal0-install/facts.json}" \
+    || warn "could not write the facts file ${HAL0_FACTS_FILE:-/run/hal0-install/facts.json}; continuing without it"
+
+# file-origin: begin (the one place the detection half installs anything)
+# A person who passes an answers file has already chosen, and reading it needs
+# a Python. If none is usable yet, install one now, before the seam.
+if [[ "${_main_python_usable}" -eq 0 && -n "${HAL0_ANSWERS_FILE:-}" ]]; then
+    info "Installing Python, which is needed to read your answers file."
+    _hal0_resolve_main_python_or_die
+    _main_python_usable=1
+fi
+# file-origin: end
+
+# ── Answers seam ────────────────────────────────────────────────────────────
+# The one place answers enter the install. Everything below this line may
+# change the host or depends on a choice.
+hal0_collect_answers
+
+# Persist bootstrap's digest-pinned cosign so the updater's signature
+# gate works on the very first `hal0 update` (#2052). Soft: warns and
+# continues when there is nothing to persist. Dev installs manage their
+# own tools.
+if [[ "${DEV_MODE}" -eq 0 ]]; then
+    persist_bootstrap_cosign
+fi
+
+# Resolve or auto-install a usable Python (see _hal0_resolve_main_python_or_die).
 # preflight_python returns 1 when python is missing OR the version is
 # below hal0's floor (pyproject.toml requires-python >=3.12; it logs an
 # `err`/`warn` itself). A below-floor interpreter is NOT survivable — pip
@@ -589,18 +667,8 @@ fi
 # to die minutes later, deep inside "pip install", on Debian 12 (python3
 # 3.11) / Ubuntu 22.04 (python3 3.10) — every stock LTS whose system
 # python3 predates 3.12.
-if ! preflight_python; then
-    if ! command -v "${PY}" >/dev/null 2>&1; then
-        die "python interpreter '${PY}' not found — install with: $(python_venv_hint)"
-    fi
-    if resolved_py="$(HAL0_PY_AUTOINSTALL=1 resolve_main_python)" && [[ -n "${resolved_py}" ]]; then
-        info "using ${resolved_py} for the main hal0 venv (default ${PY} is below hal0's 3.12 floor)"
-        PY="${resolved_py}"
-        export HAL0_PYTHON="${PY}"
-    else
-        die "python '${PY}' is below hal0's floor (pyproject.toml requires-python >=3.12) and no compatible interpreter could be found or installed.
-  install one manually, e.g.: $(pkg_install_cmd python3.12 python3.12-venv 2>/dev/null || echo 'install python3.12'), then re-run with HAL0_PYTHON=python3.12"
-    fi
+if [[ "${_main_python_usable}" -eq 0 ]]; then
+    _hal0_resolve_main_python_or_die
 fi
 
 # `python3 -m venv` capability is a hard requirement — the install always
@@ -710,8 +778,8 @@ _tty_read() {
 }
 
 if [[ "${DEV_MODE}" -eq 0 ]]; then
-    gpu_rc=0
-    HAL0_GPU_GATE=1 preflight_gpu || gpu_rc=$?
+    # gpu_rc was captured by the detection half of this step, before the answers
+    # seam; the branches below act on it, unchanged.
     if (( gpu_rc == HAL0_GPU_RC_BROKEN_GID )); then
         err "GPU passthrough is broken: the render device is visible but its gid does not map to the render group in this container (no group, or the wrong one)."
         err "Every GPU slot would silently fall back to CPU. Apply the dev0/gid fix shown above on the Proxmox host, then re-run install.sh."
@@ -824,7 +892,7 @@ HF_TOKEN_VAL="${HF_TOKEN:-${HUGGING_FACE_HUB_TOKEN:-}}"
 # helper ever grew an early return.
 _md_answer=""
 _hf_answer=""
-if _interactive; then
+if [[ "${HAL0_ANSWERS_APPLIED:-0}" != "1" ]] && _interactive; then
     if [[ "${MODELS_DIR_EXPLICIT}" -eq 1 ]]; then
         info "model store fixed by --models-dir / HAL0_MODELS_DIR — not asking"
     else
