@@ -22,10 +22,13 @@
 # (/usr/lib/hal0), the install PREFIX (/opt/hal0), the per-agent venvs
 # (/var/lib/hal0/venvs/*), the Hindsight engine venv, and the
 # /usr/local/bin/{hal0,hal0-agent,hermes} shims. It deliberately KEEPS
-# /etc/hal0 (config) and /var/lib/hal0 (models, registry, OpenWebUI state)
-# so a re-install reuses them.
+# /etc/hal0 (config, including the agents' policy and override files under
+# /etc/hal0/agents) and /var/lib/hal0 (models, registry, OpenWebUI state,
+# and the agents' identity secret and data directories under
+# /var/lib/hal0/agents) so a re-install reuses them. A bundled agent's own
+# upstream packages (Pi's npm packages) stay installed with that state.
 #
-# --purge ALSO removes: /etc/hal0, /var/lib/hal0,
+# --purge ALSO removes: the bundled agents' upstream packages, /etc/hal0, /var/lib/hal0,
 # the hal0 system user AND group, all hal0/toolbox podman IMAGES, and the
 # fastflowlm .deb — a true clean slate for fresh test installs.
 #
@@ -131,12 +134,14 @@ Usage: uninstall.sh [--purge] [--force] [--dev]
 
   (default)      Conservative teardown: stop services, remove code/units/
                  venvs/binaries and every hal0 podman container, but KEEP
-                 /etc/hal0 (config) and /var/lib/hal0 (models, registry,
-                 OpenWebUI state) so a re-install reuses them.
-  --purge        Clean slate: everything the default removes, PLUS /etc/hal0,
-                 /var/lib/hal0, the hal0 system user+group, all hal0/toolbox
-                 podman images, and the fastflowlm .deb. Prompts for DELETE
-                 confirmation unless --force / HAL0_FORCE=1.
+                 /etc/hal0 (config, agent policy) and /var/lib/hal0 (models,
+                 registry, OpenWebUI state, agent identity and data) so a
+                 re-install reuses them. A bundled agent's own packages stay.
+  --purge        Clean slate: everything the default removes, PLUS the
+                 bundled agents' packages, /etc/hal0, /var/lib/hal0, the hal0
+                 system user+group, all hal0/toolbox podman images, and the
+                 fastflowlm .deb. Prompts for DELETE confirmation unless
+                 --force / HAL0_FORCE=1.
   --force        Skip the --purge DELETE confirmation prompt.
   --dev          Remove the dev-mode tree under $PWD/.hal0ai (or $HAL0_PREFIX);
                  no systemd / system-user / PATH-symlink operations performed.
@@ -295,47 +300,46 @@ else
 fi
 
 # ── Bundled agents (Phase 8, ADR-0004 §6) ─────────────────────────────────────
-# Iterates /etc/hal0/agents/*.toml, calls each agent's uninstall
-# companion script (dropped by installer/agents/<name>.sh during
-# install), then removes the per-agent data dirs. Runs BEFORE the
-# code/data sweep below because the companion scripts live under
-# ${VAR_DIR}/agents/<name>/ — wiping that first would orphan the
-# upstream packages (npm/cargo/hermes-agent).
+# Calls each agent's uninstall companion (dropped by installer/agents/<name>.sh
+# during install), which removes the agent's upstream packages (npm/cargo).
+#
+# --purge only, and only once the purge is confirmed (#4009): it is called
+# from the "Data directories" step, right before ${ETC_DIR} and ${VAR_DIR}
+# are removed, because the companions live under ${VAR_DIR}/agents/<name>/.
+#
+# A default run does not touch an agent at all. The two agent directories are
+# configuration and state, not code:
+#   ${ETC_DIR}/agents  each agent's policy file (MCP servers, tool lists),
+#                      the operator's hermes.override.env and the recorded
+#                      terminal-tool decision;
+#   ${VAR_DIR}/agents  identity.bin (every agent key derives from it),
+#                      the dashboard session secret and each agent's data
+#                      directory, which is also its default file workspace.
+# An agent's packages have to stay with them: `hal0 agent install` returns
+# early for an agent whose seed or data directory exists, so a re-install
+# after a default run that had removed the packages would report the agent
+# installed with nothing behind it.
 uninstall_agents() {
     local AGENTS_ETC="${ETC_DIR}/agents"
     local AGENTS_VAR="${VAR_DIR}/agents"
-    if [[ ! -d "${AGENTS_ETC}" ]] && [[ ! -d "${AGENTS_VAR}" ]]; then
-        return 0
-    fi
+    [[ -d "${AGENTS_ETC}" ]] || return 0
     step "Bundled agents"
-    if [[ -d "${AGENTS_ETC}" ]]; then
-        for AGENT_TOML in "${AGENTS_ETC}"/*.toml; do
-            [[ -e "${AGENT_TOML}" ]] || continue
-            local AGENT_NAME
-            AGENT_NAME="$(basename "${AGENT_TOML}" .toml)"
-            local COMPANION="${AGENTS_VAR}/${AGENT_NAME}/uninstall.sh"
-            if [[ -x "${COMPANION}" ]]; then
-                if bash "${COMPANION}"; then
-                    info "Ran uninstall companion for ${AGENT_NAME}"
-                else
-                    warn "Companion uninstall for ${AGENT_NAME} returned non-zero (continuing)"
-                fi
+    for AGENT_TOML in "${AGENTS_ETC}"/*.toml; do
+        [[ -e "${AGENT_TOML}" ]] || continue
+        local AGENT_NAME
+        AGENT_NAME="$(basename "${AGENT_TOML}" .toml)"
+        local COMPANION="${AGENTS_VAR}/${AGENT_NAME}/uninstall.sh"
+        if [[ -x "${COMPANION}" ]]; then
+            if bash "${COMPANION}"; then
+                info "Ran uninstall companion for ${AGENT_NAME}"
             else
-                info "No uninstall companion for ${AGENT_NAME} (already removed?)"
+                warn "Companion uninstall for ${AGENT_NAME} returned non-zero (continuing)"
             fi
-        done
-    fi
-    if [[ -d "${AGENTS_VAR}" ]]; then
-        rm -rf "${AGENTS_VAR}"
-        info "Removed ${AGENTS_VAR}"
-    fi
-    if [[ -d "${AGENTS_ETC}" ]]; then
-        rm -rf "${AGENTS_ETC}"
-        info "Removed ${AGENTS_ETC}"
-    fi
+        else
+            info "No uninstall companion for ${AGENT_NAME} (already removed?)"
+        fi
+    done
 }
-
-uninstall_agents
 
 # ── Remove unit files ─────────────────────────────────────────────────────────
 step "Removing systemd units"
@@ -542,8 +546,9 @@ step "Data directories"
 if [[ "${PURGE}" -eq 0 ]]; then
     # Conservative default — keep config + state so a re-install reuses them.
     warn "Keeping data dirs (conservative default — pass --purge to wipe):"
-    warn "  ${ETC_DIR}      — config"
-    warn "  ${VAR_DIR}  — models, registry, openwebui state, memory banks"
+    warn "  ${ETC_DIR}      — config, agent policy (${ETC_DIR}/agents)"
+    warn "  ${VAR_DIR}  — models, registry, openwebui state, memory banks, agent identity and data"
+    warn "The bundled agents' own packages are left installed with them."
     warn "Re-run install.sh to restore services using this data."
 else
     # --purge: confirmation unless forced
@@ -566,6 +571,8 @@ else
     fi
 
     if [[ "${PURGE}" -eq 1 ]]; then
+        # Confirmed. The companions run now, while their directories exist.
+        uninstall_agents
         for DATA_DIR in "${ETC_DIR}" "${VAR_DIR}"; do
             rm_path "${DATA_DIR}"
         done

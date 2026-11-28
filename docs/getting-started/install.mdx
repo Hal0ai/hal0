@@ -295,9 +295,12 @@ hal0 uninstall --purge      # clean slate: also wipe config, data, user, images
 ```
 
 The conservative default stops services and removes code, units, venvs,
-binaries, and every hal0 podman container, but keeps `/etc/hal0` (config)
-and the data directory (models, registry, OpenWebUI state) so a re-install
-reuses them. `--purge` additionally removes the
+binaries and every hal0 podman container, but keeps `/etc/hal0` (config,
+including each agent's policy and override files under `/etc/hal0/agents`)
+and the data directory (models, registry, OpenWebUI state, and the agents'
+identity secret and data directories under `/var/lib/hal0/agents`) so a
+re-install reuses them. A bundled agent's own packages (Pi's npm packages)
+stay installed with that state. `--purge` additionally removes those packages, the
 config and data directories, the `hal0` system user and group, and all
 hal0 runner and OpenWebUI podman images — it prompts for a typed `DELETE` confirmation
 unless you pass `--force` (or set `HAL0_FORCE=1`).
