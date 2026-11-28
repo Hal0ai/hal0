@@ -25,11 +25,13 @@
 # would otherwise pass the document to every child process. The same goes for
 # what the setup screens hand back (the token, and the two reasons a model
 # store counts as the operator's own choice): they are set only by
-# hal0_run_wizard in this process, never taken from the environment.
+# hal0_run_wizard in this process, never taken from the environment. So is
+# HAL0_HERMES_STOP (stop and disable an installed assistant): an inherited one
+# is dropped here, and only a confirmed run of the setup screens sets it.
 unset HAL0_ANSWERS_SAVED HAL0_ANSWERS_APPLIED HAL0_ANSWERS_EXPORTED _HAL0_ANSWERS_PY \
     HAL0_WIZARD_RAN HAL0_ANSWERS_ORIGIN _HAL0_WIZARD_CALLED _HAL0_WIZARD_HF_TOKEN \
     _HAL0_WIZARD_CHOSEN_STORE _HAL0_SAVED_STORE _HAL0_WIZARD_ENTRY_PATH \
-    _HAL0_WIZARD_CATALOG_PATH _HAL0_WIZARD_MODELS_PATH _HAL0_WIZARD_INT
+    _HAL0_WIZARD_CATALOG_PATH _HAL0_WIZARD_MODELS_PATH _HAL0_WIZARD_INT HAL0_HERMES_STOP
 
 # Where the reader lives, and the names it may emit. Assigned unconditionally
 # (never taken from the environment); tests override them after sourcing.
@@ -44,6 +46,7 @@ _HAL0_ANSWER_NAMES=(
     HAL0_SKIP_OPENWEBUI
     HAL0_SKIP_HERMES
     HAL0_HERMES_TERMINAL
+    HAL0_HERMES_STOP
     HAL0_INSTALL_PI
     HAL0_SKIP_PI
     HAL0_SKIP_HINDSIGHT
@@ -200,8 +203,9 @@ hal0_apply_answers() {
 # line, and fill the CALLER's arrays `names` and `values` and its string `saved`
 # (the base64 saved form). Nothing is exported here. Every rule of
 # hal0_apply_answers applies: a name off the allow-list, a name printed twice, a
-# folder path outside _hal0_answers_path_ok, HAL0_HERMES_TERMINAL for any
-# origin but `wizard`, a missing, second or malformed `#saved` line, or any line
+# folder path outside _hal0_answers_path_ok, HAL0_HERMES_TERMINAL or
+# HAL0_HERMES_STOP for any origin but `wizard`, HAL0_HERMES_STOP with a value
+# other than 1, a missing, second or malformed `#saved` line, or any line
 # after it, fails the parse (return 1, one line on stderr). Shared by the apply
 # and by the read of the root-only saved copy (_hal0_saved_store), so the two
 # can never disagree on what a line means.
@@ -242,6 +246,16 @@ _hal0_answers_parse() {
         if [[ "${name}" == "HAL0_HERMES_TERMINAL" && "${origin}" != "wizard" ]]; then
             echo "error: only the install wizard may turn the Hermes terminal tool on" >&2
             return 1
+        fi
+        if [[ "${name}" == "HAL0_HERMES_STOP" ]]; then
+            if [[ "${origin}" != "wizard" ]]; then
+                echo "error: only the install wizard may stop an installed assistant" >&2
+                return 1
+            fi
+            if [[ "${value}" != "1" ]]; then
+                echo "error: HAL0_HERMES_STOP takes only the value 1" >&2
+                return 1
+            fi
         fi
         for allowed in "${names[@]+"${names[@]}"}"; do
             if [[ "${name}" == "${allowed}" ]]; then

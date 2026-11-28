@@ -7,7 +7,10 @@ Usage:  python3 -I answers_reader.py --origin wizard|file [--screens-shown]
 `--screens-shown` (origin wizard only; any other origin is a usage error, exit 2)
 says the caller ran the setup screens in front of a person who confirmed the
 review screen. Only then does a false or absent apps.hermes.terminal_tool print
-HAL0_HERMES_TERMINAL=0. A document cannot say it.
+HAL0_HERMES_TERMINAL=0. A document cannot say it. The same flag, with the
+assistant turned off, is the only thing that prints HAL0_HERMES_STOP=1 (the
+installer then stops and disables an installed assistant); never for origin
+file, for a saved form or for a headless run.
 
 Runs as root, before hal0's package is installed: standard library only, one
 file, Python 3.10 or newer. The document is data. This program never evaluates
@@ -54,6 +57,7 @@ ALLOWED_NAMES = (
     "HAL0_SKIP_OPENWEBUI",
     "HAL0_SKIP_HERMES",
     "HAL0_HERMES_TERMINAL",
+    "HAL0_HERMES_STOP",
     "HAL0_INSTALL_PI",
     "HAL0_SKIP_PI",
     "HAL0_SKIP_HINDSIGHT",
@@ -872,6 +876,11 @@ def _build(
         out["HAL0_SKIP_OPENWEBUI"] = "1"
     if _bool(entries["hermes"], "enabled", "apps.hermes", problems) is False:
         out["HAL0_SKIP_HERMES"] = "1"
+        if screens_shown and origin == "wizard":
+            # A person saw the review screen and confirmed it with the assistant
+            # off. The marker is the caller's (--screens-shown); a document, a
+            # saved form and a headless run cannot carry it.
+            out["HAL0_HERMES_STOP"] = "1"
     terminal = _bool(entries["hermes"], "terminal_tool", "apps.hermes", problems)
     if terminal:
         if origin == "wizard":

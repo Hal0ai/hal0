@@ -805,6 +805,112 @@ def test_no_replacement_line_without_an_inherited_answer(
     assert "replaces the HAL0_HERMES_TERMINAL" not in proc.stdout, proc.stdout
 
 
+_STOP_AFTER = (
+    'echo "STOP=${HAL0_HERMES_STOP-unset}"; bash -c \'echo "CHILD=${HAL0_HERMES_STOP-unset}"\''
+)
+_HERMES_OFF = json.dumps({"version": 1, "apps": {"hermes": {"enabled": False}}})
+
+
+def _stop(proc: subprocess.CompletedProcess[str]) -> str:
+    (line,) = [ln for ln in proc.stdout.splitlines() if ln.startswith("STOP=")]
+    return line
+
+
+def test_a_confirmed_screens_run_with_the_assistant_off_sets_the_stop_signal(
+    tmp_path: Path, stub: dict[str, str]
+) -> None:
+    proc = _collect(
+        tmp_path, {**stub, "STUB_DOC": _HERMES_OFF, "STUB_SHOWN": "shown\n"}, after=_STOP_AFTER
+    )
+    assert _state(proc)["RC"] == "0", proc.stdout + proc.stderr
+    assert _stop(proc) == "STOP=1" and "CHILD=1" in proc.stdout
+    assert "HAL0_HERMES_STOP" in _exported(proc)
+
+
+def test_an_inherited_stop_signal_is_dropped_when_the_library_is_sourced(
+    tmp_path: Path, stub: dict[str, str]
+) -> None:
+    # root's environment says stop; no screens were confirmed in this process
+    for extra in ({}, {"STUB_SHOWN": "shown\n"}):
+        env = {**stub, "STUB_DOC": _TERMINAL_OFF, "HAL0_HERMES_STOP": "1", **extra}
+        proc = _collect(tmp_path, env, after=_STOP_AFTER)
+        assert _state(proc)["RC"] == "0", proc.stdout + proc.stderr
+        assert _stop(proc) == "STOP=unset" and "CHILD=unset" in proc.stdout, extra
+
+
+def test_an_inherited_stop_signal_does_not_survive_a_headless_or_given_run(
+    tmp_path: Path, stub: dict[str, str]
+) -> None:
+    given = tmp_path / "given.json"
+    given.write_text(_HERMES_OFF, encoding="utf-8")
+    proc = _collect(
+        tmp_path,
+        {**stub, "STUB_DOC": _HERMES_OFF, "HAL0_ANSWERS_FILE": str(given), "HAL0_HERMES_STOP": "1"},
+        after=_STOP_AFTER,
+    )
+    assert _state(proc)["RC"] == "0", proc.stdout + proc.stderr
+    assert _stop(proc) == "STOP=unset"
+    proc = _collect(
+        tmp_path,
+        {**stub, "STUB_DOC": _HERMES_OFF, "HAL0_NONINTERACTIVE": "1", "HAL0_HERMES_STOP": "1"},
+        after=_STOP_AFTER,
+    )
+    assert _stop(proc) == "STOP=unset"
+
+
+def test_a_given_document_or_a_headless_run_never_sets_the_stop_signal(
+    tmp_path: Path, stub: dict[str, str]
+) -> None:
+    given = tmp_path / "given.json"
+    given.write_text(_HERMES_OFF, encoding="utf-8")
+    # even when the wizard stub leaves a marker, a given document is headless
+    env = {
+        **stub,
+        "STUB_DOC": _HERMES_OFF,
+        "STUB_SHOWN": "shown\n",
+        "HAL0_ANSWERS_FILE": str(given),
+    }
+    proc = _collect(tmp_path, env, after=_STOP_AFTER)
+    assert _stop(proc) == "STOP=unset", proc.stdout + proc.stderr
+    # and without a marker at all (no screens)
+    proc = _collect(tmp_path, {**stub, "STUB_DOC": _HERMES_OFF}, after=_STOP_AFTER)
+    assert _stop(proc) == "STOP=unset", proc.stdout + proc.stderr
+
+
+def test_a_skip_flag_on_a_confirmed_run_still_sets_the_stop_signal(
+    tmp_path: Path, stub: dict[str, str]
+) -> None:
+    # The row is fixed off by --no-hermes and the document says off: the screens
+    # show "Assistant will be stopped" and a person confirmed them.
+    proc = _collect(
+        tmp_path,
+        {**stub, "STUB_DOC": _HERMES_OFF, "STUB_SHOWN": "shown\n"},
+        args=("--no-hermes",),
+        after=_STOP_AFTER,
+    )
+    assert _state(proc)["RC"] == "0", proc.stdout + proc.stderr
+    assert _stop(proc) == "STOP=1"
+
+
+def test_a_skip_flag_without_screens_sets_no_stop_signal(
+    tmp_path: Path, stub: dict[str, str]
+) -> None:
+    proc = _collect(
+        tmp_path,
+        {**stub, "STUB_DOC": _HERMES_OFF},
+        args=("--no-hermes",),
+        after=_STOP_AFTER,
+    )
+    assert _state(proc)["RC"] == "0", proc.stdout + proc.stderr
+    assert _stop(proc) == "STOP=unset"
+    assert "HAL0_SKIP_HERMES" in _exported(proc)
+
+
+def test_the_stop_name_is_unset_at_the_top_of_the_library() -> None:
+    head = ANSWERS_SH.read_text(encoding="utf-8").split("_HAL0_ANSWERS_LIB_DIR=", 1)[0]
+    assert "unset " in head and "HAL0_HERMES_STOP" in head
+
+
 def test_hermes_terminal_has_two_readers_and_only_off_is_applied_under_skip() -> None:
     # `hal0 agent install hermes` (box without Hermes) stays behind the
     # HAL0_SKIP_HERMES check. `hal0 agent reprovision hermes` (box that already

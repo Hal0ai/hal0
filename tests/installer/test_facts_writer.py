@@ -410,3 +410,13 @@ def test_hermes_fact_reads_unit_dir_from_the_installer_variable(tmp_path: Path) 
     )
     assert "write_rc=0" in proc.stdout, proc.stdout + proc.stderr
     assert json.loads(out.read_text())["hermes"] == {"installed": True}
+
+
+@pytest.mark.parametrize(("installed", "text"), [(True, "true"), (False, "false")])
+def test_the_hermes_fact_is_written_as_a_bare_json_boolean(
+    tmp_path: Path, installed: bool, text: str
+) -> None:
+    _hermes_box(tmp_path, unit=installed, venv=installed)
+    proc, out = _run(tmp_path)
+    assert "write_rc=0" in proc.stdout, proc.stdout + proc.stderr
+    assert f'  "hermes": {{"installed": {text}}},\n' in out.read_text(encoding="utf-8")

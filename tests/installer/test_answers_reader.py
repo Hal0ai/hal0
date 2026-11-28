@@ -498,6 +498,72 @@ def test_a_saved_form_emits_nothing_for_the_terminal_tool(tmp_path: Path) -> Non
         assert not any(x.startswith("HAL0_HERMES_TERMINAL") for x in got), origin
 
 
+_HERMES_ENABLED = {
+    "off": {"hermes": {"enabled": False}},
+    "on": {"hermes": {"enabled": True}},
+    "absent": {},
+}
+
+
+@pytest.mark.parametrize("origin", ["wizard", "file"])
+@pytest.mark.parametrize("shown", [True, False])
+@pytest.mark.parametrize("enabled", ["off", "on", "absent"])
+def test_the_stop_signal_table(tmp_path: Path, origin: str, shown: bool, enabled: str) -> None:
+    doc = {"version": 1, "apps": _HERMES_ENABLED[enabled]}
+    proc = run(doc, tmp_path, origin=origin, flags=_SCREENS if shown else ())
+    if shown and origin == "file":
+        assert proc.returncode == 2 and proc.stdout == ""  # usage error, nothing printed
+        return
+    got = lines(proc)
+    expected = origin == "wizard" and shown and enabled == "off"
+    assert ("HAL0_HERMES_STOP=1" in got) is expected, (origin, shown, enabled, got)
+    assert not any(x.startswith("HAL0_HERMES_STOP=") and x != "HAL0_HERMES_STOP=1" for x in got)
+    # the skip variable is emitted exactly as before
+    assert ("HAL0_SKIP_HERMES=1" in got) is (enabled == "off")
+    if expected:
+        assert got.index("HAL0_SKIP_HERMES=1") < got.index("HAL0_HERMES_STOP=1")
+
+
+def test_the_stop_signal_is_not_emitted_for_a_saved_form(tmp_path: Path) -> None:
+    doc = tmp_path / "doc.json"
+    doc.write_text(
+        json.dumps({"version": 1, "apps": {"hermes": {"enabled": False}}}), encoding="utf-8"
+    )
+    saved = subprocess.run(
+        [sys.executable, "-I", str(READER), "--emit-saved", str(doc)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert saved.returncode == 0, saved.stderr
+    assert "STOP" not in saved.stdout
+    for origin in ("wizard", "file"):
+        got = lines(run(None, tmp_path, origin=origin, raw=saved.stdout.encode()))
+        assert not any(x.startswith("HAL0_HERMES_STOP") for x in got), origin
+    # a saved form that was tampered to say it, too
+    for flags in ((), _SCREENS):
+        for origin in ("wizard", "file"):
+            if flags and origin == "file":
+                continue
+            tampered = {"version": 1, "apps": {"hermes": {"enabled": True, "stop": True}}}
+            proc = run(tampered, tmp_path, origin=origin, flags=flags)
+            assert "HAL0_HERMES_STOP" not in proc.stdout
+
+
+@pytest.mark.parametrize(
+    "doc",
+    [
+        {"version": 1, "HAL0_HERMES_STOP": "1", "apps": {"hermes": {"enabled": True}}},
+        {"version": 1, "apps": {"hermes": {"enabled": True, "stop": True, "HAL0_HERMES_STOP": 1}}},
+        {"version": 1, "apps": {"hermes": {"enabled": True}}, "env": {"HAL0_HERMES_STOP": "1"}},
+    ],
+)
+def test_a_document_cannot_set_the_stop_signal(tmp_path: Path, doc: dict) -> None:
+    for origin, flags in (("wizard", ()), ("wizard", _SCREENS), ("file", ())):
+        proc = run(doc, tmp_path, origin=origin, flags=flags)
+        assert "HAL0_HERMES_STOP" not in proc.stdout, (origin, flags)
+
+
 def test_a_document_cannot_claim_the_screens_were_shown(tmp_path: Path) -> None:
     doc = {"version": 1, "screens_shown": True, "apps": {"hermes": {"screens_shown": True}}}
     got = lines(run(doc, tmp_path, origin="wizard"))
