@@ -405,6 +405,13 @@ cleanup() {
     if [[ "$DRY_RUN" == "1" ]]; then
       state="present"
     else
+      # An interrupted create may still be running on the host: let it finish
+      # (bounded) before looking, and note a lock it left behind.
+      ct_wait_create_done "$VMID" || log "a pct create for ${VMID} may still be running; checking anyway"
+      if ct_lock_held "$VMID"; then
+        GUEST_LOCKED=1
+        announce_container
+      fi
       state="$(_ct_presence "$VMID")"
     fi
     if [[ "$state" == "absent" ]]; then
@@ -492,12 +499,36 @@ if [[ -n "$TREE_DIR" ]]; then
 fi
 
 # ── step 5: create, start, wait for the network ──────────────────────────────
-create_rc=0
-ct_create "$VMID" "$VOLID" "$SHAPE_UNPRIVILEGED" "$SHAPE_CORES" "$SHAPE_MEMORY_MB" "$SHAPE_DISK_GB" \
-  ${DEVS[@]+"${DEVS[@]}"} || create_rc=$?
+# INT, TERM and HUP are held while ct_create runs and acted on when it returns:
+# the create runs in a subshell that ignores them (so the ssh under it keeps
+# going and the remote `pct create` is not cut off half-way), and the main
+# shell only records the signal.
+HELD_SIG=""
+trap 'HELD_SIG=2' INT
+trap 'HELD_SIG=15' TERM
+trap 'HELD_SIG=1' HUP
+create_rcfile="$(mktemp)"
+(
+  trap '' INT TERM HUP
+  rc=0
+  ct_create "$VMID" "$VOLID" "$SHAPE_UNPRIVILEGED" "$SHAPE_CORES" "$SHAPE_MEMORY_MB" "$SHAPE_DISK_GB" \
+    ${DEVS[@]+"${DEVS[@]}"} || rc=$?
+  printf '%s' "$rc" >"$create_rcfile"
+) &
+create_pid=$!
+while kill -0 "$create_pid" 2>/dev/null; do
+  wait "$create_pid" 2>/dev/null || true
+done
+create_rc="$(cat "$create_rcfile" 2>/dev/null || true)"
+rm -f -- "$create_rcfile"
+[[ "$create_rc" =~ ^[0-9]{1,3}$ ]] || create_rc=1
+trap 'on_signal 2' INT
+trap 'on_signal 15' TERM
+trap 'on_signal 1' HUP
 # Only a run that got as far as `pct create` may clean anything up; a refusal
 # (status 90) created nothing, and what is at that VMID is not ours.
 [[ "$create_rc" == "$_CT_REFUSED" ]] || CT_MAYBE=1
+[[ -z "$HELD_SIG" ]] || on_signal "$HELD_SIG"
 [[ "$create_rc" == "0" ]] || { log "could not create container ${VMID}"; exit 1; }
 announce_container
 [[ "$DRY_RUN" == "1" ]] || start_watchdog

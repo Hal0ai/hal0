@@ -306,6 +306,50 @@ def test_pve_run_leaves_callers_stdin_alone(fake):
     assert not fake.stdin_dump.exists() or fake.stdin_dump.read_bytes() == b""
 
 
+# --- a create that may still be running ------------------------------------
+
+PGREP_CMD = "if pgrep -f '[p]ct create 172( |$)' >/dev/null 2>&1; then echo busy; else echo idle; fi"
+
+
+def test_wait_create_done_asks_one_fixed_question(fake):
+    fake.rule("pgrep -f", "idle\n")
+    r = fake.run("ct_wait_create_done 172; echo rc=$?")
+    assert "rc=0" in r.stdout
+    assert fake.calls()[-1].endswith(f"-- testpve {PGREP_CMD}")
+
+
+def test_wait_create_done_gives_up_after_its_bound(fake):
+    fake.rule("pgrep -f", "busy\n")
+    r = fake.run(
+        "ct_wait_create_done 172 1; echo rc=$?", env={"HAL0_MATRIX_POLL_SLEEP": "0"}
+    )
+    assert "rc=1" in r.stdout and "still running" in r.stderr
+
+
+def test_wait_create_done_does_not_take_a_dead_ssh_for_idle(fake):
+    fake.rule("pgrep -f", "", 255)
+    r = fake.run(
+        "ct_wait_create_done 172 1; echo rc=$?", env={"HAL0_MATRIX_POLL_SLEEP": "0"}
+    )
+    assert "rc=1" in r.stdout
+
+
+@pytest.mark.parametrize("bad", ["105", "17; id", "", "$(id)"])
+def test_wait_create_done_refuses_a_bad_vmid_before_any_ssh(fake, bad):
+    r = fake.run(f"ct_wait_create_done {shlex.quote(bad)} 1")
+    assert r.returncode == 1 and fake.calls() == []
+
+
+def test_lock_held_reads_the_lock_line(fake):
+    fake.rule("pct config 172", "hostname: x\nlock: create\n")
+    assert fake.run("ct_lock_held 172").returncode == 0
+
+
+def test_lock_held_is_false_without_a_lock_line(fake):
+    fake.rule("pct config 172", "hostname: x\ndescription: lock: not a real line\n")
+    assert fake.run("ct_lock_held 172").returncode == 1
+
+
 # --- deadlines --------------------------------------------------------------
 
 TIMED_OUT = ("124", "137")  # timeout's status, or the KILL it sent

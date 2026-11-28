@@ -332,6 +332,39 @@ ct_create() {
   return "$st"
 }
 
+# ct_wait_create_done <vmid> [seconds]: wait (bounded; HAL0_MATRIX_CREATE_WAIT,
+# default 120) until no `pct create <vmid>` process runs on the host. An
+# interrupted harness leaves its ssh dead but the remote create may carry on.
+# The remote command is fixed text with only the checked VMID in it; the [p]
+# keeps the remote shell's own command line from matching the pattern. A
+# reading that cannot be made does not count as idle.
+ct_wait_create_done() {
+  local vmid="${1:-}" limit="${2:-${HAL0_MATRIX_CREATE_WAIT:-120}}" start now out _PVE_DEADLINE
+  _pve_in_range "$vmid" || { _pve_err "refusing: VMID '${vmid}' is outside the harness range"; return 1; }
+  _pve_uint_ok "$limit" || { _pve_err "bad wait limit"; return 1; }
+  _PVE_DEADLINE="$(_pve_t READ 60)"
+  start="$(date +%s)"
+  while :; do
+    out="$(pve_run "if pgrep -f '[p]ct create ${vmid}( |\$)' >/dev/null 2>&1; then echo busy; else echo idle; fi")" || out=""
+    [[ "$out" != "idle" ]] || return 0
+    now="$(date +%s)"
+    ((now - start < limit)) || break
+    sleep "${HAL0_MATRIX_POLL_SLEEP:-2}"
+  done
+  _pve_err "a pct create for ${vmid} was still running after ${limit}s"
+  return 1
+}
+
+# ct_lock_held <vmid>: 0 when the guest's config shows a lock: line (a create
+# that never finished leaves one). Read only; changes nothing.
+ct_lock_held() {
+  local vmid="${1:-}" conf _PVE_DEADLINE
+  _pve_in_range "$vmid" || return 1
+  _PVE_DEADLINE="$(_pve_t READ 60)"
+  conf="$(pve_run "pct config ${vmid}")" || return 1
+  grep -q '^lock:' <<<"$conf"
+}
+
 # ct_apply_device_rules <vmid> <unprivileged 0|1> <major...>
 # Mirrors scripts/proxmox-ve/hal0.sh apply_raw_config for a guest with GPU
 # devices: one cgroup2 allow rule per major, the memlock limit, and for a

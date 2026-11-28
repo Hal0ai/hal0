@@ -69,14 +69,23 @@ case "$cmd" in
     [[ -e "$FAKE_STATE/present" ]] || exit 2
     vm="${cmd#pct config }"
     printf 'hostname: hal0-mx-%s\ntags: hal0-matrix\ncores: 8\n' "${vm%% *}"
+    [[ -z "${FAKE_LOCK:-}" ]] || echo 'lock: create'
     [[ ! -s "$FAKE_STATE/description" ]] || printf 'description: %s\n' "$(cat "$FAKE_STATE/description")"
     exit 0 ;;
   "pct create "*)
     [[ -z "${FAKE_CREATE_FAILS:-}" ]] || exit 1
+    touch "$FAKE_STATE/create-started"
+    [[ -z "${FAKE_CREATE_SLEEP:-}" ]] || sleep "$FAKE_CREATE_SLEEP"
     # The description this run asked for, as `pct config` would show it.
     d="${cmd#*--description }"; d="${d%% --*}"; d="${d//\\/}"
     [[ "$cmd" == *"--description "* ]] && printf '%s' "$d" > "$FAKE_STATE/description"
     touch "$FAKE_STATE/present"; exit 0 ;;
+  *"pgrep -f"*)
+    # FAKE_PGREP_BUSY_READS=N: the first N reads say a pct create is running.
+    n=$(cat "$FAKE_STATE/pgrep-reads" 2>/dev/null || echo 0); n=$((n + 1))
+    echo "$n" > "$FAKE_STATE/pgrep-reads"
+    if [[ "$n" -le "${FAKE_PGREP_BUSY_READS:-0}" ]]; then echo busy; else echo idle; fi
+    exit 0 ;;
   "pct start "*)
     [[ -z "${FAKE_START_HANGS:-}" ]] || exec sleep 60
     exit 0 ;;
@@ -465,6 +474,55 @@ def test_the_destroy_command_is_printed_as_soon_as_the_container_exists(host):
     assert r.stderr.count(line) == 2, r.stderr  # after create, and at the start of cleanup
     first = r.stderr.index(line)
     assert first < r.stderr.index("installing (")
+
+
+def test_an_interrupt_during_pct_create_waits_for_it_and_then_cleans_up(host):
+    proc = subprocess.Popen(
+        ["bash", str(RUN_SHAPE), "u2404-cpu", "--vmid", "172", "--out", str(host.out)],
+        env=host.env(FAKE_CREATE_SLEEP="3"),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+    )
+    deadline = time.monotonic() + 90
+    while not (host.state / "create-started").exists():
+        assert proc.poll() is None and time.monotonic() < deadline
+        time.sleep(0.02)
+    os.killpg(proc.pid, signal.SIGINT)
+    out, err = proc.communicate(timeout=120)
+    assert proc.returncode == 130, err
+    calls = host.calls()
+    created = [i for i, c in enumerate(calls) if "pct create" in c]
+    destroyed = [i for i, c in enumerate(calls) if "pct destroy 172" in c]
+    assert created and destroyed and destroyed[0] > created[0], "the create ran to its end, then was cleaned up"
+    assert not (host.state / "present").exists()
+    assert "LEFT BEHIND" not in err
+
+
+def test_cleanup_waits_until_no_pct_create_runs_before_checking_presence(host):
+    r = host.run(
+        "u2404-cpu", "--vmid", "172", "--out", str(host.out),
+        FAKE_PGREP_BUSY_READS="2", HAL0_MATRIX_POLL_SLEEP="0",
+    )  # fmt: skip
+    assert r.returncode == 0, r.stderr
+    calls = host.calls()
+    pgreps = [i for i, c in enumerate(calls) if "pgrep -f" in c]
+    assert len(pgreps) == 3  # busy, busy, idle
+    assert "pgrep -f '[p]ct create 172( |$)'" in calls[pgreps[0]]
+    after = [i for i, c in enumerate(calls) if "if test -e" in c and i > pgreps[-1]]
+    assert after, "the presence check comes after the wait"
+    assert not [i for i, c in enumerate(calls) if "pct destroy" in c and i < pgreps[-1]]
+
+
+def test_a_locked_guest_gets_the_unlock_in_the_manual_command(host):
+    r = host.run(
+        "u2404-cpu", "--vmid", "172", "--out", str(host.out),
+        FAKE_LOCK="1", FAKE_DESTROY_FAILS="1",
+    )  # fmt: skip
+    cmd = "ssh testpve 'pct unlock 172 && pct destroy 172 --force --purge'"
+    assert f"LEFT BEHIND: 172 (destroy it with: {cmd})" in r.stderr
+    assert f"destroy_command={cmd}" in (host.out / "run.txt").read_text().splitlines()
 
 
 def test_a_hung_start_is_cut_off_and_the_container_is_still_destroyed(host):
