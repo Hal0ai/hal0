@@ -986,32 +986,93 @@ def test_destroy_refuses_a_malformed_nonce_before_any_ssh(fake, bad):
     assert fake.calls() == []
 
 
+# Every `var_*` default ct/hal0.sh declares, sorted into the ones that become a
+# `pct create --features` flag (with the value map to the harness's flag) and
+# the ones that do not. A variable in neither set fails the test, so a new one
+# (say var_tun) or a removed one is noticed and decided on here.
+HELPER_FEATURE_VARS = {
+    "fuse": ("fuse", {"yes": "1"}),
+    "keyctl": ("keyctl", {"1": "1"}),
+    "mknod": ("mknod", {"1": "1"}),
+}
+HELPER_NON_FEATURE_VARS = {
+    "tags",
+    "cpu",
+    "ram",
+    "disk",
+    "os",
+    "version",
+    "arm64",
+    "unprivileged",
+    "gpu",
+}
+# The helper never sets nesting: the engine does. Sources: README.md (the
+# ct/hal0.sh row of the file table) and docs/getting-started/proxmox.mdx lines
+# 106 (the features of the manual recipe) and 236 (nesting is already on).
+HELPER_ENGINE_FEATURES = {"nesting": "1"}
+PROXMOX_MDX = REPO / "docs" / "getting-started" / "proxmox.mdx"
+
+
+def _helper_var_defaults(path: Path) -> dict[str, str]:
+    # Both `var_x="${var_x:-v}"` and a plain `var_x="v"` count as a declaration.
+    found = {}
+    pattern = r'^var_(\w+)="(?:\$\{var_\w+:-([^}]*)\}|([^"$]*))"'
+    for m in re.finditer(pattern, path.read_text(), re.M):
+        found[m.group(1)] = m.group(2) if m.group(2) is not None else m.group(3)
+    return found
+
+
+def _helper_features(path: Path) -> str:
+    """The features string the helper script declares, or an AssertionError."""
+    found = _helper_var_defaults(path)
+    unknown = set(found) - set(HELPER_FEATURE_VARS) - HELPER_NON_FEATURE_VARS
+    assert not unknown, f"ct/hal0.sh declares var_* the test has no mapping for: {sorted(unknown)}"
+    missing = (set(HELPER_FEATURE_VARS) | HELPER_NON_FEATURE_VARS) - set(found)
+    assert not missing, f"ct/hal0.sh no longer declares: {sorted(missing)}"
+    flags = dict(HELPER_ENGINE_FEATURES)
+    for var, (flag, values) in HELPER_FEATURE_VARS.items():
+        assert found[var] in values, f"var_{var}={found[var]!r} has no mapping to a flag"
+        flags[flag] = values[found[var]]
+    order = ("nesting", "keyctl", "fuse", "mknod")
+    assert set(flags) == set(order)
+    return ",".join(f"{k}={flags[k]}" for k in order)
+
+
 def test_feature_list_matches_proxmox_script():
-    # The helper script is built on the community-scripts engine, so it no
-    # longer spells out a features string. It declares the flags (ct/hal0.sh
-    # var_fuse, var_keyctl, var_mknod) and the README names nesting as one of
-    # the container's features (README.md, the ct/hal0.sh row of the file
-    # table). The harness's string must be exactly those four, in the order
-    # `pct create --features` takes them from the engine.
-    ct = HELPER_CT_SH.read_text()
-    fuse = re.search(r'^var_fuse="\$\{var_fuse:-([^}]*)\}"', ct, re.M)
-    keyctl = re.search(r'^var_keyctl="\$\{var_keyctl:-([^}]*)\}"', ct, re.M)
-    mknod = re.search(r'^var_mknod="\$\{var_mknod:-([^}]*)\}"', ct, re.M)
-    assert fuse and keyctl and mknod, (
-        "var_fuse/var_keyctl/var_mknod defaults not found in ct/hal0.sh"
-    )
-    assert fuse.group(1) == "yes"
-    assert keyctl.group(1) == "1"
-    assert mknod.group(1) == "1"
+    theirs = _helper_features(HELPER_CT_SH)
+    # Nesting is set by the engine, not by the script; pin the sources.
     readme_row = next(
         (ln for ln in HELPER_README.read_text().splitlines() if ln.startswith("| `ct/hal0.sh`")),
         "",
     )
     assert "nesting" in readme_row, "README no longer lists nesting for ct/hal0.sh"
-    theirs = f"nesting=1,keyctl={keyctl.group(1)},fuse=1,mknod={mknod.group(1)}"
+    mdx = PROXMOX_MDX.read_text().splitlines()
+    assert "--features nesting=1,keyctl=1,fuse=1,mknod=1" in mdx[105]
+    assert "nesting is already on" in mdx[235]
     mine = re.search(r'^_PVE_FEATURES="([^"]*)"', PVE_SH.read_text(), re.M)
     assert mine, "_PVE_FEATURES not found in pve.sh"
     assert mine.group(1) == theirs == FEATURES
+
+
+def test_feature_parser_fails_on_a_new_helper_variable(tmp_path):
+    changed = tmp_path / "hal0.sh"
+    changed.write_text(
+        HELPER_CT_SH.read_text().replace("var_mknod=", 'var_tun="yes"\nvar_mknod=', 1)
+    )
+    assert _helper_features(HELPER_CT_SH) == FEATURES
+    with pytest.raises(AssertionError, match="tun"):
+        _helper_features(changed)
+
+
+def test_feature_parser_fails_on_an_unmapped_value(tmp_path):
+    changed = tmp_path / "hal0.sh"
+    changed.write_text(
+        HELPER_CT_SH.read_text().replace(
+            'var_fuse="${var_fuse:-yes}"', 'var_fuse="${var_fuse:-no}"'
+        )
+    )
+    with pytest.raises(AssertionError, match="no mapping"):
+        _helper_features(changed)
 
 
 # --- device rules, exec, push/pull -----------------------------------------
@@ -1235,6 +1296,11 @@ def test_device_rules_match_proxmox_script_lines():
 #   NPU at create time         after create, passthrough script   at create          harness has no second reboot step
 #   device gid=                container's render/video gid       host node's gid    harness reads the host only
 #   /dev/dri/card*             forwarded                          not forwarded      harness forwards render nodes only
+#
+# Not in the table: mount entries, idmaps and AppArmor for unprivileged guests
+# are owned by the external engine and cannot be read from this repo
+# (unverified). The harness's own create settings (swap, onboot, tags, rootfs,
+# net) differ from the helper's defaults (8192 MB, 40 GB) on purpose.
 def test_helper_script_differences_are_pinned():
     ct = HELPER_CT_SH.read_text()
     npu = HELPER_NPU_SH.read_text()
@@ -1247,8 +1313,8 @@ def test_helper_script_differences_are_pinned():
     assert 'var_unprivileged="${var_unprivileged:-1}"' in ct
     # No per-major cgroup2 rule and no apparmor line anywhere in the helper
     # sources; the privileged engine rule is documented in the README.
-    assert "lxc.cgroup2.devices.allow: c" not in helper_sources
-    assert "lxc.apparmor.profile" not in helper_sources
+    assert not re.search(r"lxc\.cgroup2\.devices\.allow:\s*c", helper_sources)
+    assert not re.search(r"lxc\.apparmor\.profile\s*:", helper_sources)
     assert "lxc.cgroup2.devices.allow: a" in readme
     assert "lxc.cap.drop:" in readme
     assert "It writes no AppArmor line" in readme
