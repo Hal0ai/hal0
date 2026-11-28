@@ -50,6 +50,11 @@ _OFF_VALUES = frozenset({"off", "none", "0", "false", "disabled"})
 CACHE_TTL_S = 3600.0
 FAILURE_TTL_S = 60.0
 
+#: A requested refresh is honoured at most this often. The route takes no
+#: credential, so without a floor any client on the network could make the
+#: box fetch as fast as it can ask.
+MIN_REFRESH_INTERVAL_S = 30.0
+
 FETCH_TIMEOUT_S = 5.0
 MAX_INDEX_BYTES = 512 * 1024
 MAX_ENVELOPE_BYTES = 64 * 1024
@@ -91,7 +96,9 @@ class _Snapshot:
     error: str | None = None
 
 
-_cache: dict[str, tuple[float, _Snapshot]] = {}
+#: Per index URL: when the entry expires, when it was fetched (both on the
+#: monotonic clock), and the snapshot.
+_cache: dict[str, tuple[float, float, _Snapshot]] = {}
 _cache_lock = asyncio.Lock()
 
 
@@ -206,8 +213,13 @@ async def _snapshot(*, refresh: bool, fetch: Fetch | None) -> _Snapshot:
         return _bundled(url=None, error=None)
     async with _cache_lock:
         cached = _cache.get(url)
-        if cached is not None and not refresh and time.monotonic() < cached[0]:
-            return cached[1]
+        now = time.monotonic()
+        if cached is not None:
+            expires, fetched, snap = cached
+            if refresh and now - fetched < MIN_REFRESH_INTERVAL_S:
+                return snap
+            if not refresh and now < expires:
+                return snap
         try:
             snap = await _fetch_remote(url, fetch or _http_fetch)
             ttl = CACHE_TTL_S
@@ -218,7 +230,8 @@ async def _snapshot(*, refresh: bool, fetch: Fetch | None) -> _Snapshot:
             )
             snap = _bundled(url=url, error=str(exc))
             ttl = FAILURE_TTL_S
-        _cache[url] = (time.monotonic() + ttl, snap)
+        done = time.monotonic()
+        _cache[url] = (done + ttl, done, snap)
         return snap
 
 

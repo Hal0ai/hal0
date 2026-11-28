@@ -171,8 +171,9 @@ above.
   hardware or its profiles.
 - **How often.** The API fetches the index at most once an hour and serves
   every viewer from that copy. "Check again" on the page
-  (`GET /api/profile-addons?refresh=true`) fetches it now. Each request has a
-  five-second timeout and redirects are not followed.
+  (`GET /api/profile-addons?refresh=true`) fetches it now, at most once every
+  30 seconds however often it is asked. Each request has a five-second timeout
+  and redirects are not followed.
 - **With no network.** The rows are the addons the running release was built
   with, the same four `community/addons/` holds, and the response says so
   (`source: "bundled"`, with the reason in `error`). That set changes only

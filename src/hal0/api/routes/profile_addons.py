@@ -47,7 +47,7 @@ async def list_profile_addons(refresh: bool = False) -> dict[str, Any]:
         }
 
     The published index is fetched at most once an hour; ``refresh=true``
-    fetches it now. When it cannot be reached the addons this release ships
+    fetches it now, unless it was fetched in the last 30 seconds. When it cannot be reached the addons this release ships
     are returned with ``source: "bundled"`` and the reason in ``error``. This
     route never fails because the index did.
     """

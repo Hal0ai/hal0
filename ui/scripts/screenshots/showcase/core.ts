@@ -18,6 +18,8 @@
  * consulted, so the paths this file owns are opted out of it through
  * `window.__hal0MockPassthrough` and then routed here.
  */
+import fs from 'node:fs'
+import path from 'node:path'
 import type { Page, Route } from '@playwright/test'
 
 import { MOCK_DATA } from '../../../tests/e2e/fixtures/mock-data'
@@ -557,10 +559,16 @@ export async function installCore(page: Page) {
     return json(route, activity(w))
   })
   await page.route('**/api/system-stats', (route) => json(route, systemStats()))
+  // Import catalog: the addons hal0 publishes, read from community/addons/
+  // (the same files a box falls back to), shown as the site's index.
+  await page.route('**/api/profile-addons*', (route) => json(route, profileAddons()))
   // Profiles: the e2e seed set, with its per-profile speed figures cleared
   // except the two README.md "Benchmarks" quotes (FLM gemma3:1b ~38.6 tok/s,
   // Kokoro ~0.18 real-time factor); the others have no published source.
   const sourced: Record<string, { tps?: number; rtf?: number }> = { flm: { tps: 38.6 }, tts: { rtf: 0.18 } }
+  // The API reports a runtime family for every profile; the e2e seed set
+  // predates the field, so the three single-engine seeds get theirs here.
+  const family: Record<string, string> = { flm: 'flm', tts: 'kokoro', comfyui: 'comfyui' }
   await page.route('**/api/profiles', (route) =>
     route.request().method() !== 'GET'
       ? route.fallback()
@@ -568,10 +576,41 @@ export async function installCore(page: Page) {
           route,
           (MOCK_DATA.profiles ?? []).map((p: any) => ({
             ...p,
+            runtime_family: p.runtime_family ?? family[p.name] ?? 'llama-server',
             tps: sourced[p.name]?.tps ?? null,
             rtf: sourced[p.name]?.rtf ?? null,
           })),
         ),
   )
   await page.route(/\/api\/stats(\?|$)/, (route) => json(route, usageStats()))
+}
+
+/** GET /api/profile-addons, built from the committed community/addons/ files. */
+function profileAddons() {
+  const dir = path.resolve(process.cwd(), '..', 'community', 'addons')
+  const index = JSON.parse(fs.readFileSync(path.join(dir, 'index.json'), 'utf8'))
+  return {
+    source: 'remote',
+    url: 'https://hal0.dev/profiles/index.json',
+    fetched_at: '2026-11-28T18:00:00Z',
+    error: null,
+    addons: index.addons.map((row: any) => {
+      const envelope = JSON.parse(fs.readFileSync(path.join(dir, row.file), 'utf8'))
+      return {
+        name: row.name,
+        title: row.title,
+        description: row.description,
+        runtime_family: row.runtime_family,
+        runner: row.runner,
+        runner_stripped: false,
+        checksum: row.checksum,
+        min_hal0_version: row.min_hal0_version,
+        installed: false,
+        profile: envelope.profile,
+        envelope,
+        blocked: null,
+        first_party: true,
+      }
+    }),
+  }
 }

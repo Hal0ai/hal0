@@ -111,13 +111,35 @@ async def test_fetch_switched_off_serves_bundled_without_a_request(
     assert catalog["error"] is None
 
 
-async def test_fetched_catalog_is_cached_until_refresh() -> None:
+async def test_fetched_catalog_is_cached_until_refresh(monkeypatch: pytest.MonkeyPatch) -> None:
     site = Site()
+    clock = [1000.0]
+    monkeypatch.setattr(addon_catalog.time, "monotonic", lambda: clock[0])
     await _load(site)
     first = len(site.calls)
+    clock[0] += addon_catalog.CACHE_TTL_S - 1
     await _load(site)
     assert len(site.calls) == first
 
+    await _load(site, refresh=True)
+    assert len(site.calls) == 2 * first
+
+
+async def test_refresh_is_honoured_at_most_once_per_interval(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The route is open to the network, so a refresh loop must not become a fetch loop."""
+    site = Site()
+    clock = [1000.0]
+    monkeypatch.setattr(addon_catalog.time, "monotonic", lambda: clock[0])
+    await _load(site)
+    first = len(site.calls)
+
+    for _ in range(5):
+        await _load(site, refresh=True)
+    assert len(site.calls) == first
+
+    clock[0] += addon_catalog.MIN_REFRESH_INTERVAL_S
     await _load(site, refresh=True)
     assert len(site.calls) == 2 * first
 

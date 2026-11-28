@@ -79,6 +79,10 @@ def test_catalog_serves_the_published_index_and_refreshes_on_request(
 
     client.get("/api/profile-addons")
     assert len(calls) == 2
+    # A refresh straight after a fetch is served from the copy just read.
+    client.get("/api/profile-addons?refresh=true")
+    assert len(calls) == 2
+    monkeypatch.setattr(addon_catalog, "MIN_REFRESH_INTERVAL_S", 0.0)
     client.get("/api/profile-addons?refresh=true")
     assert len(calls) == 4
 
