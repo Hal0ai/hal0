@@ -541,6 +541,20 @@ def test_starter_three_ways(tmp_path: Path, value: str, expected: list[str]) -> 
     assert lines(proc) == expected
 
 
+@pytest.mark.parametrize(
+    "models",
+    [
+        pytest.param({"brain": "qwen3-8b", "memory": "shared"}, id="no-starter-key"),
+        pytest.param({"brain": "qwen3-8b", "memory": "shared", "starter": None}, id="null"),
+        pytest.param({"brain": "qwen3-8b"}, id="brain-only"),
+    ],
+)
+def test_no_starter_key_means_no_agent_model_pull(tmp_path: Path, models: dict) -> None:
+    # What an unattended run's document holds when nobody asked for a starter model.
+    got = lines(run({"version": 1, "models": models}, tmp_path, manifest=_manifest(tmp_path)))
+    assert not any(x.startswith(("HAL0_PULL_AGENT_MODEL", "HAL0_AGENT_MODEL")) for x in got), got
+
+
 _BAD = ["$(reboot)", "`id`", "a;b", "a\nb", '"quoted"', "a\x00b", "a\rb", "a'b", "a\\b", "a|b"]
 
 
