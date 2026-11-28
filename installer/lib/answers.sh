@@ -29,7 +29,7 @@
 unset HAL0_ANSWERS_SAVED HAL0_ANSWERS_APPLIED HAL0_ANSWERS_EXPORTED _HAL0_ANSWERS_PY \
     HAL0_WIZARD_RAN HAL0_ANSWERS_ORIGIN _HAL0_WIZARD_CALLED _HAL0_WIZARD_HF_TOKEN \
     _HAL0_WIZARD_CHOSEN_STORE _HAL0_SAVED_STORE _HAL0_WIZARD_ENTRY_PATH \
-    _HAL0_WIZARD_CATALOG_PATH _HAL0_WIZARD_MODELS_PATH
+    _HAL0_WIZARD_CATALOG_PATH _HAL0_WIZARD_MODELS_PATH _HAL0_WIZARD_INT
 
 # Where the reader lives, and the names it may emit. Assigned unconditionally
 # (never taken from the environment); tests override them after sourcing.
@@ -575,26 +575,45 @@ _hal0_saved_store() {
     return 0
 }
 
+# _hal0_wizard_one_line FILE: set the CALLER's `line` to the one line FILE
+# holds, or fail with `line` empty. FILE must be exactly one line ending in a
+# newline, at most 8 KiB: its size in bytes must be the line's length plus one.
+# So a second line, a missing newline and a NUL byte (which bash's `read` drops
+# without a word) are all refused, never read around. The caller has checked
+# FILE is its own regular file in the root-only work directory.
+_hal0_wizard_one_line() {
+    local file="${1}" size="" LC_ALL=C
+    line=""
+    size="$(stat -c %s -- "${file}" 2>/dev/null)" || return 1
+    [[ "${size}" =~ ^[0-9]{1,5}$ ]] && (( size <= 8192 )) || return 1
+    IFS= read -r line <"${file}" 2>/dev/null || { line=""; return 1; }
+    if (( ${#line} + 1 != size )); then
+        line=""
+        return 1
+    fi
+    return 0
+}
+
 # _hal0_wizard_take_token FILE: the Hugging Face token the person typed on the
-# screens. One line, read with `read` (never sourced or evaluated): accepted only
-# as `HF_TOKEN=<letters, digits, _ and ->` and nothing else in the file. It goes
-# to _HAL0_WIZARD_HF_TOKEN, not exported; install.sh hands it to HF_TOKEN_VAL,
-# the variable the legacy prompt fills. Anything else: one warning that never
-# shows the file's content, and no token. The file is removed either way.
+# screens. One line (_hal0_wizard_one_line), read with `read` (never sourced or
+# evaluated) and split at its first `=`: accepted only as
+# `HF_TOKEN=<letters, digits, _ and ->`, so a trailing `=` is refused, not
+# dropped. It goes to _HAL0_WIZARD_HF_TOKEN, not exported; install.sh hands it
+# to HF_TOKEN_VAL, the variable the legacy prompt fills. Anything else: one
+# warning that never shows the file's content, and no token. The file is
+# removed either way.
 _hal0_wizard_take_token() {
-    local file="${1}" tname="" tvalue="" textra="" first=0 more=1 LC_ALL=C
-    export -n tname tvalue textra
+    local file="${1}" line="" tname="" tvalue="" LC_ALL=C
+    export -n line tname tvalue
     _HAL0_WIZARD_HF_TOKEN=""
     if [[ ! -e "${file}" && ! -L "${file}" ]]; then
         return 0
     fi
-    if _hal0_wizard_own_file "${file}"; then
-        {
-            IFS='=' read -r tname tvalue || first=$?
-            IFS= read -r textra || more=$?
-        } <"${file}" 2>/dev/null
-        if [[ "${first}" -eq 0 && "${more}" -ne 0 && -z "${textra}" \
-            && "${tname}" == "HF_TOKEN" && "${tvalue}" =~ ^[A-Za-z0-9_-]+$ ]]; then
+    if _hal0_wizard_own_file "${file}" && _hal0_wizard_one_line "${file}" \
+        && [[ "${line}" == *=* ]]; then
+        tname="${line%%=*}"
+        tvalue="${line#*=}"
+        if [[ "${tname}" == "HF_TOKEN" && "${tvalue}" =~ ^[A-Za-z0-9_-]+$ ]]; then
             _HAL0_WIZARD_HF_TOKEN="${tvalue}"
         fi
     fi
@@ -602,7 +621,7 @@ _hal0_wizard_take_token() {
     if [[ -z "${_HAL0_WIZARD_HF_TOKEN}" ]]; then
         _hal0_answers_warn "the Hugging Face token from the setup screens was not in the expected form; it was not used (set HF_TOKEN when running the installer, or add it later in the dashboard)"
     fi
-    unset tname tvalue textra
+    unset line tname tvalue
     return 0
 }
 
@@ -628,15 +647,32 @@ hal0_run_wizard() {
         _hal0_answers_err "the setup screens need Python 3.12 or newer, and ${PY:-python3} is not one"
         return 1
     fi
-    local dir rc=0
+    local dir="" rc=0
+    # An interrupt of the installer itself (Ctrl-C reaches the whole process
+    # group, also before the wizard has its own handler, and while the reader
+    # checks a given file) takes the path of the wizard's exit 130: no failure
+    # report, the work directory removed, exit 130. Without this trap bash
+    # would die of the signal and the EXIT trap would write a report.
+    # install.sh sets no INT trap of its own, so `trap - INT` restores it.
+    _HAL0_WIZARD_INT=0
+    trap '_HAL0_WIZARD_INT=1' INT
     if ! dir="$(_hal0_wizard_workdir)" || [[ -z "${dir}" ]]; then
+        trap - INT
+        if [[ "${_HAL0_WIZARD_INT}" == "1" ]]; then
+            [[ -z "${dir}" ]] || rm -rf -- "${dir}"
+            return 130
+        fi
         _hal0_answers_err "could not make a work directory for the setup screens that only root can use"
         return 1
     fi
     if declare -F hal0_tmp_track >/dev/null 2>&1; then hal0_tmp_track "${dir}"; fi
     _hal0_wizard_call "${dir}" || rc=$?
+    trap - INT
     rm -rf -- "${dir}"
     if declare -F hal0_tmp_remove >/dev/null 2>&1; then hal0_tmp_remove "${dir}"; fi
+    if [[ "${_HAL0_WIZARD_INT}" == "1" ]]; then
+        rc=130
+    fi
     return "${rc}"
 }
 
@@ -704,7 +740,9 @@ _hal0_wizard_call() {
     # prints on standard output or error reaches the installer's standard error
     # only through _HAL0_WIZARD_OUTPUT_PY. The filter ignores an interrupt, so
     # it keeps draining while the wizard handles one. The wizard's own status is
-    # the first of the pipeline's.
+    # the first of the pipeline's. An interrupt that came before this point
+    # (hal0_run_wizard's trap) means the wizard is not started at all.
+    [[ "${_HAL0_WIZARD_INT:-0}" != "1" ]] || return 130
     if "${cmd[@]}" </dev/null 2>&1 \
         | { trap '' INT; exec "${PY}" -I -c "${_HAL0_WIZARD_OUTPUT_PY}" >&2; }; then
         status=("${PIPESTATUS[@]}")
@@ -728,9 +766,14 @@ _hal0_wizard_call() {
     _hal0_wizard_take_token "${secret}"
     # The folder the person changed on the screens in this run. A headless run
     # never shows a screen, so a file there is ignored.
+    # It must be exactly one line (_hal0_wizard_one_line); anything else is
+    # refused with one warning, and the store then takes the strict rule.
     if [[ "${headless}" -eq 0 ]] && _hal0_wizard_own_file "${chosen_out}"; then
-        IFS= read -r line <"${chosen_out}" 2>/dev/null || line=""
-        chosen="${line}"
+        if _hal0_wizard_one_line "${chosen_out}"; then
+            chosen="${line}"
+        else
+            _hal0_answers_warn "the folder chosen on the setup screens was not recorded in the expected form (one line); the model store is checked as one from a document"
+        fi
     fi
     rm -f -- "${chosen_out}"
     # A document merged from a given file had no screens: what it says about

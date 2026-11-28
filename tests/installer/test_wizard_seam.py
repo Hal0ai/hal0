@@ -53,16 +53,26 @@ if given:
     record["answers_bytes"] = open(given, "rb").read().hex()
 with open(os.environ["STUB_LOG"], "a", encoding="utf-8") as fh:
     fh.write(json.dumps(record) + "\n")
-def write(path, text):
+def write(path, name):
+    if name + "_HEX" in os.environ:
+        data = bytes.fromhex(os.environ[name + "_HEX"])
+    elif name in os.environ:
+        data = os.environ[name].encode("utf-8")
+    else:
+        return
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    with os.fdopen(fd, "w", encoding="utf-8") as fh:
-        fh.write(text)
-if "STUB_DOC" in os.environ:
-    write(out, os.environ["STUB_DOC"])
-if "STUB_SECRET" in os.environ and secret:
-    write(secret, os.environ["STUB_SECRET"])
-if "STUB_CHOSEN" in os.environ and chosen:
-    write(chosen, os.environ["STUB_CHOSEN"])
+    with os.fdopen(fd, "wb") as fh:
+        fh.write(data)
+write(out, "STUB_DOC")
+if secret:
+    write(secret, "STUB_SECRET")
+if chosen:
+    write(chosen, "STUB_CHOSEN")
+if "STUB_SLEEP" in os.environ:
+    import signal, time
+    signal.signal(signal.SIGINT, signal.SIG_DFL)  # no handler of its own yet
+    open(os.environ["STUB_SLEEP"], "w").close()
+    time.sleep(30)
 sys.stdout.write(os.environ.get("STUB_STDOUT", ""))
 sys.stdout.flush()
 sys.stderr.write(os.environ.get("STUB_STDERR", ""))
@@ -467,6 +477,14 @@ def test_reconfigure_is_documented_in_the_usage_text() -> None:
     assert "[--reconfigure]" in usage and "  --reconfigure " in usage
 
 
+def test_usage_text_says_a_piped_run_can_show_the_screens() -> None:
+    usage = " ".join(_slice("--help|-h)", "exit 0").split())
+    assert "a piped (\\`curl … | bash\\`) or headless run takes the default." not in usage
+    assert "setup screens" in usage and "terminal can be opened" in usage
+    # and stays true for a tree without them
+    assert "Without the setup screens" in usage
+
+
 # ── exit 0 ──────────────────────────────────────────────────────────────────
 
 
@@ -514,8 +532,14 @@ def test_a_document_the_reader_refuses_stops(tmp_path: Path, stub: dict[str, str
 
 
 def _seam_run(tmp_path: Path, env: dict[str, str]) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(["bash", "-c", _seam_script(tmp_path)], capture_output=True, text=True,
+                          timeout=60, env={"PATH": os.environ["PATH"], "HAL0_PLAIN": "1", **env},
+                          check=False, cwd=tmp_path)
+
+
+def _seam_script(tmp_path: Path, pre: str = "") -> str:
     seam = _slice("# answers-seam: begin", "# answers-seam: end")
-    script = f"""
+    return f"""
 set -euo pipefail
 IFS=$'\\n\\t'
 PY="{sys.executable}"
@@ -532,12 +556,10 @@ trap 'hal0_report_on_exit "$?"' EXIT
 trap 'echo "ERR TRAP" >> "{tmp_path}/report.log"; _HAL0_REPORT_WRITTEN=1; exit 1' ERR
 _HAL0_INSTALL_ARGS=()
 _HAL0_RECONFIGURE=0
+{pre}
 {seam}
 echo "PAST THE SEAM"
 """
-    return subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=60,
-                          env={"PATH": os.environ["PATH"], "HAL0_PLAIN": "1", **env},
-                          check=False, cwd=tmp_path)
 
 
 @pytest.mark.parametrize(
@@ -570,6 +592,63 @@ def test_exit_0_goes_past_the_seam(tmp_path: Path, stub: dict[str, str]) -> None
     assert not (tmp_path / "report.log").exists()
 
 
+SLOW_READER = """
+import os, signal, sys, time
+signal.signal(signal.SIGINT, signal.SIG_DFL)
+open(os.environ["STUB_SLEEP"], "w").close()
+time.sleep(30)
+"""
+
+
+@pytest.mark.parametrize("stage", ["wizard", "reader"])
+def test_an_interrupt_before_the_wizard_handles_it_is_a_quiet_130(
+        tmp_path: Path, stub: dict[str, str], stage: str) -> None:
+    # Ctrl-C reaches the whole process group. The stub has no handler of its
+    # own yet, so it dies of the signal, as the real wizard would before its
+    # handler is installed; so does the reader checking a given file.
+    import signal
+    import time
+    marker = tmp_path / "sleeping"
+    env = {"PATH": os.environ["PATH"], "HAL0_PLAIN": "1", **stub, "STUB_DOC": DOC,
+           "STUB_SLEEP": str(marker)}
+    pre = ""
+    if stage == "reader":
+        slow = tmp_path / "slow_reader.py"
+        slow.write_text(SLOW_READER, encoding="utf-8")
+        given = tmp_path / "given.json"
+        given.write_text(DOC, encoding="utf-8")
+        env["HAL0_ANSWERS_FILE"] = str(given)
+        pre = f'_HAL0_ANSWERS_READER="{slow}"'
+    proc = subprocess.Popen(["bash", "-c", _seam_script(tmp_path, pre)], stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE, text=True, env=env, cwd=tmp_path,
+                            start_new_session=True)
+    try:
+        deadline = time.monotonic() + 20
+        while not marker.exists():
+            assert proc.poll() is None and time.monotonic() < deadline, proc.communicate()
+            time.sleep(0.05)
+        os.killpg(proc.pid, signal.SIGINT)
+        out, err = proc.communicate(timeout=20)
+    finally:
+        if proc.poll() is None:
+            os.killpg(proc.pid, signal.SIGKILL)
+    assert proc.returncode == 130, (proc.returncode, out, err)
+    assert "PAST THE SEAM" not in out
+    log = (tmp_path / "report.log").read_text() if (tmp_path / "report.log").exists() else ""
+    assert log == "", log
+    assert list((tmp_path / "prefix" / "run" / "hal0-install").iterdir()) == []
+    if stage == "reader":
+        assert _records(tmp_path) == [], "the wizard must not start after an interrupt"
+
+
+def test_the_installer_sets_no_interrupt_trap_of_its_own() -> None:
+    # hal0_run_wizard puts its own back with `trap - INT`; that is only right
+    # while install.sh has none to restore.
+    for line in TEXT.splitlines():
+        stripped = line.strip()
+        assert not (stripped.startswith("trap ") and stripped.endswith(" INT")), line
+
+
 def test_without_the_wizard_a_bad_document_still_goes_through_the_err_trap(
         tmp_path: Path) -> None:
     bad = tmp_path / "bad.json"
@@ -596,10 +675,14 @@ def test_secret_file_read_and_removed(tmp_path: Path, stub: dict[str, str]) -> N
 @pytest.mark.parametrize("text", [
     f"OTHER={TOKEN}\n", f"HF_TOKEN={TOKEN} x\n", f"HF_TOKEN={TOKEN}\nHF_TOKEN=b\n",
     "HF_TOKEN=\n", f"HF_TOKEN=$({TOKEN})\n", f"HF_TOKEN={TOKEN}\x1b[2J\n", f" HF_TOKEN={TOKEN}\n",
+    # a trailing '=' is refused, not dropped; so are a missing newline and a NUL
+    f"HF_TOKEN={TOKEN}=\n", f"HF_TOKEN={TOKEN}==\n", f"HF_TOKEN={TOKEN}", "HF_TOKEN\n",
+    f"HF_TOKEN={TOKEN[:6]}\x00{TOKEN[6:]}\n", f"HF_TOKEN={TOKEN}\n\x00",
+    f"HF_TOKEN={TOKEN}\n\n",
 ])
 def test_secret_file_with_other_name_ignored(tmp_path: Path, stub: dict[str, str],
                                              text: str) -> None:
-    proc = _collect(tmp_path, {**stub, "STUB_DOC": DOC, "STUB_SECRET": text})
+    proc = _collect(tmp_path, {**stub, "STUB_DOC": DOC, "STUB_SECRET_HEX": text.encode().hex()})
     state = _state(proc)
     assert state["RC"] == "0" and state["TOKEN_SET"] == "", proc.stdout + proc.stderr
     assert proc.stderr.count("WARN") == 1
@@ -679,6 +762,17 @@ def test_chosen_folder_honoured_only_when_equal(tmp_path: Path, stub: dict[str, 
                                    "STUB_CHOSEN": line}, after=CHECK)
         state = _state(proc)
         assert state["RC"] == "0" and state["CHOSEN"] == "" and state["OWN"] == "no", line
+    # a file that is not exactly one line is refused (one warning), not read on
+    # its first line; so is one with a NUL byte, which bash would drop
+    for raw in (b"/home/alice/models\nextra\n", b"/home/alice/models\n\n",
+                b"/home/alice/mo\x00dels\n", b"/home/alice/models\n\x00",
+                b"/home/alice/models"):
+        proc = _collect(tmp_path, {**stub, "STUB_DOC": _store_doc("/home/alice/models"),
+                                   "STUB_CHOSEN_HEX": raw.hex()}, after=CHECK)
+        state = _state(proc)
+        assert state["RC"] == "0" and state["CHOSEN"] == "" and state["OWN"] == "no", raw
+        assert proc.stderr.count("WARN") == 1 and "chosen" in proc.stderr, proc.stderr
+        assert state["LEFT"] == ""
     # and the doubled slash the reader folds: compared with the exported text
     proc = _collect(tmp_path, {**stub, "STUB_DOC": _store_doc("//home/alice/models"),
                                "STUB_CHOSEN": "/home/alice/models\n"}, after=CHECK)

@@ -291,8 +291,12 @@ Usage: install.sh [--dev] [--no-start] [--models-dir=PATH] [--summary-json=PATH]
   --models-dir=PATH   absolute path where HuggingFace pulls land
                       (default: /var/lib/hal0/models — or \$PWD/.hal0ai/var/lib/hal0/models
                       under --dev). Can also be set with HAL0_MODELS_DIR=PATH.
-                      Omit it and the installer asks on an interactive terminal;
-                      a piped (\`curl … | bash\`) or headless run takes the default.
+                      Omit it and the installer asks on an interactive terminal.
+                      With the setup screens in this release, a piped
+                      (\`curl … | bash\`) run shows them too when the terminal
+                      can be opened; a headless run (HAL0_NONINTERACTIVE=1, or
+                      no terminal) takes the default. Without the setup screens
+                      a piped or headless run takes the default.
   --summary-json=PATH write a machine-readable install summary (versions,
                       ports, bind host, model pulled, per-step durations,
                       warning count) to PATH as JSON, atomically. See
