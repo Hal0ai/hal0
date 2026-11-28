@@ -14,10 +14,14 @@ from dataclasses import replace
 from .catalog import Component, ModelRow, Question
 from .document import Document, get
 from .facts import satisfied
-from .flow_basic import DEFAULT_HOST, DEFAULT_PORT, disk_of, validate_folder
+from .flow_basic import validate_folder
 from .flow_model import (
+    DEFAULT_HOST,
+    DEFAULT_PORT,
     Row,
     State,
+    auto_row,
+    disk_of,
     effective_doc,
     failing_need,
     fixed_override,
@@ -37,6 +41,7 @@ _MEMORY_JOB = "memory"
 _UNCHECKED = "could not be checked on this box"
 _NPU_FOUND = "found; set up if it passes its check"
 _PROXMOX = "; in a Proxmox container the host has to pass it through first"
+_AFTER_CHECK = "chosen after hal0 has checked this box"
 _NO_MODELS = "no models to choose from yet; they are added after install"
 _TOKEN = "token"
 _FIELD = "q:"
@@ -74,7 +79,7 @@ def jobs_rows(s: State) -> tuple[Row, ...]:
     for c in s.catalog.components:
         state, note = _job_state(s, c)
         size = "" if c.download_gb is None else f"about {fmt_gb(c.download_gb)} GB"
-        ticked = state != "unavailable" and get(doc, c.answer_key) == c.on
+        ticked = get(doc, c.answer_key) == c.on
         rows.append(make_row(c.id, c.label, size, "check", ticked, state, note))
     return tuple(rows)
 
@@ -84,7 +89,17 @@ def jobs_space(s: State) -> State:
     if row.state != "open":
         return s
     c = next(c for c in s.catalog.components if c.id == row.id)
-    return record_answer(s, c.answer_key, c.off if row.value else c.on)
+    return _prune(record_answer(s, c.answer_key, c.off if row.value else c.on))
+
+
+def _prune(s: State) -> State:
+    """Drop answers whose job is off, so they are neither written nor reviewed."""
+    keep = dict(s.answers)
+    for job, qid in ((_ASSISTANT_JOB, "terminal_tool"), (_MEMORY_JOB, "memory_model")):
+        q = _question(s, qid)
+        if q is not None and _job_off(s, job):
+            keep.pop(q.answer_key, None)
+    return replace(s, answers=keep)
 
 
 # ---------------------------------------------------------- MODELS screen
@@ -107,26 +122,59 @@ def _ladder_row(s: State, row: ModelRow, fixed_note: str | None) -> Row:
     return make_row(row.model, row.label, size, "choice", row.model, state, note)
 
 
+def _extra_row(s: State, q: Question, value: str, fixed_note: str | None) -> Row | None:
+    """The `auto` or `none` row, worded by the question's options."""
+    option = next((o for o in q.options if o.value == value), None)
+    if option is None:
+        return None
+    detail = option.help
+    if value == "auto":
+        pick = auto_row(s)
+        detail = (
+            _AFTER_CHECK
+            if pick is None
+            else pick.label
+            if pick.download_gb is None
+            else f"{pick.label} ({fmt_gb(pick.download_gb)} GB)"
+        )
+    state, note = ("open", "") if fixed_note is None else ("fixed", fixed_note)
+    return make_row(value, option.label, detail, "choice", value, state, note)
+
+
 def models_rows(s: State) -> tuple[Row, ...]:
     role, qid = _role(s)
     q = _question(s, qid)
     ladder = [r for r in s.catalog.model_ladder if r.role == role]
     if q is None or not ladder:
-        return (make_row("none", q.title if q else "Models", _NO_MODELS),)
+        return (make_row("none", q.title if q else "Models", _NO_MODELS, "info"),)
     fixed = fixed_override(s, q.answer_key)
     current = get(effective_doc(s), q.answer_key)
-    return tuple(
-        _ladder_row(
-            s,
-            r,
-            None if fixed is None else (set_by(fixed) if current in (r.model, [r.model]) else ""),
-        )
-        for r in ladder
-    )
+
+    def note(*values: object) -> str | None:
+        if fixed is None:
+            return None
+        return set_by(fixed) if current in values else ""
+
+    rows = [_ladder_row(s, r, note(r.model, [r.model])) for r in ladder]
+    if role != "starter":
+        return tuple(rows)
+    auto = _extra_row(s, q, "auto", note("auto"))
+    none = _extra_row(s, q, "none", note("none"))
+    return _present([auto, *rows, none])
 
 
 def models_cursor(s: State) -> int:
-    return next((i for i, r in enumerate(models_rows(s)) if r.state == "open"), 0)
+    rows = models_rows(s)
+    if s.step == 0:
+        q = _question(s, _role(s)[1])
+        current = None if q is None else get(effective_doc(s), q.answer_key)
+        for i, r in enumerate(rows):
+            if r.value == current:
+                return i
+        for i, r in enumerate(rows):
+            if r.id == "auto":
+                return i
+    return next((i for i, r in enumerate(rows) if r.state == "open"), 0)
 
 
 def models_title(s: State) -> str:
@@ -149,22 +197,28 @@ def _models_next(s: State) -> State:
 def models_enter(s: State) -> State:
     rows = models_rows(s)
     row = rows[s.cursor]
-    if row.state == "unavailable" and any(r.state == "open" for r in rows):
-        return s
+    if row.state == "unavailable":
+        if any(r.state == "open" for r in rows):
+            return replace(s, error=row.note)
+        return _models_next(s)
     if row.kind == "info" or row.state != "open":
         return _models_next(s)
     role, qid = _role(s)
     key = key_of(s, qid)
-    s = record_answer(s, key, row.value if role == "starter" else [row.value])
-    picked = next(r for r in s.catalog.model_ladder if r.model == row.value and r.role == role)
-    if picked.needs_account:
+    value = row.value if role == "starter" else [row.value]
+    if get(effective_doc(s), key) != value:
+        s = record_answer(s, key, value)
+    picked = next(
+        (r for r in s.catalog.model_ladder if r.model == row.value and r.role == role), None
+    )
+    if picked is not None and picked.needs_account and _question(s, "hf_token") is not None:
         return replace(s, editing="", field=_TOKEN, error=None)
-    return _models_next(s)
+    return _models_next(replace(s, token=None))
 
 
 def commit_token(s: State, text: str) -> State:
     """A blank token skips; the typed one is kept apart from the answers."""
-    done = replace(s, editing=None, field="", error=None, token=text or s.token)
+    done = replace(s, editing=None, field="", error=None, token=text or None)
     return _models_next(done)
 
 
@@ -193,7 +247,8 @@ def _folder_row(s: State, doc: Document, qid: str) -> Row | None:
     if row is None or not isinstance(row.value, str):
         return row
     disk = disk_of(row.value, s.facts.disks)
-    return replace(row, detail="" if disk is None else f"{fmt_gb(disk.free_gb)} GB free")
+    free = "" if disk is None else f" ({fmt_gb(disk.free_gb)} GB free)"
+    return replace(row, detail=row.value + free)
 
 
 def _present(rows: list[Row | None]) -> tuple[Row, ...]:
@@ -311,4 +366,4 @@ def commit_field(s: State, text: str) -> State:
 
 
 def accept(s: State) -> State:
-    return go_on(s)
+    return go_on(_prune(s))

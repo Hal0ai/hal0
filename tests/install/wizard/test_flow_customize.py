@@ -130,17 +130,17 @@ def test_model_row_open_with_requirement_when_pool_unknown_and_review_warns(
     big = next(r for r in view(s).rows if r.id == "big-1")
     assert big.state == "open"
     assert big.note == "needs 24 GB of GPU memory; could not be checked on this box"
-    # pick big-1, blank token, storage, network, assistant
-    review = view(run(s, "DOWN", "ENTER", "ENTER", "ENTER", "ENTER", "ENTER"))
+    # pick big-1 (two down), blank token, storage, network, assistant
+    review = view(run(s, "DOWN", "DOWN", "ENTER", "ENTER", "ENTER", "ENTER", "ENTER", "ENTER"))
     assert any(r.id == "warning" and "big-1" in r.detail for r in review.rows)
 
 
 def test_token_is_asked_only_for_a_model_that_needs_an_account(
     ladder_catalog: Catalog, big_pool_facts: Facts
 ) -> None:
-    small = run(custom(ladder_catalog, big_pool_facts), "ENTER", "ENTER")
+    small = run(custom(ladder_catalog, big_pool_facts), "ENTER", "DOWN", "ENTER")
     assert view(small).screen is Screen.STORAGE
-    big = run(custom(ladder_catalog, big_pool_facts), "ENTER", "DOWN", "ENTER")
+    big = run(custom(ladder_catalog, big_pool_facts), "ENTER", "DOWN", "DOWN", "ENTER")
     assert view(big).editing is not None
     assert "HuggingFace" in view(big).title
     typed = run(big, *"hf_abc", "ENTER")
@@ -152,14 +152,14 @@ def test_token_is_asked_only_for_a_model_that_needs_an_account(
 def test_the_token_is_never_shown_while_typing(
     ladder_catalog: Catalog, big_pool_facts: Facts
 ) -> None:
-    s = run(custom(ladder_catalog, big_pool_facts), "ENTER", "DOWN", "ENTER", *"hf_abc")
+    s = run(custom(ladder_catalog, big_pool_facts), "ENTER", "DOWN", "DOWN", "ENTER", *"hf_abc")
     assert view(s).editing == ""
     assert "hf_abc" not in repr(s)
     assert "hf_abc" not in json.dumps(chosen(s))
 
 
 def test_a_blank_token_skips_and_goes_on(ladder_catalog: Catalog, big_pool_facts: Facts) -> None:
-    s = run(custom(ladder_catalog, big_pool_facts), "ENTER", "DOWN", "ENTER", "ENTER")
+    s = run(custom(ladder_catalog, big_pool_facts), "ENTER", "DOWN", "DOWN", "ENTER", "ENTER")
     assert view(s).screen is Screen.STORAGE
     assert secret(s) is None
 
@@ -303,3 +303,113 @@ def test_back_from_review_returns_to_the_last_customize_screen(
 ) -> None:
     s = run(custom(catalog, usable_facts), *["ENTER"] * 5)
     assert view(press(s, "b")).screen is Screen.ASSISTANT
+
+
+def _models(catalog: Catalog, facts: Facts, **kw: object) -> State:
+    return run(custom(catalog, facts, **kw), "ENTER")
+
+
+def test_models_list_is_auto_then_the_ladder_then_none(
+    ladder_catalog: Catalog, big_pool_facts: Facts
+) -> None:
+    rows = view(_models(ladder_catalog, big_pool_facts)).rows
+    assert [r.id for r in rows] == ["auto", "small-1", "big-1", "none"]
+    options = {o.value: o for o in ladder_catalog.questions["starter_model"].options}
+    assert rows[0].label == options["auto"].label
+    assert rows[-1].label == options["none"].label
+
+
+def test_the_auto_row_names_the_expected_pick_or_says_it_is_not_known_yet(
+    ladder_catalog: Catalog, big_pool_facts: Facts, small_pool_facts: Facts
+) -> None:
+    fits = view(_models(ladder_catalog, big_pool_facts)).rows[0]
+    assert fits.detail == "Small (2 GB)"
+    nothing = replace(small_pool_facts, ram_gb=None)
+    none_fit = view(_models(ladder_catalog, nothing)).rows[0]
+    assert none_fit.detail == "chosen after hal0 has checked this box"
+
+
+def test_one_unchanged_enter_leaves_the_starter_out_of_the_answers(
+    ladder_catalog: Catalog, big_pool_facts: Facts
+) -> None:
+    s = _models(ladder_catalog, big_pool_facts)
+    assert view(s).cursor == 0
+    assert "models.starter" not in chosen(press(s, "ENTER"))
+
+
+def test_a_saved_model_starts_the_cursor_on_its_row(
+    ladder_catalog: Catalog, big_pool_facts: Facts
+) -> None:
+    saved: dict[str, object] = {"models": {"starter": "small-1"}}
+    assert view(_models(ladder_catalog, big_pool_facts, saved=saved)).cursor == 1
+    unknown: dict[str, object] = {"models": {"starter": "gone-9"}}
+    assert view(_models(ladder_catalog, big_pool_facts, saved=unknown)).cursor == 0
+
+
+def test_a_fixed_model_puts_the_cursor_on_the_fixed_row(
+    ladder_catalog: Catalog, big_pool_facts: Facts
+) -> None:
+    over = [Override("models.starter", "big-1", "HAL0_AGENT_MODEL")]
+    v = view(_models(ladder_catalog, big_pool_facts, over=over))
+    assert v.rows[v.cursor].id == "big-1"
+    assert v.rows[v.cursor].note == "set by HAL0_AGENT_MODEL"
+
+
+def test_enter_on_an_unavailable_row_sets_the_error_and_stays(
+    ladder_catalog: Catalog, small_pool_facts: Facts
+) -> None:
+    s = run(_models(ladder_catalog, small_pool_facts), "DOWN", "DOWN", "ENTER")
+    assert view(s).screen is Screen.MODELS
+    assert view(s).error == "needs 24 GB of GPU memory; this box has 8"
+
+
+def test_a_blank_token_clears_an_earlier_one_and_a_free_model_clears_it_too(
+    ladder_catalog: Catalog, big_pool_facts: Facts
+) -> None:
+    s = run(_models(ladder_catalog, big_pool_facts), "DOWN", "DOWN", "ENTER", *"hf_x", "ENTER")
+    assert secret(s) == "hf_x"
+    again = run(s, "b", "ENTER", "DOWN", "DOWN", "ENTER", "ENTER")
+    assert secret(again) is None
+    s = run(_models(ladder_catalog, big_pool_facts), "DOWN", "DOWN", "ENTER", *"hf_x", "ENTER")
+    free = run(s, "b", "ENTER", "DOWN", "ENTER")
+    assert secret(free) is None
+
+
+def test_no_token_question_means_no_token_field(
+    ladder_catalog: Catalog, big_pool_facts: Facts
+) -> None:
+    questions = {k: v for k, v in ladder_catalog.questions.items() if k != "hf_token"}
+    s = run(_models(replace(ladder_catalog, questions=questions), big_pool_facts), "DOWN", "DOWN")
+    assert view(press(s, "ENTER")).screen is Screen.STORAGE
+
+
+def test_the_storage_row_shows_the_path_and_free_space(
+    catalog: Catalog, usable_facts: Facts
+) -> None:
+    row = view(run(custom(catalog, usable_facts), "ENTER", "ENTER")).rows[0]
+    assert row.detail == "/var/lib/hal0/models (100 GB free)"
+
+
+def test_an_unavailable_job_the_preset_turns_on_keeps_its_value(
+    catalog: Catalog, no_python_facts: Facts
+) -> None:
+    row = next(r for r in view(custom(catalog, no_python_facts)).rows if r.id == "memory")
+    assert (row.state, row.value) == ("unavailable", True)
+
+
+def test_turning_the_assistant_off_drops_the_terminal_tool_answer(
+    catalog: Catalog, usable_facts: Facts
+) -> None:
+    on = run(custom(catalog, usable_facts), "ENTER", "ENTER", "ENTER", "ENTER", "SPACE")
+    assert chosen(on)["apps.hermes.terminal_tool"] is True
+    off = run(on, "b", "b", "b", "b", "DOWN", "SPACE", *["ENTER"] * 5)
+    assert view(off).screen is Screen.REVIEW
+    assert "apps.hermes.terminal_tool" not in chosen(off)
+    rows = {r.id: r for r in view(off).rows}
+    assert rows["terminal_tool"].detail == "off"
+
+
+def test_the_empty_ladder_hint_does_not_offer_a_choice(
+    catalog: Catalog, usable_facts: Facts
+) -> None:
+    assert "choose" not in view(_models(catalog, usable_facts)).hint

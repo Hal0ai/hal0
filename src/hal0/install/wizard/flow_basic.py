@@ -8,16 +8,18 @@ from __future__ import annotations
 import math
 import os
 import posixpath
-from collections.abc import Sequence
 from dataclasses import replace
 
 from .document import ADMIN_KEY, Document, Override, get, preset
 from .facts import Disk, Facts
 from .flow_model import (
+    DEFAULT_HOST,
+    DEFAULT_PORT,
     Outcome,
     Row,
     State,
     current_type,
+    disk_of,
     download_items,
     download_total,
     effective_doc,
@@ -39,8 +41,6 @@ from .flow_model import (
 )
 
 _DOWNLOAD_MBIT = 100
-DEFAULT_HOST = "hal0.local"
-DEFAULT_PORT = 8080
 _NPU_JOB = "npu"
 _NO_DOWNLOADS = "nothing yet; models are added after install"
 _GPU_REASONS = {
@@ -154,11 +154,6 @@ def type_enter(s: State) -> State:
 
 
 # --------------------------------------------------------- FOLDER screen
-
-
-def disk_of(path: str, disks: Sequence[Disk]) -> Disk | None:
-    owners = [d for d in disks if path == d.mount or path.startswith(d.mount.rstrip("/") + "/")]
-    return max(owners, key=lambda d: len(d.mount), default=None)
 
 
 def _disk_row(

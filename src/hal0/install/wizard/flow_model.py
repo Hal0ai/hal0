@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
+from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from enum import StrEnum
 from typing import NamedTuple
@@ -75,6 +76,8 @@ class State:
     step: int = 0
 
 
+DEFAULT_HOST = "hal0.local"
+DEFAULT_PORT = 8080
 SIZED_MODEL = "a chat model sized for this box"
 
 
@@ -92,6 +95,11 @@ def make_row(
 
 def fmt_gb(value: float) -> str:
     return f"{value:.0f}" if float(value).is_integer() else f"{value:.1f}"
+
+
+def disk_of(path: str, disks: Sequence[Disk]) -> Disk | None:
+    owners = [d for d in disks if path == d.mount or path.startswith(d.mount.rstrip("/") + "/")]
+    return max(owners, key=lambda d: len(d.mount), default=None)
 
 
 def set_by(fixed: Override) -> str:
@@ -175,13 +183,20 @@ def fits_box(row: ModelRow, facts: Facts) -> bool:
     return row.min_ram_gb is None or (facts.ram_gb is not None and facts.ram_gb >= row.min_ram_gb)
 
 
+def auto_row(s: State) -> ModelRow | None:
+    """The first starter row that fits this box: what `auto` resolves to."""
+    return next(
+        (r for r in s.catalog.model_ladder if r.role == "starter" and fits_box(r, s.facts)), None
+    )
+
+
 def pick_model(s: State, doc: Document) -> Pick | None:
     starter = maybe_value(s, doc, "starter_model")
     ladder = [r for r in s.catalog.model_ladder if r.role == "starter"]
     if not ladder or starter in (None, "none"):
         return None
     if starter == "auto":
-        row = next((r for r in ladder if fits_box(r, s.facts)), None)
+        row = auto_row(s)
         return (
             Pick(SIZED_MODEL, None, False)
             if row is None
