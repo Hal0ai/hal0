@@ -47,6 +47,8 @@ class Fake:
         ssh.write_text(
             "#!/usr/bin/env bash\n"
             f'printf "%s\\n" "$*" >> {shlex.quote(str(self.log))}\n'
+            'has_n=0; for a in "$@"; do [[ "$a" == -n ]] && has_n=1; [[ "$a" == -- ]] && break; done\n'
+            f'[[ "$has_n" == 1 ]] || cat > {shlex.quote(str(self.stdin_dump))}\n'
             'cmd="${*: -1}"\n'
             f"exec bash {shlex.quote(str(self.dir / 'handler.sh'))} \"$cmd\"\n"
         )
@@ -57,7 +59,7 @@ class Fake:
             p.chmod(0o755)
         self.write_handler()
 
-    def rule(self, needle: str, stdout: str = "", rc: int = 0):
+    def rule(self, needle: str, stdout: str | bytes = "", rc: int = 0):
         self.rules.append((needle, stdout, rc))
         self.write_handler()
 
@@ -65,10 +67,10 @@ class Fake:
         lines = ["#!/usr/bin/env bash", 'cmd="$1"']
         for i, (needle, out, rc) in enumerate(self.rules):
             f = self.dir / f"out{i}"
-            f.write_text(out)
+            f.write_bytes(out if isinstance(out, bytes) else out.encode())
             lines.append(
                 f"if [[ \"$cmd\" == *{shlex.quote(needle)}* ]]; then "
-                f"cat {shlex.quote(str(f))}; cat >/dev/null 2>&1 </dev/null; exit {rc}; fi"
+                f"cat {shlex.quote(str(f))}; exit {rc}; fi"
             )
         lines.append("echo \"fake ssh: unexpected command: $cmd\" >&2; exit 97")
         (self.dir / "handler.sh").write_text("\n".join(lines) + "\n")
@@ -76,8 +78,9 @@ class Fake:
     def calls(self) -> list[str]:
         return [x for x in self.log.read_text().splitlines() if x]
 
-    def run(self, body: str, env: dict | None = None):
-        script = f"source {shlex.quote(str(PVE_SH))}\n{body}\n"
+    def run(self, body: str, env: dict | None = None, strict: bool = False):
+        pre = "set -euo pipefail\n" if strict else ""
+        script = f"{pre}source {shlex.quote(str(PVE_SH))}\n{body}\n"
         full = {
             "PATH": f"{self.bin}:/usr/bin:/bin",
             "HOME": str(self.dir),
@@ -162,7 +165,21 @@ def test_pve_run_passes_one_argument_with_batch_options(fake):
     fake.run("pve_run 'echo hi; echo there'")
     fake.run("pve_run 'echo hi'")
     call = fake.calls()[-1]
-    assert call == "-o BatchMode=yes -o ConnectTimeout=10 testpve echo hi"
+    assert call == "-n -o BatchMode=yes -o ConnectTimeout=10 -- testpve echo hi"
+
+
+def test_pve_run_rejects_option_like_alias(fake):
+    r = fake.run("pve_run 'echo hi'", env={"HAL0_PVE": "-oProxyCommand=id"})
+    assert r.returncode == 1 and fake.calls() == []
+
+
+def test_pve_run_leaves_callers_stdin_alone(fake):
+    fake.rule("echo hi", "hi\n")
+    r = fake.run(
+        "printf 'a\\nb\\n' | while read -r x; do pve_run 'echo hi' >/dev/null; echo \"got $x\"; done"
+    )
+    assert r.stdout.split() == ["got", "a", "got", "b"]
+    assert not fake.stdin_dump.exists() or fake.stdin_dump.read_bytes() == b""
 
 
 # --- template and storage ---------------------------------------------------
@@ -316,7 +333,7 @@ def test_destroy_refuses_hostile_vmid_before_any_ssh(fake, bad):
 def test_destroy_owned_calls_destroy_and_verifies(fake):
     _owned_rules(fake, 172)
     fake.rule("pct destroy 172 --force --purge", "")
-    fake.rule("pct status 172", "", 2)
+    fake.rule("test -e /etc/pve/lxc/172.conf", "absent\n")
     r = fake.run("ct_destroy 172; echo rc=$?")
     assert "rc=0" in r.stdout
     calls = fake.calls()
@@ -324,13 +341,13 @@ def test_destroy_owned_calls_destroy_and_verifies(fake):
     assert kill and "[l]xc-start -F -n 172" in kill[0]
     assert "rm -f /run/lock/lxc/pve-config-172.lock" in kill[0]
     assert "pct destroy 172 --force --purge" in kill[0]
-    assert "pct status 172" in calls[-1]
+    assert "test -e /etc/pve/lxc/172.conf" in calls[-1]
 
 
 def test_destroy_returns_1_when_guest_still_there(fake):
     _owned_rules(fake, 172)
     fake.rule("pct destroy 172", "")
-    fake.rule("pct status 172", "status: stopped\n", 0)
+    fake.rule("test -e /etc/pve/lxc/172.conf", "present\n")
     r = fake.run("ct_destroy 172; echo rc=$?")
     assert "rc=1" in r.stdout
     assert len([c for c in fake.calls() if "pct destroy" in c]) == 2
@@ -339,7 +356,7 @@ def test_destroy_returns_1_when_guest_still_there(fake):
 def test_destroy_does_not_trust_a_dead_ssh_as_gone(fake):
     _owned_rules(fake, 172)
     fake.rule("pct destroy 172", "")
-    fake.rule("pct status 172", "", 255)
+    fake.rule("test -e /etc/pve/lxc/172.conf", "", 255)
     r = fake.run("ct_destroy 172; echo rc=$?")
     assert "rc=1" in r.stdout
 
@@ -351,7 +368,7 @@ def test_destroy_does_not_trust_a_dead_ssh_as_gone(fake):
         "ct_start {v}",
         "ct_push {v} /etc/hostname /tmp/x",
         "ct_pull {v} /tmp/x /dev/null",
-        "ct_apply_device_rules {v} 226",
+        "ct_apply_device_rules {v} 0 226",
     ],
 )
 @pytest.mark.parametrize("conf", [UNTAGGED_CONF, WRONG_HOST_CONF])
@@ -364,7 +381,7 @@ def test_guest_actions_refuse_unowned(fake, call, conf):
 
 @pytest.mark.parametrize(
     "call",
-    ["ct_exec 105 id", "ct_start 105", "ct_apply_device_rules 105 226", "ct_destroy 105"],
+    ["ct_exec 105 id", "ct_start 105", "ct_apply_device_rules 105 0 226", "ct_destroy 105"],
 )
 def test_guest_actions_refuse_out_of_range_without_ssh(fake, call):
     r = fake.run(call)
@@ -378,6 +395,7 @@ def test_guest_actions_refuse_out_of_range_without_ssh(fake, call):
 def _create(fake, tail="", env=None):
     fake.rule("pvesm status --content rootdir", STORAGE)
     fake.rule("pct create", "")
+    fake.rule("test -e /etc/pve/lxc/172.conf", "absent\n")
     return fake.run(
         "ct_create 172 local:vztmpl/ubuntu-26.04-standard_26.04-1_amd64.tar.zst 0 4 8192 40 "
         + tail,
@@ -428,7 +446,7 @@ def test_create_refuses_bad_arguments(fake, args):
 
 def test_create_refuses_an_existing_vmid(fake):
     fake.rule("pvesm status --content rootdir", STORAGE)
-    fake.rule("pct status 172", "status: running\n", 0)
+    fake.rule("test -e /etc/pve/lxc/172.conf", "present\n")
     r = fake.run("ct_create 172 local:vztmpl/x.tar.zst 0 4 8192 40")
     assert r.returncode == 1
     assert [c for c in fake.calls() if "pct create" in c] == []
@@ -449,7 +467,7 @@ def test_feature_list_matches_proxmox_script():
 def test_apply_device_rules_appends_idempotently(fake):
     _owned_rules(fake, 172)
     fake.rule("/etc/pve/lxc/172.conf", "")
-    r = fake.run("ct_apply_device_rules 172 226 238 226")
+    r = fake.run("ct_apply_device_rules 172 0 226 238 226")
     assert r.returncode == 0, r.stderr
     call = [c for c in fake.calls() if "/etc/pve/lxc/172.conf" in c][0]
     assert call.count("lxc.cgroup2.devices.allow:") >= 2
@@ -463,7 +481,7 @@ def test_apply_device_rules_appends_idempotently(fake):
 @pytest.mark.parametrize("bad", ["226;id", "x", "-1", ""])
 def test_apply_device_rules_rejects_bad_major(fake, bad):
     _owned_rules(fake, 172)
-    r = fake.run(f"ct_apply_device_rules 172 {shlex.quote(bad)}")
+    r = fake.run(f"ct_apply_device_rules 172 0 {shlex.quote(bad)}")
     assert r.returncode == 1
     assert [c for c in fake.calls() if "/etc/pve/lxc/172.conf" in c] == []
 
@@ -487,11 +505,11 @@ def test_start_runs_pct_start(fake):
     assert any(c.endswith("pct start 172") for c in fake.calls())
 
 
-def test_push_and_pull_quote_paths(fake):
+def test_push_and_pull_quote_paths(fake, tmp_path):
     _owned_rules(fake, 172)
     fake.rule("pct exec 172", "")
     fake.run("ct_push 172 /etc/hostname '/root/a b; id'")
-    fake.run("ct_pull 172 '/root/a b; id' /dev/null")
+    fake.run(f"ct_pull 172 '/root/a b; id' {shlex.quote(str(tmp_path / 'out'))}")
     execs = [c for c in fake.calls() if "pct exec" in c]
     assert len(execs) == 2
     push_inner = shlex.split(execs[0])[-1]
@@ -594,3 +612,242 @@ def test_host_devices_gpu_plus_npu_adds_accel(tmp_path):
 def test_host_devices_rejects_unknown_mode(tmp_path):
     r = _host_devices(tmp_path, "everything")
     assert r.returncode != 0 and r.stdout == ""
+
+
+# --- privileged vs unprivileged raw config ---------------------------------
+
+
+def _rules_call(fake, unpriv):
+    _owned_rules(fake, 172)
+    fake.rule("/etc/pve/lxc/172.conf", "")
+    r = fake.run(f"ct_apply_device_rules 172 {unpriv} 226 240")
+    assert r.returncode == 0, r.stderr
+    return [c for c in fake.calls() if "/etc/pve/lxc/172.conf" in c][0]
+
+
+def test_privileged_gpu_guest_gets_apparmor_unconfined(fake):
+    call = _rules_call(fake, 0)
+    assert "lxc.apparmor.profile:\\ unconfined" in call
+    assert "c\\ 226:" in call and "c\\ 240:" in call
+    assert "lxc.prlimit.memlock:\\ unlimited" in call
+
+
+def test_unprivileged_guest_gets_no_apparmor_line(fake):
+    call = _rules_call(fake, 1)
+    assert "apparmor" not in call
+    assert "c\\ 226:" in call and "lxc.prlimit.memlock" in call
+
+
+def test_device_rules_reject_bad_privilege_flag(fake):
+    _owned_rules(fake, 172)
+    r = fake.run("ct_apply_device_rules 172 2 226")
+    assert r.returncode == 1
+    assert [c for c in fake.calls() if "/etc/pve/lxc/172.conf" in c] == []
+
+
+def test_device_rules_match_proxmox_script_lines():
+    theirs = HAL0_SH.read_text()
+    mine = PVE_SH.read_text()
+    for line in (
+        "lxc.cgroup2.devices.allow: c ${maj}:* rwm",
+        "lxc.prlimit.memlock: unlimited",
+        "lxc.apparmor.profile: unconfined",
+    ):
+        assert line in theirs, line
+        assert line in mine, line
+
+
+# --- stay alive under the caller's set -euo pipefail ------------------------
+
+MARK = "MARKER-REACHED"
+
+
+def test_strict_destroy_of_gone_guest_continues(fake):
+    _owned_rules(fake, 172)
+    fake.rule("pct destroy 172", "")
+    fake.rule("test -e /etc/pve/lxc/172.conf", "absent\n")
+    r = fake.run(f"ct_destroy 172\necho {MARK}", strict=True)
+    assert r.returncode == 0 and MARK in r.stdout, r.stderr
+
+
+def test_strict_destroy_failure_reports_before_returning(fake):
+    _owned_rules(fake, 172)
+    fake.rule("pct destroy 172", "boom: storage busy\n", 5)
+    fake.rule("test -e /etc/pve/lxc/172.conf", "present\n")
+    r = fake.run("ct_destroy 172", strict=True)
+    assert r.returncode == 1
+    assert "still present" in r.stderr and "boom: storage busy" in r.stderr
+
+
+def test_strict_create_failure_reaches_its_own_diagnostic(fake):
+    fake.rule("pvesm status --content rootdir", STORAGE)
+    fake.rule("test -e /etc/pve/lxc/172.conf", "absent\n")
+    fake.rule("pct create", "", 7)
+    r = fake.run("ct_create 172 local:vztmpl/x.tar.zst 0 4 8192 40", strict=True)
+    assert r.returncode == 7  # pct's status, passed on after the message
+    assert "pct create failed for 172 (exit 7)" in r.stderr
+
+
+def test_strict_create_success_continues(fake):
+    fake.rule("pvesm status --content rootdir", STORAGE)
+    fake.rule("test -e /etc/pve/lxc/172.conf", "absent\n")
+    fake.rule("pct create", "")
+    r = fake.run(
+        f"ct_create 172 local:vztmpl/x.tar.zst 0 4 8192 40\necho {MARK}", strict=True
+    )
+    assert MARK in r.stdout, r.stderr
+
+
+@pytest.mark.parametrize(
+    "body,rules",
+    [
+        ("pve_mem_available_gb", [("free -g", _free(20))]),
+        ("pve_require_headroom", [("free -g", _free(20))]),
+        ("pve_template_volid debian-12", [("pveam list local", TEMPLATES)]),
+        ("pve_storage", [("pvesm status --content rootdir", STORAGE)]),
+        ("pve_pick_vmid", [("pvesh get /cluster/resources", _guests((170, "")))]),
+        ("ct_owned 172", [("pct config 172", TAGGED_CONF.format(vmid=172))]),
+        (
+            "ct_start 172",
+            [("pct config 172", TAGGED_CONF.format(vmid=172)), ("pct start", "")],
+        ),
+        (
+            "ct_exec 172 id",
+            [("pct config 172", TAGGED_CONF.format(vmid=172)), ("pct exec", "")],
+        ),
+        (
+            "ct_wait_network 172 5",
+            [("pct config 172", TAGGED_CONF.format(vmid=172)), ("pct exec", "")],
+        ),
+        (
+            "ct_apply_device_rules 172 0 226",
+            [("pct config 172", TAGGED_CONF.format(vmid=172)), ("172.conf", "")],
+        ),
+    ],
+)
+def test_strict_success_paths_continue(fake, body, rules):
+    for needle, out in rules:
+        fake.rule(needle, out)
+    r = fake.run(f"{body} >/dev/null\necho {MARK}", strict=True)
+    assert MARK in r.stdout and r.returncode == 0, r.stderr
+
+
+@pytest.mark.parametrize(
+    "body,rules",
+    [
+        ("pve_require_headroom", [("free -g", _free(3))]),
+        ("pve_template_volid nothing", [("pveam list local", TEMPLATES)]),
+        ("pve_pick_vmid", [("pvesh get /cluster/resources", _guests((175, "hal0-matrix")))]),
+        ("ct_owned 172", [("pct config 172", UNTAGGED_CONF.format(vmid=172))]),
+        ("ct_owned 105", []),
+    ],
+)
+def test_strict_failures_return_one_not_abort_elsewhere(fake, body, rules):
+    for needle, out in rules:
+        fake.rule(needle, out)
+    r = fake.run(f"{body} >/dev/null 2>&1", strict=True)
+    assert r.returncode == 1
+
+
+# --- push and pull move the bytes intact -----------------------------------
+
+BLOBS = {
+    "nul": b"a\x00b\x00\xffc\n",
+    "no-newline": b"tail without newline",
+    "empty": b"",
+}
+
+
+@pytest.mark.parametrize("name", list(BLOBS))
+def test_push_delivers_bytes_intact(fake, tmp_path, name):
+    _owned_rules(fake, 172)
+    fake.rule("pct exec 172", "")
+    src = tmp_path / "src.bin"
+    src.write_bytes(BLOBS[name])
+    r = fake.run(f"ct_push 172 {shlex.quote(str(src))} /root/dest.bin")
+    assert r.returncode == 0, r.stderr
+    assert fake.stdin_dump.read_bytes() == BLOBS[name]
+
+
+@pytest.mark.parametrize("name", list(BLOBS))
+def test_pull_writes_bytes_intact(fake, tmp_path, name):
+    _owned_rules(fake, 172)
+    fake.rule("pct exec 172", BLOBS[name])
+    dst = tmp_path / "dst.bin"
+    r = fake.run(f"ct_pull 172 /root/src.bin {shlex.quote(str(dst))}")
+    assert r.returncode == 0, r.stderr
+    assert dst.read_bytes() == BLOBS[name]
+    assert [p.name for p in tmp_path.iterdir() if p.name != "fake"] == ["dst.bin"]
+
+
+def test_pull_failure_leaves_no_file(fake, tmp_path):
+    _owned_rules(fake, 172)
+    fake.rule("pct exec 172", b"partial", 1)
+    dst = tmp_path / "dst.bin"
+    r = fake.run(f"ct_pull 172 /root/src.bin {shlex.quote(str(dst))}")
+    assert r.returncode == 1
+    assert [p.name for p in tmp_path.iterdir() if p.name != "fake"] == []
+
+
+def test_pull_failure_keeps_an_existing_destination(fake, tmp_path):
+    _owned_rules(fake, 172)
+    fake.rule("pct exec 172", b"partial", 1)
+    dst = tmp_path / "dst.bin"
+    dst.write_bytes(b"old")
+    fake.run(f"ct_pull 172 /root/src.bin {shlex.quote(str(dst))}")
+    assert dst.read_bytes() == b"old"
+
+
+# --- smaller behaviours -----------------------------------------------------
+
+
+def test_destroy_shows_refusal_reason_and_destroy_output(fake):
+    _owned_rules(fake, 171, UNTAGGED_CONF)
+    r = fake.run("ct_destroy 171")
+    assert r.returncode == 1 and "not a harness-owned container" in r.stderr
+
+
+def test_destroy_rechecks_ownership_on_second_attempt(fake, tmp_path):
+    """First ownership read is ours, the second shows a foreign guest: the
+    second destroy attempt must not happen."""
+    counter = fake.dir / "n"
+    counter.write_text("0")
+    conf_ok = shlex.quote(TAGGED_CONF.format(vmid=172))
+    conf_bad = shlex.quote(WRONG_HOST_CONF)
+    c = shlex.quote(str(counter))
+    (fake.dir / "handler.sh").write_text(
+        "#!/usr/bin/env bash\n"
+        'cmd="$1"\n'
+        'if [[ "$cmd" == *"pct config 172"* ]]; then\n'
+        f"  n=$(cat {c}); echo $((n+1)) > {c}\n"
+        f'  if [[ "$n" -ge 1 ]]; then printf "%s" {conf_bad}; else printf "%s" {conf_ok}; fi\n'
+        "  exit 0\n"
+        "fi\n"
+        'if [[ "$cmd" == *"test -e /etc/pve/lxc/172.conf"* ]]; then echo present; exit 0; fi\n'
+        'if [[ "$cmd" == *"pct destroy 172"* ]]; then exit 0; fi\n'
+        'echo "unexpected: $cmd" >&2; exit 97\n'
+    )
+    r = fake.run("ct_destroy 172")
+    assert r.returncode == 1
+    assert len([x for x in fake.calls() if "pct destroy" in x]) == 1
+    assert "not a harness-owned container" in r.stderr
+
+
+def test_wait_network_shows_refusal_reason(fake):
+    _owned_rules(fake, 171, UNTAGGED_CONF)
+    r = fake.run("ct_wait_network 171 1")
+    assert r.returncode == 1 and "not a harness-owned container" in r.stderr
+
+
+def test_wait_network_timeout_includes_last_error(fake):
+    _owned_rules(fake, 172)
+    fake.rule("pct exec 172", "", 1)
+    r = fake.run("ct_wait_network 172 0")
+    assert r.returncode == 1 and "did not resolve hal0.dev" in r.stderr
+
+
+def test_pick_vmid_malformed_json_is_one_clear_line(fake):
+    fake.rule("pvesh get /cluster/resources", "<html>not json")
+    r = fake.run("pve_pick_vmid")
+    assert r.returncode == 1
+    assert r.stderr.strip() == "cannot parse the guest list from the host"

@@ -47,16 +47,39 @@ _pve_in_range() {
   ((10#$1 >= 10#$lo && 10#$1 <= 10#$hi))
 }
 
+# _pve_ssh <stdin: 0|1> <command string>. `--` ends ssh options so the alias
+# can never be read as one; stdin is closed (-n) unless the caller feeds it,
+# so a caller's `while read` loop keeps its input.
+_pve_ssh() {
+  local host="${HAL0_PVE:-pve}" nflag=()
+  if [[ "$host" == -* || ! "$host" =~ ^[^[:space:]]+$ ]]; then
+    _pve_err "bad HAL0_PVE alias: ${host}"
+    return 1
+  fi
+  [[ "$1" == "1" ]] || nflag=(-n)
+  ssh "${nflag[@]}" -o BatchMode=yes -o ConnectTimeout=10 -- "$host" "$2"
+}
+
 # pve_run <command string>
-pve_run() {
-  ssh -o BatchMode=yes -o ConnectTimeout=10 "${HAL0_PVE:-pve}" "$1"
+pve_run() { _pve_ssh 0 "$1"; }
+
+# _ct_presence <vmid>: prints present, absent or unknown (ssh failed or the
+# host said something else). Decided from the config file, not an exit code.
+_ct_presence() {
+  local out rc
+  out="$(pve_run "if test -e /etc/pve/lxc/${1}.conf; then echo present; else echo absent; fi")" && rc=0 || rc=$?
+  if [[ "$rc" -eq 0 && ( "$out" == "present" || "$out" == "absent" ) ]]; then
+    printf '%s\n' "$out"
+  else
+    printf 'unknown\n'
+  fi
 }
 
 # pve_mem_available_gb: integer from the "available" column of `free -g`.
 pve_mem_available_gb() {
   local out n
   out="$(pve_run 'free -g')" || return 1
-  n="$(printf '%s\n' "$out" | awk '/^Mem:/ {print $7}')"
+  n="$(awk '/^Mem:/ {print $7}' <<<"$out")"
   [[ "$n" =~ ^[0-9]+$ ]] || return 1
   printf '%s\n' "$n"
 }
@@ -103,7 +126,7 @@ pve_storage() {
     return 0
   fi
   out="$(pve_run 'pvesm status --content rootdir')" || { _pve_err "cannot list storage"; return 1; }
-  name="$(printf '%s\n' "$out" | awk 'NR > 1 && $3 == "active" {print $1; exit}')"
+  name="$(awk 'NR > 1 && $3 == "active" {print $1; exit}' <<<"$out")"
   [[ "$name" =~ ^[A-Za-z0-9._-]+$ ]] || { _pve_err "no active storage accepts container disks"; return 1; }
   printf '%s\n' "$name"
 }
@@ -122,7 +145,14 @@ pve_pick_vmid() {
   printf '%s' "$out" | python3 -I -c '
 import json, re, sys
 lo, hi, tag = int(sys.argv[1]), int(sys.argv[2]), sys.argv[3]
-rows = json.load(sys.stdin)
+try:
+    rows = json.load(sys.stdin)
+    if not isinstance(rows, list):
+        raise ValueError("not a list")
+    [int(r["vmid"]) for r in rows if "vmid" in r]
+except (ValueError, TypeError, AttributeError, KeyError):
+    print("cannot parse the guest list from the host", file=sys.stderr)
+    sys.exit(1)
 taken = set()
 for r in rows:
     if "vmid" in r:
@@ -181,11 +211,12 @@ ct_create() {
     [[ "$dev" =~ ^/dev/[A-Za-z0-9_-]+(/[A-Za-z0-9_-]+)*(,gid=[0-9]+)?$ ]] \
       || { _pve_err "bad device argument: ${dev}"; return 1; }
   done
-  # Never create over an existing guest.
-  if pve_run "pct status ${vmid}" >/dev/null 2>&1; then
-    _pve_err "refusing: guest ${vmid} already exists"
-    return 1
-  fi
+  # Never create over an existing guest, and not when that cannot be told.
+  case "$(_ct_presence "$vmid")" in
+    absent) ;;
+    present) _pve_err "refusing: guest ${vmid} already exists"; return 1 ;;
+    *) _pve_err "refusing: cannot tell whether guest ${vmid} exists"; return 1 ;;
+  esac
   storage="$(pve_storage)" || return 1
   cmd="pct create $(_pve_q "$vmid") $(_pve_q "$volid")"
   cmd+=" --hostname $(_pve_q "${_PVE_HOST_PREFIX}${vmid}")"
@@ -200,16 +231,23 @@ ct_create() {
     cmd+=" --dev${i} $(_pve_q "$dev")"
     i=$((i + 1))
   done
-  pve_run "$cmd"
-  st=$?
+  pve_run "$cmd" && st=0 || st=$?
+  if [[ "$st" -ne 0 ]]; then
+    _pve_err "pct create failed for ${vmid} (exit ${st})"
+  fi
   return "$st"
 }
 
-# ct_apply_device_rules <vmid> <major...>
+# ct_apply_device_rules <vmid> <unprivileged 0|1> <major...>
+# Mirrors scripts/proxmox-ve/hal0.sh apply_raw_config for a guest with GPU
+# devices: one cgroup2 allow rule per major, the memlock limit, and for a
+# privileged guest the unconfined AppArmor profile. Each line is appended only
+# if absent.
 ct_apply_device_rules() {
-  local vmid="${1:-}" maj line cmd="" conf seen=" "
-  shift || true
+  local vmid="${1:-}" unpriv="${2:-}" maj line cmd="" conf seen=" "
+  shift 2 2>/dev/null || { _pve_err "ct_apply_device_rules: too few arguments"; return 1; }
   _ct_require_owned "$vmid" || return 1
+  [[ "$unpriv" =~ ^[01]$ ]] || { _pve_err "unprivileged must be 0 or 1"; return 1; }
   [[ $# -gt 0 ]] || { _pve_err "ct_apply_device_rules: no device majors given"; return 1; }
   for maj in "$@"; do
     _pve_uint_ok "$maj" || { _pve_err "bad device major: ${maj}"; return 1; }
@@ -223,6 +261,10 @@ ct_apply_device_rules() {
   done
   line="lxc.prlimit.memlock: unlimited"
   cmd+="{ grep -qxF -- $(_pve_q "$line") ${conf} || printf '%s\\n' $(_pve_q "$line") >> ${conf}; }"
+  if [[ "$unpriv" != "1" ]]; then
+    line="lxc.apparmor.profile: unconfined"
+    cmd+=" && { grep -qxF -- $(_pve_q "$line") ${conf} || printf '%s\\n' $(_pve_q "$line") >> ${conf}; }"
+  fi
   pve_run "$cmd"
 }
 
@@ -242,19 +284,22 @@ ct_exec() {
 
 # ct_wait_network <vmid> [seconds=120]: the guest resolves hal0.dev.
 ct_wait_network() {
-  local vmid="${1:-}" limit="${2:-120}" start now
+  local vmid="${1:-}" limit="${2:-120}" start now err=""
   _pve_uint_ok "$limit" || { _pve_err "bad timeout"; return 1; }
+  _ct_require_owned "$vmid" || return 1
   start="$(date +%s)"
   while :; do
-    if ct_exec "$vmid" 'getent hosts hal0.dev' >/dev/null 2>&1; then
+    if err="$(ct_exec "$vmid" 'getent hosts hal0.dev' 2>&1 >/dev/null)"; then
       return 0
     fi
-    _ct_require_owned "$vmid" >/dev/null 2>&1 || return 1
     now="$(date +%s)"
-    ((now - start >= limit)) && break
+    if ((now - start >= limit)); then
+      break
+    fi
     sleep "${HAL0_MATRIX_POLL_SLEEP:-2}"
   done
   _pve_err "guest ${vmid} did not resolve hal0.dev within ${limit}s"
+  [[ -z "$err" ]] || _pve_err "last error: ${err}"
   return 1
 }
 
@@ -264,35 +309,41 @@ ct_push() {
   _ct_require_owned "$vmid" || return 1
   [[ -f "$src" ]] || { _pve_err "no such local file: ${src}"; return 1; }
   [[ -n "$dst" ]] || { _pve_err "ct_push: no remote path"; return 1; }
-  pve_run "pct exec ${vmid} -- bash -c $(_pve_q "cat > $(_pve_q "$dst")")" <"$src"
+  _pve_ssh 1 "pct exec ${vmid} -- bash -c $(_pve_q "cat > $(_pve_q "$dst")")" <"$src"
 }
 
 # ct_pull <vmid> <remote> <local>: stream a guest file out.
 ct_pull() {
-  local vmid="${1:-}" src="${2:-}" dst="${3:-}"
+  local vmid="${1:-}" src="${2:-}" dst="${3:-}" tmp rc
   _ct_require_owned "$vmid" || return 1
   [[ -n "$src" && -n "$dst" ]] || { _pve_err "ct_pull: need a remote and a local path"; return 1; }
-  pve_run "pct exec ${vmid} -- bash -c $(_pve_q "cat $(_pve_q "$src")")" >"$dst"
+  tmp="$(mktemp "${dst}.XXXXXX")" || { _pve_err "cannot create a temporary file beside ${dst}"; return 1; }
+  if pve_run "pct exec ${vmid} -- bash -c $(_pve_q "cat $(_pve_q "$src")")" >"$tmp"; then
+    mv -f -- "$tmp" "$dst"
+  else
+    rc=$?
+    rm -f -- "$tmp"
+    return "$rc"
+  fi
 }
 
-# ct_destroy <vmid>: refuses unless ct_owned. Sequence from
-# scripts/fresh-test-ct.sh: SIGKILL the lxc-start monitor (a privileged guest
-# holding /dev/kfd hangs `lxc-stop --kill`), clear a stale lock, purge-destroy,
-# retry once, then VERIFY with `pct status`. The [l] in the pkill pattern keeps
-# the remote shell's own command line from matching it.
+# ct_destroy <vmid>: refuses unless ct_owned, re-checked before each attempt.
+# Sequence from scripts/fresh-test-ct.sh: SIGKILL the lxc-start monitor (a
+# privileged guest holding /dev/kfd hangs `lxc-stop --kill`), clear a stale
+# lock, purge-destroy, retry once. "Gone" means the config file is absent on
+# the host; an ssh failure is "unknown" and never counts as gone. The [l] in
+# the pkill pattern keeps the remote shell's own command line from matching it.
 ct_destroy() {
-  local vmid="${1:-}" attempt rc
-  _ct_require_owned "$vmid" || return 1
+  local vmid="${1:-}" attempt out="" state=""
   for attempt in 1 2; do
-    pve_run "pkill -9 -f '[l]xc-start -F -n ${vmid}( |\$)' 2>/dev/null; sleep 2; rm -f /run/lock/lxc/pve-config-${vmid}.lock; pct destroy ${vmid} --force --purge" >/dev/null 2>&1 || true
-    pve_run "pct status ${vmid}" >/dev/null 2>&1
-    rc=$?
-    # 255 is ssh itself failing: that proves nothing about the guest.
-    if [[ "$rc" -ne 0 && "$rc" -ne 255 ]]; then
-      return 0
-    fi
+    _ct_require_owned "$vmid" || return 1
+    out="$(pve_run "pkill -9 -f '[l]xc-start -F -n ${vmid}( |\$)' 2>/dev/null; sleep 2; rm -f /run/lock/lxc/pve-config-${vmid}.lock; pct destroy ${vmid} --force --purge" 2>&1)" || true
+    state="$(_ct_presence "$vmid")"
+    [[ "$state" == "absent" ]] && return 0
     [[ "$attempt" == "1" ]] && sleep "${HAL0_MATRIX_DESTROY_SLEEP:-3}"
   done
-  _pve_err "guest ${vmid} is still present after destroy (or the host is unreachable); destroy it by hand: pct destroy ${vmid} --force --purge"
+  _pve_err "guest ${vmid} is still present after destroy (state: ${state}); destroy output:"
+  printf '%s\n' "$out" >&2
+  _pve_err "destroy it by hand: pct destroy ${vmid} --force --purge"
   return 1
 }
