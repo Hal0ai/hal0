@@ -48,7 +48,10 @@ T_UNINSTALL=600
 INSTALL_URL="https://hal0.dev/install.sh"
 SUMMARY_PATH="/root/hal0-summary.json"
 
-log() { printf '[run-shape] %s\n' "$*" >&2; }
+# A message that cannot be written (the terminal or the pipe it goes to is gone)
+# is lost and never an error: under set -e a failed write must not end a
+# handler or the cleanup before the work in it is done.
+log() { printf '[run-shape] %s\n' "$*" >&2 || true; }
 die2() {
   log "$*"
   exit 2
@@ -209,9 +212,11 @@ CT_MAYBE=0         # set once ct_create got as far as running pct create
 CT_CREATED=0       # ct_create returned 0: this run certainly made the guest
 GUEST_UP=0         # ct_start succeeded
 WATCH_PID=""       # the memory watchdog, while a container exists
-SENT_PID=""        # the sentinel that watches the watchdog
+WATCH_START=""     # its start time (field 19 of /proc/<pid>/stat), so a reused pid is never signalled
+SENT_PID=""        # the sentinel that watches the watchdog (and the watchdog it)
+SENT_START=""
 WATCH_FILE=""      # where the watchdog leaves its verdict
-ABORT_REASON=""    # host_memory_low, host_unreachable or watchdog_died, once the watchdog fired
+ABORT_REASON=""    # host_memory_low, host_unreachable, watchdog_died or sentinel_died, once the watch fired
 ABORT_DETAIL=""
 INSTALL_RC=""      # the install's exit status, once known
 INTERRUPTED=0      # signal number that stopped the run
@@ -397,7 +402,18 @@ finish_result() {
 # watchdog itself. Every second the sentinel checks that the watchdog is still
 # running; if it is not, and cleanup did not stop it, the run aborts with the
 # reason watchdog_died through the same path (USR1, normal cleanup). The
-# watchdog's own verdict, when it already spoke, stands.
+# watchdog's own verdict, when it already spoke, stands. The watchdog in turn
+# checks the sentinel every second (its pid and start time are in
+# ${WATCH_FILE}.sent) and aborts with sentinel_died when it is gone.
+#
+# Neither blames the other at a normal shutdown: stop_watchdog first creates
+# ${WATCH_FILE}.stop, and both check it (and the verdict file) before they
+# blame, and again before they signal; only then does it end them, so the first
+# to see the other gone finds the stop marker. A blame writes the verdict file
+# and ends the blamer, so the other one, if still alive, finds a verdict and
+# leaves. Both are started with SIGPIPE ignored: a closed terminal can never
+# end them, and the one line the watchdog prints when its run is gone is
+# allowed to fail.
 #
 # Both stay in force until cleanup has destroyed the container or reported it
 # left behind (stop_watchdog is the last step before the result is written).
@@ -434,8 +450,9 @@ snap_tree() {
 }
 
 watchdog() {
-  local parent="$1" me="$BASHPID" n bad=0 reason="" detail="" c i e
+  local parent="$1" me="$BASHPID" n bad=0 reason="" detail="" c i e sp ss
   local -a seen=()
+  trap '' PIPE
   exec 6>&- 8>&- >/dev/null
   while :; do
     for ((i = 0; i < WATCH_EVERY; i++)); do
@@ -448,6 +465,15 @@ watchdog() {
         exit 0
       fi
       mapfile -t seen < <(snap_tree "$parent" "$me")
+      # The sentinel's identity is in a file the run writes right after it starts it.
+      if [[ -s "${WATCH_FILE}.sent" ]] && read -r sp ss <"${WATCH_FILE}.sent" \
+        && [[ "$sp" =~ ^[0-9]{1,9}$ && "$ss" =~ ^[0-9]{1,20}$ ]] \
+        && ! proc_running "$sp" "$ss"; then
+        [[ ! -e "${WATCH_FILE}.stop" && ! -s "$WATCH_FILE" ]] || exit 0
+        reason="sentinel_died"
+        detail="the sentinel that watches the memory watchdog ended while the run was in progress"
+        break 2
+      fi
     done
     if n="$(pve_mem_available_gb 2>/dev/null)" && [[ "$n" =~ ^[0-9]{1,9}$ ]]; then
       bad=0
@@ -486,6 +512,7 @@ proc_running() {
 
 sentinel() {
   local parent="$1" wd="$2" wd_start="$3" me="$BASHPID" c
+  trap '' PIPE
   exec 6>&- 8>&- >/dev/null
   while :; do
     sleep 1
@@ -512,20 +539,36 @@ start_watchdog() {
   WATCH_PID=$!
   wd_start="$(stat_field "$WATCH_PID" 19)" || wd_start=""
   printf '%s\n' "$WATCH_PID" >"${ART}/watchdog.pid"
+  WATCH_START="$wd_start"
   sentinel "$$" "$WATCH_PID" "$wd_start" &
   SENT_PID=$!
+  SENT_START="$(stat_field "$SENT_PID" 19)" || SENT_START=""
+  # The watchdog finds the sentinel through this file (pid and start time).
+  if [[ -n "$SENT_START" ]]; then
+    printf '%s %s\n' "$SENT_PID" "$SENT_START" >"${WATCH_FILE}.sent"
+    printf '%s\n' "$SENT_PID" >"${ART}/sentinel.pid"
+  fi
+}
+
+# end_watch_proc <pid> <start time>: end that process and what it started, but
+# only while it is still the process this run started. A pid that ended long
+# ago and was reused (start time differs, or the process is gone) is left alone.
+end_watch_proc() {
+  [[ -n "$1" ]] || return 0
+  if proc_running "$1" "$2"; then
+    kill_tree "$1"
+    wait "$1" 2>/dev/null || true
+  fi
 }
 
 # stop_watchdog: the end of the memory watch. Called once, by cleanup, after
 # the container is destroyed or reported left behind (or when there was none).
 stop_watchdog() {
   [[ -z "$WATCH_FILE" ]] || : >"${WATCH_FILE}.stop"
-  [[ -z "$SENT_PID" ]] || kill_tree "$SENT_PID"
-  [[ -z "$SENT_PID" ]] || wait "$SENT_PID" 2>/dev/null || true
-  SENT_PID=""
-  [[ -z "$WATCH_PID" ]] || kill_tree "$WATCH_PID"
-  [[ -z "$WATCH_PID" ]] || wait "$WATCH_PID" 2>/dev/null || true
-  WATCH_PID=""
+  end_watch_proc "$SENT_PID" "$SENT_START"
+  SENT_PID="" SENT_START=""
+  end_watch_proc "$WATCH_PID" "$WATCH_START"
+  WATCH_PID="" WATCH_START=""
 }
 
 # load_verdict: take the watchdog's verdict from its file. The file is local,
@@ -535,15 +578,15 @@ load_verdict() {
   [[ -n "$WATCH_FILE" && -s "$WATCH_FILE" ]] || return 1
   reason="$(kv_get "$WATCH_FILE" reason)"
   detail="$(kv_get "$WATCH_FILE" detail)"
-  case "$reason" in host_memory_low | host_unreachable | watchdog_died) ;; *) return 1 ;; esac
+  case "$reason" in host_memory_low | host_unreachable | watchdog_died | sentinel_died) ;; *) return 1 ;; esac
   [[ "$detail" =~ ^[A-Za-z0-9\ ().,_-]+$ ]] || detail="the host check failed"
   ABORT_REASON="$reason"
   ABORT_DETAIL="$detail"
 }
 
 on_watchdog() {
+  trap '' PIPE USR1
   exec 1>&6 2>&7
-  trap '' USR1
   load_verdict || { ABORT_REASON="host_memory_low"; ABORT_DETAIL="the host check failed"; }
   log "aborting: ${ABORT_DETAIL}"
   exit 1
@@ -561,8 +604,13 @@ note_abort() {
 # ── cleanup: runs once, on EXIT and (via on_signal) on INT, TERM and HUP ─────
 cleanup() {
   local rc=$? state="absent" foreign=0 unsure=0
+  # First of all, before anything else can run: no further signal and no broken
+  # pipe may end this function. A write to a closed terminal then fails with an
+  # error status (and set +e below makes that harmless) instead of killing the
+  # shell, and the record in run.txt always comes before the message that tells
+  # the terminal.
+  trap '' PIPE INT TERM HUP USR1
   exec 1>&6 2>&7
-  trap '' INT TERM HUP USR1
   trap - EXIT
   set +e +u
   [[ "$CLEANED" == "0" ]] || exit "$rc"
@@ -606,12 +654,12 @@ cleanup() {
     if [[ "$state" == "absent" ]]; then
       log "no container ${VMID} exists; nothing to clean up"
     elif [[ "$unsure" == "1" ]]; then
-      printf "UNSURE: guest %s exists and this run started a create for it; it may be this run's. Check it by hand: pct config %s\n" "$VMID" "$VMID" >&2
       [[ -z "$ART" ]] || printf 'unsure=%s\n' "$VMID" >>"${ART}/run.txt"
+      printf "UNSURE: guest %s exists and this run started a create for it; it may be this run's. Check it by hand: pct config %s\n" "$VMID" "$VMID" >&2
       [[ "$rc" -ne 0 ]] || rc=1
     elif [[ "$foreign" == "1" ]]; then
-      log "this run created no container: what exists at the VMID it tried was made by someone else and was left alone"
       [[ -z "$ART" ]] || printf 'created_nothing=1\n' >>"${ART}/run.txt"
+      log "this run created no container: what exists at the VMID it tried was made by someone else and was left alone"
     else
       if [[ -n "$ABORT_REASON" ]]; then
         # The host is short of memory or gone: the container goes first and
@@ -635,10 +683,11 @@ cleanup() {
       if [[ "$KEEP" == "1" ]]; then
         log "--keep: container ${VMID} left in place; destroy it with: $(destroy_hint)"
       elif ct_destroy "$VMID" "$NONCE"; then
+        [[ -z "$ART" ]] || printf 'destroyed=%s\n' "$VMID" >>"${ART}/run.txt"
         log "destroyed container ${VMID}"
       else
-        printf 'LEFT BEHIND: %s (destroy it with: %s)\n' "$VMID" "$(destroy_hint)" >&2
         [[ -z "$ART" ]] || printf 'left_behind=%s\ndestroy_command=%s\n' "$VMID" "$(destroy_hint)" >>"${ART}/run.txt"
+        printf 'LEFT BEHIND: %s (destroy it with: %s)\n' "$VMID" "$(destroy_hint)" >&2
         [[ "$rc" -ne 0 ]] || rc=1
       fi
     fi
@@ -648,16 +697,17 @@ cleanup() {
   # After an abort the result is written last, from local files only.
   [[ -z "$ABORT_REASON" || -z "$ART" || "$RESULT_WRITTEN" != "0" ]] || write_result
   [[ -z "$TREE_TAR" ]] || rm -f -- "$TREE_TAR"
-  [[ -z "$WATCH_FILE" ]] || rm -f -- "$WATCH_FILE" "${WATCH_FILE}.cleanup" "${WATCH_FILE}.stop"
-  [[ -z "$ART" ]] || rm -f -- "${ART}/watchdog.pid"
+  [[ -z "$WATCH_FILE" ]] || rm -f -- "$WATCH_FILE" "${WATCH_FILE}.cleanup" "${WATCH_FILE}.stop" "${WATCH_FILE}.sent"
+  [[ -z "$ART" ]] || rm -f -- "${ART}/watchdog.pid" "${ART}/sentinel.pid"
   [[ -z "$SCRATCH" ]] || rm -rf -- "$SCRATCH"
   exit "$rc"
 }
 
 on_signal() {
+  # A second signal must not cut the cleanup short, and a closed terminal must
+  # not either: ignore both from the first line.
+  trap '' PIPE INT TERM HUP USR1
   exec 1>&6 2>&7
-  # A second signal must not cut the cleanup short: ignore them from here on.
-  trap '' INT TERM HUP USR1
   INTERRUPTED="$1"
   log "interrupted (signal $1); cleaning up"
   exit $((128 + $1))
@@ -718,7 +768,9 @@ if [[ "$SHAPE_HARDWARE" == "gpu" || "$SHAPE_HARDWARE" == "gpu+npu" ]]; then
   [[ ${#DEVS[@]} -gt 0 ]] || die2 "refusing: the host shows no GPU device nodes for a ${SHAPE_HARDWARE} shape"
 fi
 if [[ -n "$TREE_DIR" ]]; then
-  TREE_TAR="$(mktemp)"
+  # Under the run's own output folder, like the other temporary files: the
+  # default temporary directory can be RAM, and the tree can be large.
+  TREE_TAR="$(mktemp "${ART}/tree.XXXXXX")"
   # Only what git lists (tracked files, plus untracked ones that .gitignore does
   # not hide): .env files, local notes and earlier reports never go into the guest.
   git -C "$TREE_DIR" ls-files -z --cached --others --exclude-standard \

@@ -1202,6 +1202,166 @@ def test_a_second_interrupt_during_cleanup_still_reports_left_behind(host):
         kill_group(proc)
 
 
+# --- a broken pipe on the run's stderr never ends the cleanup -----------------
+# `run-shape.sh ... 2>&1 | tee log`, Ctrl-C: the reader dies with the run. The
+# first line the run writes after that raises SIGPIPE. Bash still runs the EXIT
+# trap, but with SIGPIPE at its default the next write inside it ended the trap
+# too: no destroy, no LEFT BEHIND, no record. Here the reader of stderr is closed
+# once the install is running, and (a) the run is interrupted, or (b) it is not
+# and meets the dead pipe at its next message.
+
+
+def _run_with_a_reader_that_goes_away(host, interrupt: bool, **env: str):
+    proc = spawn(
+        host, "u2604-cpu-unattended", "--vmid", "172", "--out", str(host.out),
+        **_watch_env(FAKE_INSTALL_SLEEP="4", **env),
+    )  # fmt: skip
+    try:
+        _wait_for(host.state / "install-started", proc)
+        proc.stderr.close()
+        if interrupt:
+            os.killpg(proc.pid, signal.SIGINT)
+        proc.wait(timeout=120)
+    finally:
+        kill_group(proc)
+    return proc
+
+
+@pytest.mark.parametrize("interrupt", [True, False], ids=["interrupted", "not-interrupted"])
+def test_cleanup_destroys_and_records_when_stderr_is_a_closed_pipe(host, interrupt):
+    proc = _run_with_a_reader_that_goes_away(host, interrupt)
+    assert proc.returncode != 0
+    assert any("pct destroy 172" in c for c in host.calls()), "the destroy was never sent"
+    assert not (host.state / "present").exists(), "the container must be gone"
+    note = (host.out / "run.txt").read_text().splitlines()
+    assert "destroyed=172" in note, note
+    assert not [n for n in note if n.startswith(("left_behind=", "unsure="))]
+
+
+@pytest.mark.parametrize("interrupt", [True, False], ids=["interrupted", "not-interrupted"])
+def test_a_failed_destroy_is_recorded_when_nothing_can_be_printed(host, interrupt):
+    proc = _run_with_a_reader_that_goes_away(host, interrupt, FAKE_DESTROY_FAILS="1")
+    assert proc.returncode != 0
+    assert any("pct destroy 172" in c for c in host.calls())
+    note = (host.out / "run.txt").read_text().splitlines()
+    assert "left_behind=172" in note, note
+    assert "destroy_command=ssh testpve pct destroy 172 --force --purge" in note
+
+
+# --- the memory watch: who is stopped, and who blames whom -------------------
+
+
+def _functions(*names: str) -> str:
+    """The source of the named top-level functions of run-shape.sh, so a test can
+    run one without running the whole script."""
+    text = RUN_SHAPE.read_text()
+    out = []
+    for name in names:
+        m = re.search(rf"^{name}\(\) \{{\n.*?^\}}\n", text, re.S | re.M)
+        assert m, name
+        out.append(m.group(0))
+    return "\n".join(out)
+
+
+def _stop_watchdog_script(sent_start: str, watch_start: str) -> str:
+    funcs = _functions("stat_field", "kill_tree", "proc_running", "end_watch_proc", "stop_watchdog")
+    return (
+        (
+            funcs
+            + """
+sleep 30 & victim=$!
+sleep 30 & victim2=$!
+st() { stat_field "$1" 19; }
+WATCH_FILE="" SENT_PID=$victim WATCH_PID=$victim2
+SENT_START=@SENT@
+WATCH_START=@WATCH@
+stop_watchdog
+alive=0; kill -0 $victim 2>/dev/null && alive=$((alive + 1))
+kill -0 $victim2 2>/dev/null && alive=$((alive + 10))
+echo "alive=$alive"
+kill -KILL $victim $victim2 2>/dev/null
+exit 0
+"""
+        )
+        .replace("@SENT@", sent_start)
+        .replace("@WATCH@", watch_start)
+    )
+
+
+def _run_bash(script: str) -> str:
+    proc = subprocess.Popen(
+        ["bash", "-c", script], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        start_new_session=True,
+    )  # fmt: skip
+    try:
+        out, _ = proc.communicate(timeout=20)
+    finally:
+        kill_group(proc)
+    return out
+
+
+def test_stop_watchdog_signals_nothing_when_the_start_time_does_not_match():
+    # pids that are alive but were not started at the recorded time: a reused pid
+    out = _run_bash(_stop_watchdog_script("1", "2"))
+    assert "alive=11" in out, out
+
+
+def test_stop_watchdog_still_ends_the_processes_it_started():
+    out = _run_bash(_stop_watchdog_script('"$(st $victim)"', '"$(st $victim2)"'))
+    assert "alive=0" in out, out
+
+
+def test_a_sentinel_that_dies_ends_the_run_as_an_abort_through_cleanup(host):
+    proc = spawn(
+        host, "u2604-cpu-unattended", "--vmid", "172", "--out", str(host.out),
+        **_watch_env(FAKE_INSTALL_SLEEP="25"),
+    )  # fmt: skip
+    try:
+        _wait_for(host.state / "install-started", proc)
+        _wait_for(host.out / "sentinel.pid", proc)
+        killed_at = time.monotonic()
+        os.kill(int((host.out / "sentinel.pid").read_text().strip()), signal.SIGKILL)
+        err = proc.communicate(timeout=40)[1]
+        took = time.monotonic() - killed_at
+    finally:
+        kill_group(proc)
+    assert proc.returncode == 1, err
+    assert took < 10, f"the run took {took:.1f}s to notice, the install sleeps 25s"
+    assert "aborting:" in err and "sentinel" in err
+    assert "aborted=sentinel_died" in (host.out / "run.txt").read_text().splitlines()
+    assert not (host.state / "present").exists(), "the normal cleanup destroyed it"
+    assert "LEFT BEHIND" not in err
+
+
+def test_a_normal_shutdown_ends_the_watch_without_either_blaming_the_other(host):
+    r = host.run(
+        "u2604-cpu-unattended", "--vmid", "172", "--out", str(host.out),
+        **_watch_env(FAKE_INSTALL_SLEEP="3"),
+    )  # fmt: skip
+    assert r.returncode == 0, r.stderr
+    note = (host.out / "run.txt").read_text()
+    assert "aborted=" not in note
+    assert "died" not in r.stderr and "aborting:" not in r.stderr
+    assert not (host.out / "sentinel.pid").exists() and not (host.out / "watchdog.pid").exists()
+
+
+def test_the_packed_tree_is_made_under_the_runs_own_folder_not_the_temp_directory(host, tmp_path):
+    tree = _git_tree(tmp_path)
+    tmpdir = tmp_path / "ram"
+    tmpdir.mkdir()
+    tmpdir.chmod(0o500)  # nothing can be created there: a stray mktemp would fail the run
+    try:
+        r = host.run(
+            "u2404-cpu", "--vmid", "172", "--out", str(host.out), "--source", f"tree:{tree}",
+            TMPDIR=str(tmpdir),
+        )  # fmt: skip
+    finally:
+        tmpdir.chmod(0o700)
+    assert r.returncode == 0, r.stderr
+    assert (host.state / "tree.tgz").stat().st_size > 0
+    assert not list(host.out.glob("tree.*")), "the packed tree is removed at the end"
+
+
 def test_failed_install_still_writes_result(host):
     r = host.run(
         "u2604-cpu-unattended", "--vmid", "172", "--out", str(host.out), FAKE_INSTALL_RC="1"
@@ -1236,7 +1396,13 @@ def test_successful_terminal_run(host):
     assert result["disk_used_bytes"] == 4000
     assert "uninstall" not in result and "vmid" not in result
     note = (host.out / "run.txt").read_text().splitlines()
-    assert note == ["vmid=172", "installed_version=1.8.2", "uninstall_ok=1", "residue=clean"]
+    assert note == [
+        "vmid=172",
+        "installed_version=1.8.2",
+        "uninstall_ok=1",
+        "residue=clean",
+        "destroyed=172",
+    ]
     assert result["harness_prereqs"] == []
     assert stat.S_IMODE(host.out.stat().st_mode) == 0o700
     for f in host.out.iterdir():
