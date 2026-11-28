@@ -33,7 +33,7 @@ hal0 bench <verb> [flags]
   and the API (`/api/benchmarks/...`, including `/api/benchmarks/regressions`).
 - **Backends (lanes):** `rocm` and `vulkan_radv` share the `standard` runner image
   (`ghcr.io/hal0ai/hal0-runner-standard`); `cpu` runs the `cpu` runner image
-  (`ghcr.io/hal0ai/hal0-runner-cpu`). Both use `/opt/hal0/bin/llama-bench`, and each image
+  (`ghcr.io/hal0ai/hal0-runner-cpu`). Both run the `llama-bench` inside the runner image (`RUNNER_BIN_DIR` in `hal0.bench.harness`), and each image
   is the `manifest.json` pin (or its `HAL0_RUNNER_IMAGE_<KEY>` override) — the matrix is
   `hal0.bench.harness.lane_specs()`, not a shell config file.
 

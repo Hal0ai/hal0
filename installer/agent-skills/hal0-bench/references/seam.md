@@ -68,8 +68,8 @@ longer part of `hal0-benchctl`'s job.
 Lives ONLY in `hal0.bench.harness.lane_specs()` (a pure dict of `LaneSpec`) — not in a
 shell config file. Images come from the runner registry (`hal0.runners.resolve_runner_image`:
 the `HAL0_RUNNER_IMAGE_<KEY>` override, else the `manifest.json` `runners` pin), so a bench
-measures exactly what an unpinned slot launches. The bench binary is `/opt/hal0/bin/llama-bench`
-on every lane.
+measures exactly what an unpinned slot launches. The bench binary is the `llama-bench` inside the runner image
+(`RUNNER_BIN_DIR` in `hal0.bench.harness`) on every lane.
 
 - `rocm` — the `standard` runner image, `GGML_HIP_ENABLE_UNIFIED_MEMORY=1`,
   `-ngl 99 -dev ROCm0`.
