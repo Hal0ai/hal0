@@ -2,7 +2,16 @@
 
 from __future__ import annotations
 
+import contextlib
+import fcntl
 import json
+import os
+import pty
+import select
+import struct
+import termios
+import time
+from collections.abc import Iterator
 from dataclasses import replace
 from pathlib import Path
 
@@ -110,3 +119,41 @@ def big_pool_facts(usable_facts: Facts) -> Facts:
 @pytest.fixture
 def unknown_pool_facts(usable_facts: Facts) -> Facts:
     return replace(usable_facts, gpu_pool_gb=None)
+
+
+@pytest.fixture
+def pty_pair() -> Iterator[tuple[int, str]]:
+    """A pseudo-terminal: the master descriptor and the slave's path.
+
+    The slave descriptor stays open for the whole test so that closing the
+    master is the only thing that ends the terminal.
+    """
+    master, slave = pty.openpty()
+    try:
+        yield master, os.ttyname(slave)
+    finally:
+        for fd in (master, slave):
+            with contextlib.suppress(OSError):
+                os.close(fd)
+
+
+def read_all(master: int, quiet: float = 0.2) -> bytes:
+    """Everything the terminal has written, stopping once it has been quiet."""
+    out = b""
+    deadline = time.monotonic() + 5.0
+    while time.monotonic() < deadline:
+        ready, _, _ = select.select([master], [], [], quiet)
+        if not ready:
+            break
+        try:
+            chunk = os.read(master, 4096)
+        except OSError:
+            break
+        if not chunk:
+            break
+        out += chunk
+    return out
+
+
+def set_winsize(master: int, rows: int, cols: int) -> None:
+    fcntl.ioctl(master, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
