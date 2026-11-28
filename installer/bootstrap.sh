@@ -12,7 +12,7 @@
 # Designed to be piped from curl:
 #
 #   curl -fsSL https://hal0.dev/install.sh | sudo bash
-#   curl -fsSL https://hal0.dev/install.sh | sudo bash -s -- --no-tls --models-dir=/data/models
+#   curl -fsSL https://hal0.dev/install.sh | sudo bash -s -- --models-dir=/data/models
 #
 # Or downloaded and run directly:
 #
@@ -651,9 +651,10 @@ main() {
         export HAL0_BOOTSTRAP_WORK="${work}"
     fi
 
-    # Pass through stdin so install.sh's interactive prompts work when
-    # the user invoked us as `sudo bash install.sh`. When invoked via
-    # curl|bash, stdin is closed and install.sh falls back to defaults.
+    # Standard input goes to install.sh unchanged. The one-line install still
+    # shows the setup screens when a person is at a terminal, because the
+    # screens open the terminal themselves. An unattended run sets
+    # HAL0_NONINTERACTIVE=1 or passes --answers=FILE.
     # --box: same verified tree, handed to the box launcher instead.
     if [[ "${use_box}" == "1" ]]; then
         exec "${unpacked}/installer/box/box.sh" install "${unpacked}" "$@"

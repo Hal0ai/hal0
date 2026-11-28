@@ -9,7 +9,9 @@ implements ONLY the subset of the schema that maps to
 ``huggingface``, ``apps.*.when``, ``apps.hermes.gateway``,
 ``slots[].context_size``, ``slots[].enabled_on_pull``) is accepted and warned
 about, not applied — their workstreams wire them in later per the
-field→destination map (§5). The download side of ``gen.mode:
+field→destination map (§5). The exception is ``access``, ``maintenance``,
+``models``, ``hardware`` and ``memory``: the installer's own reader consumes
+them, so they are accepted silently (a mapping, or null for empty) and ignored. The download side of ``gen.mode:
 scaffold_and_download`` is applied by ``hal0 setup --answers`` itself
 (:func:`gen_download_requested`, then ``hal0.install.image_models.provision_image_models``).
 
@@ -35,6 +37,11 @@ from hal0.install.orchestrate import Selections, SlotSelection
 from hal0.install.profile_derive import npu_healthy
 from hal0.install.suggest import suggest_models
 
+#: Top-level sections validated by the installer's reader
+#: (installer/lib/answers_reader.py), not here: this loader checks the type
+#: only (a mapping, or null meaning empty) and otherwise ignores them.
+_MAPPING_ONLY_KEYS = ("access", "maintenance", "models", "hardware", "memory", "install", "meta")
+
 #: Top-level keys this loader recognizes at all (wired or not-yet-wired).
 #: Anything outside this set is "unknown" (§4: reject unless strict: false).
 _KNOWN_TOP_LEVEL = frozenset(
@@ -48,6 +55,7 @@ _KNOWN_TOP_LEVEL = frozenset(
         "npu",
         "gen",
         "apps",
+        *_MAPPING_ONLY_KEYS,
     }
 )
 
@@ -111,6 +119,14 @@ def _check_top_level_keys(doc: dict[str, Any]) -> None:
         raise AnswersError(f"unknown top-level key(s) in answer file: {sorted(unknown)}")
     for key in sorted(unknown):
         _warn(f"answer file key '{key}' is not recognized and was ignored (not yet applied)")
+
+
+def _check_mapping_sections(doc: dict[str, Any]) -> None:
+    for key in _MAPPING_ONLY_KEYS:
+        if doc.get(key) is not None and not isinstance(doc[key], dict):
+            raise AnswersError(
+                f"answer file key '{key}' must be a mapping (got {type(doc[key]).__name__})"
+            )
 
 
 def _resolve_storage_dir(doc: dict[str, Any]) -> str:
@@ -377,6 +393,7 @@ def load_answers(path: str, hw: HardwareInfo) -> Selections:
     doc = _load_yaml(path)
     _check_version(doc)
     _check_top_level_keys(doc)
+    _check_mapping_sections(doc)
     _apply_network(doc)
     _warn_not_yet_wired(doc)
 

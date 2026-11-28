@@ -166,37 +166,27 @@ def test_agent_and_brain_seeds_carry_their_curated_profiles() -> None:
 # ── 3. headless installs stay unattended ────────────────────────────────────
 
 
-def test_operator_prompts_are_gated_on_an_interactive_stdin(install_sh_text: str) -> None:
-    """``curl | bash`` and tty-less ssh must never block on a prompt.
+def test_no_prompt_helper_is_left_in_install_sh(install_sh_text: str) -> None:
+    """The setup screens ask every question; install.sh holds no prompt helper.
 
-    The gate has to test **stdin**, not ``/dev/tty``: under ``curl … | sudo
-    bash`` from a real terminal ``/dev/tty`` IS readable, so a ``-r /dev/tty``
-    gate alone would prompt — exactly the regression this guards. ``[[ -t 0 ]]``
-    is false for the piped script and for ``ssh host 'cmd'``.
+    ``curl | bash`` and tty-less ssh must never block on a prompt, so nothing
+    between the operator-input comment and the next step banner may read a
+    terminal, and the helpers that did are gone.
     """
-    m = re.search(r"_interactive\(\)\s*\{(.*?)\n\}", install_sh_text, flags=re.DOTALL)
-    assert m, "the _interactive() gate is gone"
-    body = m.group(1)
-    assert "-t 0" in body, "_interactive() must test stdin (`[[ -t 0 ]]`), not just /dev/tty"
-    assert "HAL0_NONINTERACTIVE" in body, "no env kill-switch for the prompts"
-
-    # Every operator prompt must sit behind that gate. _tty_read is the only
-    # prompting helper; its call sites must all be inside `if _interactive`.
-    gate_line = _line_of(install_sh_text, "if _interactive; then")
-    lines = install_sh_text.splitlines()
-    call_sites = [i for i, line in enumerate(lines, start=1) if re.match(r"\s+_tty_read ", line)]
-    assert call_sites, "no _tty_read call sites found — did the prompts move?"
-    assert all(i > gate_line for i in call_sites), (
-        f"_tty_read called outside the _interactive gate (gate at {gate_line}, "
-        f"calls at {call_sites})"
-    )
+    assert "_interactive" not in install_sh_text
+    assert "_tty_read" not in install_sh_text
+    block = install_sh_text[install_sh_text.index("Operator input: model store") :]
+    block = block[: block.index("ui_step")]
+    assert "/dev/tty" not in block
 
 
-def test_bootstrap_pipes_stdin_so_the_gate_can_do_its_job() -> None:
-    """bootstrap.sh's stdin contract is what makes ``[[ -t 0 ]]`` correct.
+def test_bootstrap_hands_over_to_install_sh_with_exec() -> None:
+    """bootstrap.sh replaces itself with install.sh (``exec bash``).
 
-    It forwards stdin to install.sh, so a downloaded ``sudo bash install.sh``
-    can prompt while ``curl | bash`` (stdin = the script pipe) cannot.
+    The handover keeps the caller's stdin and terminal as they are, so the setup
+    screens that install.sh starts see the same terminal a direct
+    ``sudo bash install.sh`` would. (It once also fed an ``[[ -t 0 ]]`` prompt
+    gate in install.sh; that gate is gone, the handover is what remains.)
     """
     text = (_REPO_ROOT / "installer" / "bootstrap.sh").read_text(encoding="utf-8")
     assert "exec bash " in text and "installer/install.sh" in text
@@ -212,17 +202,13 @@ def test_fresh_test_ct_drives_the_install_without_a_tty() -> None:
     assert "-t -t" not in text and "ssh -t" not in text
 
 
-def test_models_dir_and_hf_token_prompts_prefill_from_env(install_sh_text: str) -> None:
-    """Both prompts must be pre-filled, so Enter reproduces the headless value."""
-    block = install_sh_text[install_sh_text.index("Operator input: model store") :]
-    block = block[: block.index("ui_step")]
-    # Pre-fill sources.
-    assert 'HF_TOKEN_VAL="${HF_TOKEN:-${HUGGING_FACE_HUB_TOKEN:-}}"' in block
-    assert '_tty_read _md_answer "Where should downloaded models live?" "${MODELS_DIR}"' in block
-    # An explicit --models-dir / HAL0_MODELS_DIR is never re-asked.
-    assert "MODELS_DIR_EXPLICIT" in block
-    # The token is read silently (never echoed into the transcript).
-    assert re.search(r'_tty_read _hf_answer .*" 1', block), "HF token prompt is not silent"
+def test_models_dir_and_hf_token_prompts_are_gone(install_sh_text: str) -> None:
+    """The prompt text is gone; the variables later code reads are not."""
+    assert "Where should downloaded models live" not in install_sh_text
+    assert "_md_answer" not in install_sh_text
+    assert "_hf_answer" not in install_sh_text
+    assert 'HF_TOKEN_VAL="${HF_TOKEN:-${HUGGING_FACE_HUB_TOKEN:-}}"' in install_sh_text
+    assert "MODELS_DIR_EXPLICIT" in install_sh_text
 
 
 # ── 4. step counter ─────────────────────────────────────────────────────────
@@ -289,30 +275,35 @@ def test_agent_pull_is_never_unconditional(agent_block: str) -> None:
     assert guard_idx < pull_idx, "the agent pull is not behind the consent flag"
 
 
-def test_agent_prompt_sits_behind_the_same_interactive_gate(agent_block: str) -> None:
-    """A headless install must never block here.
+def test_agent_step_never_asks(agent_block: str) -> None:
+    """The setup screens ask; this step only applies the answer.
 
-    ``_interactive`` tests stdin, so ``curl | bash``, a tty-less ssh install,
-    and ``HAL0_NONINTERACTIVE=1`` all fall through to the non-interactive
-    branch without asking anything.
+    No terminal read, no interactive gate, and a branch for the unattended case
+    so that nothing is pulled unasked.
     """
-    assert "elif _interactive; then" in agent_block
-    prompt_idx = agent_block.index("_tty_read _agent_answer")
-    gate_idx = agent_block.index("elif _interactive; then")
-    assert gate_idx < prompt_idx, "the agent prompt is not inside the _interactive branch"
-    assert "Non-interactive install" in agent_block, "no headless branch — it would fall through"
+    code = "\n".join(ln for ln in agent_block.splitlines() if not ln.lstrip().startswith("#"))
+    assert "_tty_read" not in code
+    assert "_interactive" not in code
+    assert "/dev/tty" not in code
+    assert "_agent_answer" not in code
+    assert "not pulling" in code, "no unattended branch: it would fall through"
 
 
-def test_agent_prompt_defaults_to_skip(agent_block: str) -> None:
-    """Bare Enter must mean NO. ``_tty_read``'s third argument is the default it
-    substitutes for an empty answer, and only an explicit y/yes proceeds."""
-    m = re.search(r'_tty_read _agent_answer "([^"]*)" "([^"]*)"', agent_block)
-    assert m, "the agent prompt is gone or changed shape"
-    prompt, default = m.group(1), m.group(2)
-    assert default == "n", f"agent prompt default is {default!r}, must be 'n'"
-    assert "[y/N]" in prompt, f"prompt does not show a skip-by-default hint: {prompt!r}"
-    assert re.search(r"\[Yy\]\|\[Yy\]\[Ee\]\[Ss\]\)\s*_agent_wanted=1", agent_block), (
-        "only an explicit y/yes may set the consent flag"
+def test_agent_consent_flag_is_set_only_from_the_variables(agent_block: str) -> None:
+    """``_agent_wanted=1`` is reachable only under ``HAL0_PULL_AGENT_MODEL=1``.
+
+    ``HAL0_AGENT_MODEL`` picks which model that is (it reaches ``--plan``); the
+    setup screens always set both together.
+    """
+    lines = agent_block.splitlines()
+    setters = [i for i, ln in enumerate(lines) if ln.strip() == "_agent_wanted=1"]
+    assert len(setters) == 1, setters
+    guard = next(
+        ln for ln in reversed(lines[: setters[0]]) if ln.lstrip().startswith(("if ", "elif "))
+    )
+    assert 'HAL0_PULL_AGENT_MODEL:-}" == "1"' in guard, guard
+    assert "_agent_wanted=1" not in "\n".join(
+        ln for i, ln in enumerate(lines) if i != setters[0] and not ln.lstrip().startswith("#")
     )
 
 

@@ -1,0 +1,322 @@
+#!/usr/bin/env bash
+# installer/lib/facts.sh
+#
+# Purpose: Gather detection-only facts about this machine and write them to a
+#          JSON file a terminal wizard reads (facts file, version 1).
+# Expects: Sourced by install.sh after lib/distro.sh and lib/preflight.sh, which
+#          provide hal0_lxc_kind, preflight_hindsight_python, distro_id,
+#          pkg_mgr and _os_release_field. The caller runs preflight_gpu once
+#          (HAL0_GPU_GATE=1) and passes its return code to hal0_facts_gather.
+#          Plain bash and coreutils only: this runs before any Python exists.
+# Provides: hal0_json_string, hal0_gpu_pool_gb, hal0_install_state,
+#          hal0_hermes_installed, hal0_facts_gather, hal0_facts_write.
+# Safety:  Every call here only reads. Nothing installs a package, pulls an
+#          image, or changes a device or group. The functions of preflight.sh
+#          that can do so (resolve_*_python, preflight_venv, preflight_git,
+#          preflight_container_runtime, resolve_node, the container smoke test)
+#          are never called.
+# Test seams (read only here): HAL0_FACTS_SYS_ROOT (prefix for /sys),
+#          HAL0_FACTS_VAR_DIR (default /var/lib/hal0), HAL0_FACTS_FHS_ROOT
+#          (directory holding the `current` link; default ${HAL0_PREFIX:-/usr/lib/hal0}).
+#          In --dev mode the installer keeps its tree under a prefix and has no
+#          `current` link, so the CALLER MUST SET BOTH HAL0_FACTS_VAR_DIR and
+#          HAL0_FACTS_FHS_ROOT there; the defaults look at the real system.
+#          HAL0_FACTS_UNIT_DIR (default ${UNIT_DIR:-/etc/systemd/system}, where
+#          install.sh keeps its units) and HAL0_FACTS_HERMES_BIN (default
+#          /var/lib/hal0/venvs/hermes/bin/hermes) point the assistant fact at a tree.
+
+# Print VALUE as a JSON string literal. Only printable ASCII survives (every
+# byte outside 040-176 is dropped, so the output is always valid UTF-8), then
+# backslash and double quote are escaped. The callers pass identifiers and
+# version strings, so nothing legitimate is lost.
+hal0_json_string() {
+    local v
+    v="$(printf '%s' "${1-}" | LC_ALL=C tr -cd '\040-\176')"
+    v="${v//\\/\\\\}"
+    v="${v//\"/\\\"}"
+    printf '"%s"' "${v}"
+}
+
+# Largest of mem_info_vram_total and mem_info_gtt_total (bytes) over every
+# card's device directory, in GiB to one decimal. Prints nothing when none is
+# readable. Same rule as src/hal0/hardware/probe.py.
+hal0_gpu_pool_gb() {
+    local drm="${HAL0_FACTS_SYS_ROOT:-}/sys/class/drm"
+    local best=0 f v
+    for f in "${drm}"/card*/device/mem_info_vram_total "${drm}"/card*/device/mem_info_gtt_total; do
+        [[ -r "${f}" ]] || continue
+        v=""
+        read -r v < "${f}" 2>/dev/null || true
+        [[ "${v}" =~ ^[0-9]{1,15}$ ]] || continue
+        v=$((10#${v}))
+        ((v > best)) && best="${v}"
+    done
+    ((best > 0)) || return 0
+    local tenths=$(((best * 10 + (1 << 29)) >> 30))
+    printf '%d.%d\n' $((tenths / 10)) $((tenths % 10))
+}
+
+_hal0_facts_fhs_root() { printf '%s' "${HAL0_FACTS_FHS_ROOT:-${HAL0_PREFIX:-/usr/lib/hal0}}"; }
+
+# fresh | upgrade | unfinished.
+hal0_install_state() {
+    if [[ -e "${HAL0_FACTS_VAR_DIR:-/var/lib/hal0}/.install-in-progress" ]]; then
+        printf 'unfinished\n'
+        return 0
+    fi
+    local cur
+    cur="$(_hal0_facts_fhs_root)/current"
+    if [[ -e "${cur}" || -L "${cur}" ]]; then
+        printf 'upgrade\n'
+    else
+        printf 'fresh\n'
+    fi
+}
+
+# The facts seams below (HAL0_FACTS_UNIT_DIR, HAL0_FACTS_HERMES_BIN,
+# HAL0_FACTS_AGENTS_DIR) point the detection at a test tree. They are honoured
+# only when not root, like the setup screens' own overrides: root's environment
+# never decides what the installer reads about the assistant.
+
+# The root-only record that the installer stopped the assistant from the setup
+# screens (one line per unit it disabled). ONE definition: the facts writer
+# below and the Hermes step of install.sh both ask this function.
+hal0_hermes_stop_record_path() {
+    local dir="/etc/hal0/agents"
+    if [[ "${EUID}" -ne 0 && -n "${HAL0_FACTS_AGENTS_DIR:-}" ]]; then
+        dir="${HAL0_FACTS_AGENTS_DIR}"
+    fi
+    printf '%s/hermes-stopped-by-setup\n' "${dir}"
+}
+
+# Is the assistant (Hermes) installed on this box? True when the agent unit file
+# exists AND the venv's `hermes` is executable: the test the Hermes step of
+# install.sh makes (the unit file AGENT_UNIT_DST=${UNIT_DIR}/hal0-agent@.service
+# and the executable /var/lib/hal0/venvs/hermes/bin/hermes). A test in
+# tests/installer/test_facts_writer.py keeps the two paths equal.
+hal0_hermes_installed() {
+    local unit_dir="${UNIT_DIR:-/etc/systemd/system}"
+    local bin="/var/lib/hal0/venvs/hermes/bin/hermes"
+    if [[ "${EUID}" -ne 0 ]]; then
+        unit_dir="${HAL0_FACTS_UNIT_DIR:-${unit_dir}}"
+        bin="${HAL0_FACTS_HERMES_BIN:-${bin}}"
+    fi
+    [[ -f "${unit_dir}/hal0-agent@.service" && -x "${bin}" ]]
+}
+
+# Is there anything at the record's path? Tested without following a link, so
+# a link or a folder there counts (the Hermes step reads it as a damaged
+# record, which still holds the assistant stopped).
+hal0_hermes_stop_record_present() {
+    local rec
+    rec="$(hal0_hermes_stop_record_path)"
+    [[ -L "${rec}" || -e "${rec}" ]]
+}
+
+# A record that names only a gateway (`gateway` / `gateway-runtime`), no `agent`
+# line: what a lift leaves behind when the assistant is back on but its gateway
+# could not be enabled yet. It is a lift in progress, not a stop.
+hal0_hermes_stop_record_is_gateway_only() {
+    local rec line lines=0 agent=0
+    rec="$(hal0_hermes_stop_record_path)"
+    [[ -f "${rec}" && ! -L "${rec}" ]] || return 1
+    while IFS= read -r line || [[ -n "${line}" ]]; do
+        lines=$((lines + 1))
+        case "${line}" in
+            agent) agent=1 ;;
+            gateway | gateway-runtime) ;;
+            *) return 1 ;;
+        esac
+    done < "${rec}" 2>/dev/null || return 1
+    [[ "${lines}" -ge 1 && "${lines}" -le 8 && "${agent}" -eq 0 ]]
+}
+
+# The is-enabled word of the agent unit. The seam HAL0_FACTS_AGENT_STATE is
+# honoured only when not root, like the others above.
+hal0_hermes_agent_unit_state() {
+    local state=""
+    if [[ "${EUID}" -ne 0 && -n "${HAL0_FACTS_AGENT_STATE:-}" ]]; then
+        printf '%s\n' "${HAL0_FACTS_AGENT_STATE}"
+        return 0
+    fi
+    state="$(systemctl is-enabled hal0-agent@hermes.service 2>/dev/null || true)"
+    printf '%s\n' "${state:-not-found}"
+}
+
+# "The stop from the setup screens is in force": ONE definition, asked by the
+# facts writer below and by the Hermes step of install.sh. $1 is the is-enabled
+# word of hal0-agent@hermes.service. In force when there is a record (anything
+# at its path), it is not a gateway-only leftover of a lift, and the agent unit
+# is not enabled: a person who enables the agent unit by hand has lifted the
+# stop. (A confirmed run of the setup screens lifts it too; that is the run's
+# own answer, which the Hermes step reads itself.)
+hal0_hermes_stop_in_force() {
+    hal0_hermes_stop_record_present || return 1
+    hal0_hermes_stop_record_is_gateway_only && return 1
+    [[ "${1:-}" != enabled* ]]
+}
+
+# Did the installer stop the assistant from the setup screens and has no one
+# turned it on since? This describes the BOX, not the coming run: under --dev or
+# --no-start the run never touches the assistant whatever this says (the setup
+# screens read those flags themselves). The unit state is read only when a
+# record exists, so a box without one costs no systemctl call.
+hal0_hermes_stopped_by_setup() {
+    hal0_hermes_stop_record_present || return 1
+    hal0_hermes_stop_in_force "$(hal0_hermes_agent_unit_state)"
+}
+
+# Contents of current/VERSION (first line), or nothing.
+_hal0_install_version() {
+    local f v=""
+    f="$(_hal0_facts_fhs_root)/current/VERSION"
+    [[ -r "${f}" ]] || return 0
+    read -r v < "${f}" 2>/dev/null || true
+    printf '%s' "${v}"
+}
+
+# Set FACT_* from detection. $1 is the return code of preflight_gpu, already run.
+hal0_facts_gather() {
+    local gpu_rc="${1:-0}"
+
+    FACT_DISTRO_ID="$(distro_id 2>/dev/null || true)"
+    FACT_DISTRO_ID="${FACT_DISTRO_ID:-unknown}"
+    FACT_DISTRO_RELEASE="$(_os_release_field VERSION_ID 2>/dev/null || true)"
+    FACT_PKG_MGR="$(pkg_mgr 2>/dev/null || true)"
+
+    local kind
+    kind="$(hal0_lxc_kind 2>/dev/null || true)"
+    case "${kind}" in
+        none | box | lxc-privileged | lxc-unprivileged) FACT_CONTAINER="${kind}" ;;
+        *) FACT_CONTAINER="other" ;;
+    esac
+
+    FACT_PODMAN_PRESENT=false
+    FACT_PODMAN_RUNS=false
+    if command -v podman >/dev/null 2>&1; then
+        FACT_PODMAN_PRESENT=true
+        # `runs` means the binary executes. `podman info` would create its
+        # storage as root; whether containers really run is the smoke test's job.
+        podman --version >/dev/null 2>&1 && FACT_PODMAN_RUNS=true
+    fi
+
+    case "${gpu_rc}" in
+        3) FACT_GPU_OUTCOME=stop; FACT_GPU_REASON=render_gid_unmapped ;;
+        4) FACT_GPU_OUTCOME=cpu_only_needs_consent; FACT_GPU_REASON=no_gpu_device ;;
+        5) FACT_GPU_OUTCOME=cpu_only_needs_consent; FACT_GPU_REASON=no_kfd ;;
+        6) FACT_GPU_OUTCOME=usable; FACT_GPU_REASON=kfd_group_mismatch ;;
+        *) FACT_GPU_OUTCOME=usable; FACT_GPU_REASON="" ;;
+    esac
+
+    FACT_GPU_VENDOR=""
+    FACT_GPU_POOL_GB=""
+    if [[ -d "${HAL0_FACTS_SYS_ROOT:-}/sys/module/amdgpu" ]]; then
+        FACT_GPU_VENDOR=amd
+        FACT_GPU_POOL_GB="$(hal0_gpu_pool_gb)"
+    fi
+
+    # NPU: node present and /sys still has the device (preflight_gpu's stale test).
+    FACT_NPU_DEVICE=false
+    local node="${HAL0_NPU_ACCEL_NODE:-/dev/accel/accel0}"
+    local sysacc="${HAL0_NPU_SYS_ACCEL:-/sys/class/accel/accel0}"
+    [[ -e "${node}" && -d "${sysacc}/device" ]] && FACT_NPU_DEVICE=true
+    FACT_NPU_MEMLOCK_OK=false
+    [[ "$(ulimit -Hl 2>/dev/null)" == unlimited ]] && FACT_NPU_MEMLOCK_OK=true
+    # The NPU step installs the host FastFlowLM .deb on apt hosts that are
+    # Ubuntu 24.04 or newer or Debian (install.sh NPU prerequisites step).
+    FACT_NPU_FLM_BUILD=false
+    if [[ "${FACT_PKG_MGR}" == apt-get ]]; then
+        case "${FACT_DISTRO_ID}" in
+            debian) FACT_NPU_FLM_BUILD=true ;;
+            ubuntu)
+                [[ -n "${FACT_DISTRO_RELEASE}" ]] \
+                    && [[ "$(printf '%s\n%s\n' 24.04 "${FACT_DISTRO_RELEASE}" | sort -V | head -1)" == 24.04 ]] \
+                    && FACT_NPU_FLM_BUILD=true
+                ;;
+        esac
+    fi
+
+    FACT_INSTALL_STATE="$(hal0_install_state)"
+    FACT_INSTALL_VERSION=""
+    [[ "${FACT_INSTALL_STATE}" == upgrade ]] && FACT_INSTALL_VERSION="$(_hal0_install_version)"
+
+    FACT_HERMES_INSTALLED=false
+    hal0_hermes_installed && FACT_HERMES_INSTALLED=true
+    # Both Hermes facts describe the BOX, not this run: under --dev or
+    # --no-start the Hermes step does not run and nothing is stopped or started
+    # whatever they say. The setup screens read those flags themselves and show
+    # nothing about the assistant in those modes.
+    FACT_HERMES_STOPPED_BY_SETUP=false
+    hal0_hermes_stopped_by_setup && FACT_HERMES_STOPPED_BY_SETUP=true
+
+    FACT_MEMORY_PYTHON=false
+    # Detection only: the wrapper never installs; a skip request must not read as "usable".
+    (HAL0_SKIP_HINDSIGHT=0 preflight_hindsight_python) >/dev/null 2>&1 && FACT_MEMORY_PYTHON=true
+    return 0
+}
+
+# JSON true or false and nothing else: anything but the word `true` is false.
+_hal0_facts_bool() {
+    if [[ "${1-}" == "true" ]]; then printf 'true'; else printf 'false'; fi
+}
+
+# JSON string, or null when empty.
+_hal0_facts_str_or_null() {
+    if [[ -n "${1-}" ]]; then hal0_json_string "$1"; else printf 'null'; fi
+}
+
+# Write the version 1 facts file from FACT_*, atomically, mode 0644.
+hal0_facts_write() {
+    local path="${1-}" dir tmp
+    if [[ -z "${path}" ]]; then
+        printf 'hal0_facts_write: no path given\n' >&2
+        return 1
+    fi
+    dir="$(dirname "${path}")"
+    if [[ -L "${dir}" ]]; then
+        printf 'hal0_facts_write: %s is a symlink; refusing to write through it\n' "${dir}" >&2
+        return 1
+    fi
+    if [[ -d "${dir}" ]]; then
+        if [[ ! -O "${dir}" ]]; then
+            printf 'hal0_facts_write: %s is not owned by this user; refusing\n' "${dir}" >&2
+            return 1
+        fi
+        # An existing directory keeps its mode (it may be /tmp, 1777).
+    else
+        mkdir -p "${dir}" 2>/dev/null && chmod 0755 "${dir}" || return 1
+    fi
+    tmp="$(mktemp "${dir}/.facts.XXXXXX")" || return 1
+    local pool=null
+    [[ -n "${FACT_GPU_POOL_GB:-}" ]] && pool="${FACT_GPU_POOL_GB}"
+    {
+        printf '{\n'
+        printf '  "version": 1,\n'
+        printf '  "distro": {"id": %s, "release": %s, "package_manager": %s},\n' \
+            "$(hal0_json_string "${FACT_DISTRO_ID:-unknown}")" \
+            "$(_hal0_facts_str_or_null "${FACT_DISTRO_RELEASE:-}")" \
+            "$(_hal0_facts_str_or_null "${FACT_PKG_MGR:-}")"
+        printf '  "container": "%s",\n' "${FACT_CONTAINER:-other}"
+        printf '  "podman": {"present": %s, "runs": %s},\n' \
+            "${FACT_PODMAN_PRESENT:-false}" "${FACT_PODMAN_RUNS:-false}"
+        printf '  "gpu": {"outcome": "%s", "reason": %s, "vendor": %s, "pool_gb": %s},\n' \
+            "${FACT_GPU_OUTCOME:-usable}" \
+            "$(_hal0_facts_str_or_null "${FACT_GPU_REASON:-}")" \
+            "$(_hal0_facts_str_or_null "${FACT_GPU_VENDOR:-}")" \
+            "${pool}"
+        printf '  "npu": {"device": %s, "memlock_ok": %s, "flm_build": %s},\n' \
+            "${FACT_NPU_DEVICE:-false}" "${FACT_NPU_MEMLOCK_OK:-false}" "${FACT_NPU_FLM_BUILD:-false}"
+        printf '  "install": {"state": "%s", "version": %s},\n' \
+            "${FACT_INSTALL_STATE:-fresh}" \
+            "$(_hal0_facts_str_or_null "${FACT_INSTALL_VERSION:-}")"
+        printf '  "hermes": {"installed": %s, "stopped_by_setup": %s},\n' \
+            "$(_hal0_facts_bool "${FACT_HERMES_INSTALLED:-false}")" \
+            "$(_hal0_facts_bool "${FACT_HERMES_STOPPED_BY_SETUP:-false}")"
+        printf '  "memory_python": %s\n' "${FACT_MEMORY_PYTHON:-false}"
+        printf '}\n'
+    } > "${tmp}" || { rm -f "${tmp}"; return 1; }
+    chmod 0644 "${tmp}" || { rm -f "${tmp}"; return 1; }
+    # -T: replace whatever is at the target name; never move into a directory a link points at.
+    mv -fT "${tmp}" "${path}" || { rm -f "${tmp}"; return 1; }
+    return 0
+}

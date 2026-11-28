@@ -1,0 +1,62 @@
+{
+  "version": 1,
+  "generated_from": [
+    "src/hal0/install/agent_model.py",
+    "src/hal0/install/brain_model.py",
+    "src/hal0/registry/curated.py",
+    "src/hal0/comfyui/catalog.py"
+  ],
+  "model_ladder": [
+    {
+      "role": "starter",
+      "model": "qwen3.8-27b",
+      "label": "Qwen3.8 27B",
+      "download_gb": 18.49,
+      "min_gpu_pool_gb": 25.0
+    },
+    {
+      "role": "brain",
+      "model": "lfm2.5-2.6b",
+      "label": "LFM2.5 2.6B",
+      "download_gb": 2.87,
+      "min_gpu_pool_gb": 4.0
+    },
+    {
+      "role": "brain",
+      "model": "hal0-brain-sft-f16",
+      "label": "hal0 brain (F16, portable)",
+      "download_gb": 2.0,
+      "min_gpu_pool_gb": 4.0
+    },
+    {
+      "role": "image",
+      "model": "sdxl-lightning",
+      "label": "SDXL Lightning (8-step)",
+      "download_gb": 7.1
+    },
+    {
+      "role": "image",
+      "model": "sdxl-turbo",
+      "label": "SDXL Turbo",
+      "download_gb": 6.4
+    },
+    {
+      "role": "image",
+      "model": "sd-1.5-pruned-emaonly",
+      "label": "Stable Diffusion 1.5",
+      "download_gb": 4.0
+    },
+    {
+      "role": "image",
+      "model": "qwen-image-lightning",
+      "label": "Qwen-Image (4-step Lightning)",
+      "download_gb": 47.9
+    },
+    {
+      "role": "image",
+      "model": "qwen-image",
+      "label": "Qwen-Image (20-step)",
+      "download_gb": 47.1
+    }
+  ]
+}

@@ -1096,7 +1096,7 @@ __all__ = [
 
 
 def main(argv: list[str] | None = None) -> int:
-    """``python -m hal0.agents.hermes_gateway_regen install|migrate|state`` (the installer's entries)."""
+    """``python -m hal0.agents.hermes_gateway_regen install|migrate|state|units`` (the installer's entries)."""
     import sys
 
     args = list(sys.argv[1:] if argv is None else argv)
@@ -1106,9 +1106,17 @@ def main(argv: list[str] | None = None) -> int:
         state, active = effective_gateway_state()
         print(f"{state} {int(active)}")
         return 0
+    if args == ["units"]:
+        # The name of hal0's suffixed gateway unit when its file is on disk
+        # (nothing otherwise), one per line. Read-only: the installer's stop
+        # step disables that unit by name instead of moving it (`migrate`
+        # would enable and start the canonical one).
+        for path in hal0_hashed_units(GATEWAY_UNIT_PATH.parent):
+            print(path.name)
+        return 0
     if args not in (["install"], ["migrate"]):
         print(
-            "usage: python -m hal0.agents.hermes_gateway_regen install|migrate|state",
+            "usage: python -m hal0.agents.hermes_gateway_regen install|migrate|state|units",
             file=sys.stderr,
         )
         return 2

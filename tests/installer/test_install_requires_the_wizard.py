@@ -1,0 +1,170 @@
+"""installer/install.sh needs the setup screens and has no path without them.
+
+A release tree that lacks the wizard (its entry point, its catalog or its models list) stops
+with one line before anything runs; a tree that has it stops on every unknown
+flag. The tests run the real ``install.sh`` out of a scratch tree whose
+``installer/`` entries are links to this checkout's files, so ``REPO_ROOT`` is
+the scratch tree and the presence of the wizard is the tree's own contents.
+"""
+
+from __future__ import annotations
+
+import glob
+import os
+import subprocess
+import time
+from pathlib import Path
+
+import pytest
+
+REPO = Path(__file__).resolve().parents[2]
+INSTALLER = REPO / "installer"
+
+MISSING_LINE = (
+    "this release tree is incomplete: the setup screens are missing "
+    "(src/hal0/install/wizard/__main__.py, installer/manifests/setup-catalog.json, installer/manifests/setup-models.json)"
+)
+
+
+def _tree(root: Path, *, wizard: bool) -> Path:
+    """A release tree whose installer/ files are links to the real ones."""
+    inst = root / "installer"
+    inst.mkdir(parents=True)
+    (inst / "install.sh").symlink_to(INSTALLER / "install.sh")
+    (inst / "lib").symlink_to(INSTALLER / "lib")
+    if wizard:
+        entry = root / "src" / "hal0" / "install" / "wizard" / "__main__.py"
+        entry.parent.mkdir(parents=True)
+        entry.write_text("", encoding="utf-8")
+        catalog = inst / "manifests" / "setup-catalog.json"
+        catalog.parent.mkdir()
+        catalog.write_text("{}", encoding="utf-8")
+        (inst / "manifests" / "setup-models.json").write_text("{}", encoding="utf-8")
+    return root
+
+
+def _run(
+    tree: Path, work: Path, args: list[str], *, log: Path | None = None
+) -> subprocess.CompletedProcess[str]:
+    """Run the tree's install.sh from an empty working directory.
+
+    ``log`` presets HAL0_INSTALL_LOG, which makes ``hal0_install_log_init`` a
+    no-op: a run that is expected to get past the log set-up (an unknown flag)
+    then creates no file under /tmp. A run that must stop BEFORE the log
+    exists leaves it unset, so a created log would show up.
+    """
+    work.mkdir()
+    (work / "tmp").mkdir()
+    env = {
+        "PATH": os.environ["PATH"],
+        "HOME": str(work),
+        "TMPDIR": str(work / "tmp"),
+        "HAL0_PLAIN": "1",
+    }
+    if log is not None:
+        env["HAL0_INSTALL_LOG"] = str(log)
+    return subprocess.run(
+        ["bash", str(tree / "installer" / "install.sh"), *args],
+        capture_output=True,
+        text=True,
+        cwd=work,
+        env=env,
+        stdin=subprocess.DEVNULL,
+        timeout=60,
+    )
+
+
+# File times come from a coarser clock than time_ns(); the line below is the real tie.
+_CLOCK_SLACK_NS = 2 * 10**9
+_LOG_PATTERNS = ("/tmp/hal0-install-*.log", "/var/log/hal0/install-*.log")
+
+
+def _logs_from_this_run(since_ns: int, patterns: tuple[str, ...] = _LOG_PATTERNS) -> list[str]:
+    """Install logs this run created: modified since ``since_ns`` AND holding its line.
+
+    The installer names its log under /tmp (or /var/log/hal0 as root) whatever
+    TMPDIR says, with a random name, so nothing ties a file to a run by name.
+    If the completeness check ever moved after the log was opened, the stop
+    line would be copied into that log, so the line is the tie: another test
+    running at the same time makes logs without it. Reading only.
+    """
+    found: list[str] = []
+    for pattern in patterns:
+        for name in glob.glob(pattern):
+            try:
+                if os.stat(name).st_mtime_ns < since_ns - _CLOCK_SLACK_NS:
+                    continue
+                text = Path(name).read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            if "this release tree is incomplete" in text:
+                found.append(name)
+    return found
+
+
+def test_the_log_check_counts_only_this_runs_files(tmp_path: Path) -> None:
+    started = time.time_ns()
+    stale = tmp_path / "hal0-install-old.log"
+    stale.write_text(MISSING_LINE, encoding="utf-8")
+    os.utime(stale, ns=(started - 10 * 10**9, started - 10 * 10**9))
+    other = tmp_path / "hal0-install-other.log"
+    other.write_text("some other test's install\n", encoding="utf-8")
+    mine = tmp_path / "hal0-install-mine.log"
+    mine.write_text("err: " + MISSING_LINE + "\n", encoding="utf-8")
+    assert _logs_from_this_run(started, (str(tmp_path / "hal0-install-*.log"),)) == [str(mine)]
+
+
+def _assert_stopped_at_the_check(
+    proc: subprocess.CompletedProcess[str], work: Path, since_ns: int
+) -> None:
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert proc.stdout == ""
+    lines = proc.stderr.strip().splitlines()
+    assert len(lines) == 1, proc.stderr
+    assert lines[0].endswith(MISSING_LINE), proc.stderr
+    assert [p.name for p in work.iterdir()] == ["tmp"]
+    assert list((work / "tmp").iterdir()) == []
+    assert _logs_from_this_run(since_ns) == [], "an install log was created before the stop"
+
+
+@pytest.mark.parametrize("args", [[], ["--dev"], ["--no-owui"], ["--help"], ["--bogus"]])
+def test_a_tree_without_the_wizard_stops_with_one_line(tmp_path: Path, args: list[str]) -> None:
+    tree = _tree(tmp_path / "tree", wizard=False)
+    started = time.time_ns()
+    proc = _run(tree, tmp_path / "work", args)
+    _assert_stopped_at_the_check(proc, tmp_path / "work", started)
+    assert "unknown flag" not in proc.stderr
+    assert not (tree / ".hal0ai").exists()
+
+
+@pytest.mark.parametrize("missing", ["entry", "catalog", "models"])
+def test_a_tree_missing_one_wizard_file_stops_too(tmp_path: Path, missing: str) -> None:
+    tree = _tree(tmp_path / "tree", wizard=True)
+    victim = {
+        "entry": tree / "src" / "hal0" / "install" / "wizard" / "__main__.py",
+        "catalog": tree / "installer" / "manifests" / "setup-catalog.json",
+        "models": tree / "installer" / "manifests" / "setup-models.json",
+    }[missing]
+    victim.unlink()
+    started = time.time_ns()
+    proc = _run(tree, tmp_path / "work", [])
+    _assert_stopped_at_the_check(proc, tmp_path / "work", started)
+
+
+@pytest.mark.parametrize("flag", ["--no-hermse", "--box", "--answers"])
+def test_an_unknown_flag_always_stops(tmp_path: Path, flag: str) -> None:
+    tree = _tree(tmp_path / "tree", wizard=True)
+    proc = _run(tree, tmp_path / "work", [flag], log=tmp_path / "install.log")
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert f"unknown flag: {flag} (run with --help for the list)" in proc.stderr
+    assert "ignored" not in proc.stderr
+    assert MISSING_LINE not in proc.stderr
+
+
+def test_no_prompt_helper_or_ignore_arm_is_left() -> None:
+    for path in sorted(INSTALLER.rglob("*.sh")):
+        text = path.read_text(encoding="utf-8")
+        name = str(path.relative_to(REPO))
+        assert "_interactive" not in text, name
+        assert "_tty_read" not in text, name
+        assert "(ignored)" not in text or "unknown flag" not in text, name

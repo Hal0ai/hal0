@@ -16,10 +16,20 @@ Older tagged releases are not back-patched.
 
 hal0 ships a bundled agent (Hermes). Its terminal tool — the one that executes
 arbitrary shell commands on the host — is **off by default** as of v1.0 and is
-an explicit opt-in (`sudo hal0 agent install hermes --terminal-tool`, or
-`HAL0_HERMES_TERMINAL=1` for an unattended install). A piped, headless or
-non-interactive install never enables it. `hal0 agent status hermes` prints the
-current posture.
+an explicit opt-in: a row on the installer's Customize screens that you tick
+yourself, `sudo hal0 agent install hermes --terminal-tool`, or
+`HAL0_HERMES_TERMINAL=1` for an unattended install. On a fresh box it is off
+unless you do one of those. The answers saved by an earlier install and an
+answers file never turn it on. Once it has been turned on, the box remembers
+that in `/etc/hal0/agents/hermes-terminal-tool`. When the installer's setup
+screens are shown and confirmed, the review screen's `Terminal tool` line is
+what the box gets: confirming it as `off` turns the tool off, so running the
+screens again (`--reconfigure`) turns it off unless the row is ticked again. An
+explicit `HAL0_HERMES_TERMINAL=0` or `=1` on an install run is applied to a box
+that already has the agent too. A run that shows no screens, with that variable
+unset, changes nothing. At any time,
+`sudo hal0 agent install hermes --no-terminal-tool` turns it off. `hal0 agent status hermes`
+prints the current posture.
 
 Turning it on makes the agent root-equivalent, and the rest of this section
 describes that state. Even with the terminal tool off, the agent runs under
@@ -113,7 +123,7 @@ full list.
 
 ### The opt-in podman box does not change this
 
-`install.sh --box` (v1.8.0, ADR-0051) runs hal0 inside one rootless podman
+The one-line install with `--box` (v1.8.0, ADR-0051) runs hal0 inside one rootless podman
 container. That protects the host from root inside the box in the same way an
 unprivileged LXC does, and it does not protect against kernel bugs reachable
 from a user namespace. Inside the box the `hal0` account and the credential

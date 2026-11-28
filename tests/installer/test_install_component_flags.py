@@ -2,7 +2,7 @@
 
 The arg loop is sliced out by text markers and run under real bash, the
 technique ``test_hermes_terminal_prompt.py`` uses. Each flag must export exactly
-the knobs in the component table and set ``COMPONENT_FLAG_GIVEN=1``.
+the knobs in the component table.
 """
 
 from __future__ import annotations
@@ -28,7 +28,6 @@ NO_START=0
 """
 _TAIL = """
 env | grep '^HAL0_' | sed 's/^/ENV:/'
-echo COMPONENT_FLAG_GIVEN=$COMPONENT_FLAG_GIVEN
 """
 
 ALL_SIX = {
@@ -51,24 +50,23 @@ def _fragment() -> str:
 def run_argloop():
     script = _PREAMBLE + _fragment() + _TAIL
 
-    def run(args, env=None):
+    def run(args, env=None, *, returncode=0):
         proc = subprocess.run(
             ["bash", "-c", script, "bash", *args],
             env={"PATH": os.environ["PATH"], **(env or {})},
             capture_output=True,
             text=True,
-            check=True,
         )
+        assert proc.returncode == returncode, proc.stdout + proc.stderr
         out = {}
-        given = None
         for line in proc.stdout.splitlines():
             if line.startswith("ENV:"):
                 k, _, v = line[4:].partition("=")
                 out[k] = v
-            elif line.startswith("COMPONENT_FLAG_GIVEN="):
-                given = line.split("=", 1)[1]
-        run.stdout = proc.stdout
-        return out, given
+        run.proc = proc
+        return out
+
+    run.proc = None
 
     return run
 
@@ -86,40 +84,41 @@ def run_argloop():
     ],
 )
 def test_flag_exports_only_its_knobs(run_argloop, flag, expected):
-    env, given = run_argloop([flag])
+    env = run_argloop([flag])
     assert env == expected
-    assert given == "1"
 
 
 def test_bare_exports_every_knob(run_argloop):
-    env, given = run_argloop(["--bare"])
-    assert env == ALL_SIX and given == "1"
+    env = run_argloop(["--bare"])
+    assert env == ALL_SIX
 
 
 def test_bare_inference_is_a_synonym(run_argloop):
-    env, given = run_argloop(["--bare-inference"])
-    assert env == ALL_SIX and given == "1"
+    env = run_argloop(["--bare-inference"])
+    assert env == ALL_SIX
 
 
 def test_flag_overrides_env(run_argloop):
-    env, _ = run_argloop(["--no-comfyui"], env={"HAL0_IMAGE_MODELS": "recommended"})
+    env = run_argloop(["--no-comfyui"], env={"HAL0_IMAGE_MODELS": "recommended"})
     assert env["HAL0_IMAGE_MODELS"] == "none"
 
 
 def test_no_flag_sets_nothing(run_argloop):
-    env, given = run_argloop([])
-    assert env == {} and given == "0"
+    env = run_argloop([])
+    assert env == {}
 
 
 def test_bare_with_no_start_still_exports(run_argloop):
-    env, _ = run_argloop(["--bare", "--no-start"])
+    env = run_argloop(["--bare", "--no-start"])
     assert env == ALL_SIX
 
 
-def test_unknown_flag_still_warns(run_argloop):
-    env, given = run_argloop(["--bogus"])
-    assert "WARN: unknown flag: --bogus (ignored)" in run_argloop.stdout
-    assert env == {} and given == "0"
+def test_unknown_flag_stops_the_run(run_argloop):
+    env = run_argloop(["--bogus"], returncode=1)
+    proc = run_argloop.proc
+    assert "ERR: unknown flag: --bogus (run with --help for the list)" in proc.stderr
+    assert "ignored" not in proc.stdout + proc.stderr
+    assert env == {}
 
 
 def test_help_lists_every_component_flag():

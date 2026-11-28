@@ -40,7 +40,7 @@ the OS toolchain: git, plus python3 with venv and pip, and pipx. Then it
 builds a Hermes release and registers the agent. Last, it enables and
 starts the systemd unit (`hal0-agent@hermes`).
 
-The Hermes release runs on Python 3.14. The uv that ships in hal0's own venv fetches a managed CPython 3.14 under `/var/lib/hal0/hermes/python/`, so the first build needs the network. The interpreter order is a `HAL0_HERMES_PYTHON` override, then the uv-managed CPython, then a system interpreter that links SQLite 3.51.3 or newer. hal0's own interpreter is never used. See the [interpreter policy](/docs/operate/services#hermes-interpreter-policy).
+The Hermes release runs on Python 3.14. The uv that ships in hal0's own venv fetches a managed CPython 3.14 under `/var/lib/hal0/hermes/python/`, so the first build needs network. The interpreter order is a `HAL0_HERMES_PYTHON` override, then the uv-managed CPython, then a system interpreter that links SQLite 3.51.3 or newer. hal0's own interpreter is never used. See the [interpreter policy](/docs/operate/services#hermes-interpreter-policy).
 
 Run it as root: provisioning writes under root-owned `/var/lib/hal0` and
 then chowns the provisioned trees to the shared agent runtime user. As a
@@ -64,7 +64,7 @@ hal0 installs one reviewed Hermes release, v0.23.3 (`caafe538`). It changes two 
 
 A Hermes model you pick is kept through `reprovision --repair`. To go back, run `hermes config set model.default hal0/agent` and `hermes config set model.provider custom`, then `--repair`.
 
-`hal0 update` renders the gateway unit from hal0's own template (the root verb `hal0-update hermes-gateway`) and turns linger on once the pinned Hermes release is live. It restarts the gateway only if it was running and never enables, starts or stops it, so a disabled gateway stays off. If that step fails, `hal0 update`, `hal0 update status` and `hal0 doctor all` print `sudo hal0 agent install hermes`; run it as the fix. It and the installer leave a disabled or masked gateway off.
+`hal0 update` renders the gateway unit from hal0's own template (the root verb `hal0-update hermes-gateway`) and turns linger on once the pinned Hermes release is live. It restarts the gateway only if it was running and never enables, starts or stops it, so a disabled gateway stays off. If that step fails, `hal0 update`, `hal0 update status` and `hal0 doctor all` print `sudo hal0 agent install hermes`; run it as the fix. Both leave a disabled or masked gateway off.
 
 ### The Hermes gateway and profile chat
 
@@ -76,21 +76,21 @@ sudo systemctl enable --now hermes-gateway
 
 With no messaging platform configured, the gateway serves only the API server and cron.
 
-hal0 keeps the gateway unit file installed even when you turn the gateway off, because an installed unit in any state stops a client from starting a gateway of its own. The `Hermes gateway unit` row of `hal0 doctor all` fails when that file is missing, when a `gateway run --idle-exit` process is running (it names the pid and cgroup), or when a `gateway.standalone: true` profile has no unit of its own. To clear it, stop the stray process and run `sudo hal0 agent install hermes`; to keep the gateway off afterwards, `sudo systemctl disable --now hermes-gateway`. While the gateway is off, the `hermes-api` row warns instead of failing.
+hal0 keeps the gateway unit file installed even when the gateway is off, because an installed unit in any state stops a client from starting a gateway of its own. The `Hermes gateway unit` row of `hal0 doctor all` fails when that file is missing, when a `gateway run --idle-exit` process is running (it names the pid and cgroup), or when a `gateway.standalone: true` profile has no unit of its own. To clear it, stop the stray process and run `sudo hal0 agent install hermes`; to keep the gateway off afterwards, `sudo systemctl disable --now hermes-gateway`. While the gateway is off, the `hermes-api` row warns instead of failing.
 
 ### Dashboard token for Hermes Desktop
 
-Hermes Desktop pairs with the Hermes dashboard in token mode. hal0 mints the dashboard session token once per install, stores it at `/var/lib/hal0/state/agents/hermes/dashboard-session-token` and hands it to the dashboard at every start, so a pairing survives restarts and `hal0 update`. Print it as root or the `hal0` user:
+Hermes Desktop pairs with the dashboard in token mode. hal0 mints the dashboard session token once per install, keeps it at `/var/lib/hal0/state/agents/hermes/dashboard-session-token` and hands it to the dashboard at every start, so pairing survives restarts and `hal0 update`. Print it as root or the `hal0` user:
 
 ```sh
 hal0 agent dashboard-token hermes
 ```
 
-The token is created the first time `hal0-agent@hermes` starts; before that the command exits 1 and says so.
+The token is created when `hal0-agent@hermes` first starts; before that the command exits 1 and says so.
 
 ### Profiles and platform SDKs
 
-Each named Hermes profile is wired to hal0's `hal0-admin` and `hal0-memory` MCP servers (identity `hermes__<profile>`) at the `profile_mcp_wire` provisioning phase and on every hal0-api reconcile sweep. Hermes picks the change up on its own 60-second reconcile, so no restart follows. Opt a profile out with `hal0: {wire_mcp: false}` in its `config.yaml`. `hal0 doctor all` reports this on the `hermes_profiles_mcp` row and warns on `hermes_generation` when the live release lacks extras such as `mcp`. Each profile is also a model on hal0's `/v1`; see [Talking to Hermes](/docs/guides/open-webui#talking-to-hermes).
+Each Hermes profile is wired to hal0's `hal0-admin` and `hal0-memory` MCP servers (identity `hermes__<profile>`) at the `profile_mcp_wire` provisioning phase and on every hal0-api reconcile sweep. Hermes picks it up on its own 60-second reconcile; no restart follows. Opt a profile out with `hal0: {wire_mcp: false}` in its `config.yaml`. `hal0 doctor all` reports this on the `hermes_profiles_mcp` row and warns on `hermes_generation` when the live release lacks extras such as `mcp`. Each profile is also a model on hal0's `/v1`; see [Talking to Hermes](/docs/guides/open-webui#talking-to-hermes).
 
 A release build installs upstream's extras for each messaging platform the box configures (for example Telegram, Discord and Slack), plus `sms` (aiohttp) because hal0 always enables the gateway API server. They install from upstream's lock with hashes and are recorded as `platform_extras` in the release's `release.json`. `matrix` is never added. If Hermes installs a platform lazily into its own environment, the next `hal0 update` or repair folds that extra into a fresh release.
 
@@ -99,7 +99,7 @@ A release build installs upstream's extras for each messaging platform the box c
 Hermes ships **without** a terminal tool. It can read your box through the
 hal0 MCP tools, but it cannot run shell commands unless you say so.
 
-That is a deliberate default. The only terminal backend that works on a hal0
+That is deliberate. The only terminal backend that works on a hal0
 box is Hermes' `local` one, which runs commands as the `hal0` service user —
 and on this box that user is root-equivalent (rootful podman plus the
 `hal0-systemctl` / `hal0-agentenv` sudo wrappers). Hermes also reads content
@@ -121,17 +121,31 @@ sudo hal0 agent install hermes --terminal-tool     # opt in
 sudo hal0 agent install hermes --no-terminal-tool  # opt back out
 ```
 
-The installer also asks once, on an interactive install. A piped
-(`curl … | bash`), headless, or `HAL0_NONINTERACTIVE=1` install is never
-asked and always leaves it off; set `HAL0_HERMES_TERMINAL=1` to opt in
-unattended.
+The setup screens carry it as one row, "Let the assistant run commands on
+this machine?", on the "Assistant and memory" screen that Customize adds. On a
+fresh box it is off unless you tick that row or set `HAL0_HERMES_TERMINAL=1`
+(the unattended way). Saved answers and an answers file never turn it on.
+
+When you confirm the setup screens, the review decides. Its "Terminal tool" line
+is `off` or `ON: the assistant can run commands as a root-equivalent user`.
+Confirming it as off turns the tool off, even where it was on. Only Customize
+can tick the row, so Recommended and Minimal mean off, and `--reconfigure`
+turns it off unless you tick it again. An installed assistant restarts once.
+
+`HAL0_HERMES_TERMINAL=0` or `=1` on an install run is applied there too, by
+`hal0 agent reprovision hermes`. If that fails, the installer warns and names
+`sudo hal0 agent install hermes --no-terminal-tool`.
+A run with no screens (unattended, an answers file, saved answers) and the
+variable unset changes nothing.
 
 Your answer is recorded at `/etc/hal0/agents/hermes-terminal-tool`, so
-re-provisioning, `--repair` and updates all keep it. That file is root-owned on
-purpose: it sits outside the agent's own writable home, so nothing the agent
-writes can present itself to a later provision as your decision.
+reprovisioning, `--repair` and updates keep it. That file is root-owned on
+purpose: it sits outside the agent's writable home, so nothing the agent
+writes can pass as your decision.
 
 `hal0 agent status hermes` prints the current posture on its own line.
+
+Turning the assistant off on the screens [stops an installed one](/docs/getting-started/install/#turning-the-assistant-off).
 
 **Upgrades keep your setting.** Every hal0 release that provisioned Hermes
 wrote both `terminal.backend: local` and a `terminal.cwd` of its own — first
@@ -149,7 +163,7 @@ From Hermes v0.22.3 the gateway's preview-restart side agent is built with the `
 
 If you chose a docker or ssh backend yourself, hal0 keeps it under `hal0.terminal_backend_saved` while the terminal is off and puts it back when you turn the terminal on; with nothing saved, turning it on restores `local`. `hal0 update` applies the gate to an existing box and restarts Hermes when it changed.
 
-While tools are listed, Hermes logs `Unknown TERMINAL_ENV 'hal0-terminal-off'` at ERROR about every 30 seconds. On a terminal-off box that line is expected: it is the gate working, not a fault to fix.
+While tools are listed, Hermes logs `Unknown TERMINAL_ENV 'hal0-terminal-off'` at ERROR about every 30 seconds. On a terminal-off box that is the gate working, not a fault.
 
 ### What you lose with it off
 

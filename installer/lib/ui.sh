@@ -166,11 +166,31 @@ declare -A UI_STEP_DURATIONS 2>/dev/null || true
 _UI_STEP_LAST_TITLE=""
 _UI_STEP_LAST_START=0
 
+# _ui_step_done SECONDS — the one-line finish note under a step. Nothing for
+# a step that took 0 seconds. Always returns 0 (the installer runs under set -e).
+_ui_step_done() {
+    local secs="$1" took
+    if [[ "$secs" -le 0 ]]; then
+        return 0
+    fi
+    if [[ "$secs" -lt 60 ]]; then
+        took="${secs}s"
+    else
+        took="$((secs / 60))m $((secs % 60))s"
+    fi
+    if [[ "${UI_PLAIN:-0}" == "1" ]]; then
+        printf '   done in %s\n' "$took"
+        return 0
+    fi
+    printf '   %sdone in %s%s\n' "${DIM}" "$took" "${RST}"
+}
+
 ui_step() {
     local title="$1" estimate="${2:-}"
 
     if [[ -n "${_UI_STEP_LAST_TITLE}" ]]; then
         UI_STEP_DURATIONS["${_UI_STEP_LAST_TITLE}"]=$((SECONDS - _UI_STEP_LAST_START))
+        _ui_step_done "${UI_STEP_DURATIONS["${_UI_STEP_LAST_TITLE}"]}"
     fi
     _UI_STEP_LAST_TITLE="$title"
     _UI_STEP_LAST_START="$SECONDS"
@@ -205,6 +225,7 @@ ui_step() {
 ui_step_finalize() {
     if [[ -n "${_UI_STEP_LAST_TITLE}" ]]; then
         UI_STEP_DURATIONS["${_UI_STEP_LAST_TITLE}"]=$((SECONDS - _UI_STEP_LAST_START))
+        _ui_step_done "${UI_STEP_DURATIONS["${_UI_STEP_LAST_TITLE}"]}"
         _UI_STEP_LAST_TITLE=""
     fi
 }
@@ -368,260 +389,84 @@ ui_box() {
         "${UI_GLYPH_BOX_BR}" "${RST}"
 }
 
-# ── Component picker ────────────────────────────────────────────────────────
-# Interactive checklist for the optional install components.
+# ── ui_closing_screen ───────────────────────────────────────────────────────
+# The last thing a person sees: where to create the first chat account and,
+# when THIS run created an admin key (_HAL0_ADMIN_KEY_MINTED=1), the key
+# itself, shown once. Nothing sets _HAL0_ADMIN_KEY_MINTED yet: the admin-key
+# work (issue #4048) will. Likewise _HAL0_OPENWEBUI_SIGNIN is not set by
+# anything yet; the first-chat-account work (issue #4056) will set it.
 #
-# Usage:
-#   rows=( $'id\tLabel\tsummary\ton|off\tunavailable-reason' ... )
-#   declare -A picked=()
-#   ui_component_picker rows picked      # picked[id] = on | off | unavailable
-#
-# An empty reason means the row is available; a non-empty reason greys the row
-# out, it never toggles, and its result is "unavailable". Input comes from
-# ${UI_TTY_IN:-/dev/tty}, output goes to ${UI_TTY_OUT:-/dev/tty}. Always
-# returns 0; a failed read (EOF) accepts the current state.
-#
-# Layout: the rows are shown read-only first, then the preset line
-# "a) defaults  b) bare inference  p) pick  [a]"; "p" opens the checklist
-# below. Every rendered row is clipped to the terminal width so the in-place
-# redraw (cursor up N lines) never meets a wrapped line. The width comes from
-# `stty size` on the input tty, else 80; UI_TTY_COLS overrides it (for tests).
-#
-# The cursor path needs a terminal that answers `tput cuu1`; with UI_PLAIN=1,
-# TERM=dumb or an unset TERM the picker uses the numbered plain path instead.
-#
-# The helpers below read the picker's locals through bash dynamic scope
-# (_up_* variables), so only ui_component_picker may call them.
-
-# Write to the picker terminal (fd 3). A lost terminal must not abort an
-# installer running under set -e, so a failed write is dropped silently.
-_ui_picker_out() {
-    # shellcheck disable=SC2059  # callers pass a literal format
-    printf "$@" >&3 2>/dev/null || true
-}
-
-# Terminal width for clipping: UI_TTY_COLS, else `stty size` on fd 4, else 80.
-_ui_picker_width() {
-    local _up_sz _up_w=""
-    if [[ "${UI_TTY_COLS:-}" =~ ^[0-9]+$ ]]; then
-        _up_w="$UI_TTY_COLS"
-    else
-        _up_sz="$(stty size <&4 2>/dev/null)" || _up_sz=""
-        _up_w="${_up_sz##* }"
+# The key is a secret and stdout/stderr are copied into a log that other users
+# can read. So its value goes to the terminal device only, through a shell
+# builtin redirected to a spare descriptor: never to stdout/stderr, never as a
+# program argument (it would show in the process list). The device is always
+# /dev/tty when running as root; the UI_TTY_OUT override (tests) is honoured
+# only for other users, because root would otherwise open, create or follow a
+# link at a path the caller's environment chose and write the key there.
+# While the key is read and written, xtrace is switched off (and restored
+# after), so `bash -x` or BASH_XTRACEFD never records the value. With no
+# terminal, or no key line in the file, nothing about the value
+# is printed anywhere and the log names the command that prints a fresh key
+# (pointing at the root-only file would invite copying it into a scrollback).
+# Every terminal write is guarded and the function always returns 0, so it can
+# never fail an install running under `set -e` and an ERR trap.
+ui_closing_screen() {
+    # The real user id, asked of the system: EUID can be set through the
+    # environment and must not decide this. No answer counts as root.
+    local _tty="/dev/tty" _uid=""
+    _uid="$(id -u 2>/dev/null)" || _uid=""
+    if [[ -n "${_uid}" && "${_uid}" != "0" ]]; then
+        _tty="${UI_TTY_OUT:-/dev/tty}"
     fi
-    [[ "$_up_w" =~ ^[1-9][0-9]*$ ]] || _up_w=80
-    (( _up_w >= 20 )) || _up_w=20
-    _up_cols="$_up_w"
-}
+    local LC_ALL=C  # character ranges below mean ASCII, whatever the locale
 
-# Print the rows (and, when $1 is 1, a hint line) to fd 3, each clipped to one
-# physical line. Sets _up_lines to the number of lines written.
-_ui_picker_render() {
-    local _up_i _up_mark _up_clear _up_lead _up_plen _up_avail
-    local _up_head _up_full _up_hd _up_sm _up_hint
-    _up_lines=0
-    for _up_i in "${!_up_ids[@]}"; do
-        if [[ "$_up_mode" == "plain" ]]; then
-            _up_clear=""
-            printf -v _up_lead '  %d) ' "$((_up_i + 1))"
-            _up_plen=${#_up_lead}
-        else
-            _up_clear=$'\033[2K\r'
-            if (( _up_i == _up_pos )); then
-                _up_lead=" ${AMBER}>${RST} "
-            else
-                _up_lead="   "
-            fi
-            _up_plen=3
-        fi
-        _up_avail=$((_up_cols - 1 - _up_plen))
-        if [[ -n "${_up_reason[$_up_i]}" ]]; then
-            _up_full="[-] ${_up_labels[$_up_i]}  (${_up_reason[$_up_i]})"
-            _ui_picker_out '%s%s%s%s%s\n' "$_up_clear" "$_up_lead" "${DIM}" "${_up_full:0:_up_avail}" "${RST}"
-        else
-            if [[ "${_up_cur[$_up_i]}" == "on" ]]; then _up_mark="x"; else _up_mark=" "; fi
-            _up_head="[${_up_mark}] ${_up_labels[$_up_i]}"
-            _up_full="${_up_head}  ${_up_sums[$_up_i]}"
-            _up_full="${_up_full:0:_up_avail}"
-            _up_hd="${_up_full:0:${#_up_head}}"
-            _up_sm="${_up_full:${#_up_head}}"
-            _ui_picker_out '%s%s%s%s%s%s\n' "$_up_clear" "$_up_lead" "$_up_hd" "${DIM}" "$_up_sm" "${RST}"
-        fi
-        _up_lines=$((_up_lines + 1))
-    done
-    if [[ "${1:-0}" == "1" ]]; then
-        if [[ "$_up_mode" == "plain" ]]; then
-            _up_hint="number toggles, a) defaults  b) bare  d) done"
-            _ui_picker_out '  %s%s%s\n' "${DIM}" "${_up_hint:0:_up_cols-3}" "${RST}"
-        else
-            _up_hint="j/k or arrows move, space toggles, a) defaults  b) bare, Enter accepts"
-            _ui_picker_out '\033[2K\r  %s%s%s\n' "${DIM}" "${_up_hint:0:_up_cols-3}" "${RST}"
-        fi
-        _up_lines=$((_up_lines + 1))
+    if [[ "${_HAL0_OPENWEBUI_SIGNIN:-}" == "1" && "${DEV_MODE:-0}" == "0" && "${NO_START:-0}" == "0" \
+        && "${IS_UPGRADE:-0}" == "0" && "${COMPONENT_STATES[openwebui]:-}" == "selected" ]]; then
+        info "Create the first chat account now: http://${HOST:-localhost}:3001"
+        printf '   The first account to sign up becomes the chat page'"'"'s administrator.\n'
     fi
-}
 
-# Toggle row index $1; unavailable rows are left alone.
-_ui_picker_toggle() {
-    local _up_t="$1"
-    if [[ -n "${_up_reason[$_up_t]}" ]]; then return 0; fi
-    if [[ "${_up_cur[$_up_t]}" == "on" ]]; then _up_cur[_up_t]="off"; else _up_cur[_up_t]="on"; fi
-}
+    [[ "${_HAL0_ADMIN_KEY_MINTED:-0}" == "1" ]] || return 0
 
-# Apply preset $1: "a" restores the row defaults, "b" turns every row off.
-_ui_picker_preset() {
-    local _up_p
-    for _up_p in "${!_up_ids[@]}"; do
-        if [[ -n "${_up_reason[$_up_p]}" ]]; then continue; fi
-        if [[ "$1" == "a" ]]; then _up_cur[_up_p]="${_up_def[$_up_p]}"; else _up_cur[_up_p]="off"; fi
-    done
-}
-
-# Move the cursor back up $1 lines.
-_ui_picker_up() {
-    if (( $1 > 0 )); then tput cuu "$1" >&3 2>/dev/null || true; fi
-}
-
-# Read one key from fd 4 into _up_key; returns 1 on EOF or read failure.
-# A whole escape sequence is consumed (CSI up to its final byte @..~, SS3 as
-# one byte) and reported as UP, DOWN or IGNORE, so no tail bytes are left in
-# the queue to be parsed as keys.
-_ui_picker_readkey() {
-    local _up_b _up_seq="" _up_k=0 _up_o
-    IFS= read -rsn1 _up_b <&4 || return 1
-    if [[ "$_up_b" != $'\033' ]]; then _up_key="$_up_b"; return 0; fi
-    _up_key="IGNORE"
-    IFS= read -rsn1 -t 0.5 _up_b <&4 || return 0
-    case "$_up_b" in
-        "[")
-            _up_seq="["
-            while (( _up_k < 32 )); do
-                _up_k=$((_up_k + 1))
-                IFS= read -rsn1 -t 0.5 _up_b <&4 || break
-                _up_seq+="$_up_b"
-                if [[ -n "$_up_b" ]]; then
-                    printf -v _up_o '%d' "'$_up_b"
-                    if (( _up_o >= 64 && _up_o <= 126 )); then break; fi
+    # The whole secret section runs with stderr silenced so that `bash -x` can
+    # never trace the value (an assignment, a test or a read) into the log.
+    # Descriptor numbers are chosen by bash so a caller's own fds stay intact.
+    local _fd="" _line="" _key="" _shown=0 _xtrace=0
+    case $- in *x*) _xtrace=1 ;; esac
+    { set +x; } 2>/dev/null
+    if { exec {_fd}>>"${_tty}"; } 2>/dev/null; then
+        {
+            # First matching line wins, as the existing reader does; a last
+            # line without a final newline still counts.
+            while IFS= read -r _line || [[ -n "${_line}" ]]; do
+                if [[ "${_line}" == HAL0_ADMIN_KEY=* ]]; then
+                    _key="${_line#HAL0_ADMIN_KEY=}"
+                    break
                 fi
-            done
-            ;;
-        O)
-            if IFS= read -rsn1 -t 0.5 _up_b <&4; then _up_seq="O$_up_b"; fi
-            ;;
-    esac
-    case "$_up_seq" in
-        "[A"|"OA") _up_key="UP" ;;
-        "[B"|"OB") _up_key="DOWN" ;;
-    esac
-    return 0
-}
-
-ui_component_picker() {
-    local -n _up_rows_ref="$1"
-    local -n _up_result_ref="$2"
-    local -a _up_ids=() _up_labels=() _up_sums=() _up_def=() _up_reason=() _up_cur=()
-    local _up_mode="cursor" _up_lines=0 _up_pos=0 _up_cols=80 _up_key=""
-    local _up_row _up_id _up_label _up_summary _up_state _up_rsn _up_i _up_n
-    local _up_choice="" _up_action="" _up_line=""
-
-    for _up_row in "${_up_rows_ref[@]}"; do
-        IFS=$'\t' read -r _up_id _up_label _up_summary _up_state _up_rsn <<<"$_up_row"
-        _up_ids+=("$_up_id"); _up_labels+=("$_up_label"); _up_sums+=("$_up_summary")
-        _up_def+=("$_up_state"); _up_reason+=("$_up_rsn"); _up_cur+=("$_up_state")
-    done
-    _up_n=${#_up_ids[@]}
-
-    if [[ "${UI_PLAIN:-0}" == "1" ]] || ! tput cuu1 >/dev/null 2>&1; then
-        _up_mode="plain"
+            done < "${API_ENV:-/nonexistent}"
+            _line=""
+            _key="${_key%$'\r'}"
+            # Show only a value shaped like a key the installer creates; any
+            # other value behaves as if the key line were missing.
+            if [[ "${_key}" =~ ^[A-Za-z0-9_-]+$ ]]; then
+                # Shown only when both writes worked (a full or closed terminal
+                # fails the first or second printf and leaves _shown at 0).
+                printf '\n%sAdmin key (shown once): %s%s\n' "${BOLD}" "${_key}" "${RST}" >&"${_fd}" \
+                    && printf 'It is needed to change settings from another machine. Chat stays open without it.\n' >&"${_fd}" \
+                    && _shown=1
+            fi
+            _key=""
+        } 2>/dev/null || true
+        { exec {_fd}>&-; } 2>/dev/null || true
+    fi
+    if [[ "${_xtrace}" == "1" ]]; then
+        set -x
     fi
 
-    { exec 4<"${UI_TTY_IN:-/dev/tty}"; } 2>/dev/null || exec 4</dev/null
-    { exec 3>"${UI_TTY_OUT:-/dev/tty}"; } 2>/dev/null || exec 3>/dev/null
-    _ui_picker_width
-
-    _ui_picker_out '\n%sWhich components should be installed?%s\n' "${BOLD}" "${RST}"
-    _up_pos=-1
-    _ui_picker_render 0
-    _up_pos=0
-
-    # Preset line: loop until a recognised answer; EOF accepts the defaults.
-    if [[ "$_up_mode" == "plain" ]]; then
-        while :; do
-            _ui_picker_out '  a) defaults  b) bare inference  p) pick  [a]: '
-            if ! IFS= read -r _up_choice <&4; then
-                _ui_picker_out '\n'
-                _up_action="a"
-                break
-            fi
-            _ui_picker_out '\n'
-            _up_choice="${_up_choice//[[:space:]]/}"
-            case "${_up_choice,,}" in
-                ""|a|all|defaults) _up_action="a"; break ;;
-                b|bare) _up_action="b"; break ;;
-                p|pick) _up_action="p"; break ;;
-            esac
-        done
+    if [[ "${_shown}" == "1" ]]; then
+        info "An admin key was created and shown on the terminal."
     else
-        _ui_picker_out '  a) defaults  b) bare inference  p) pick  [a]: '
-        while :; do
-            if ! _ui_picker_readkey; then _up_action="a"; break; fi
-            case "$_up_key" in
-                ""|$'\r'|$'\n'|a|A) _up_action="a"; break ;;
-                b|B) _up_action="b"; break ;;
-                p|P) _up_action="p"; break ;;
-            esac
-        done
-        _ui_picker_out '%s\n' "${_up_action}"
+        info "An admin key was created but could not be shown here. To get one, run: sudo hal0 auth rotate admin (it replaces the key with a new one and prints it)."
     fi
-
-    case "$_up_action" in
-        b) _ui_picker_preset b ;;
-        p)
-            if [[ "$_up_mode" == "plain" ]]; then
-                while :; do
-                    _ui_picker_render 1
-                    _ui_picker_out '  > '
-                    IFS= read -r _up_line <&4 || break
-                    _ui_picker_out '\n'
-                    _up_line="${_up_line//[[:space:]]/}"
-                    case "$_up_line" in
-                        ""|d|D) break ;;
-                        a|A) _ui_picker_preset a ;;
-                        b|B) _ui_picker_preset b ;;
-                        *[!0-9]*|?????*) ;;
-                        *)
-                            if (( 10#$_up_line >= 1 && 10#$_up_line <= _up_n )); then
-                                _ui_picker_toggle "$((10#$_up_line - 1))"
-                            fi
-                            ;;
-                    esac
-                done
-            else
-                _ui_picker_render 1
-                while :; do
-                    _ui_picker_readkey || break
-                    case "$_up_key" in
-                        ""|$'\r'|$'\n') break ;;
-                        a|A) _ui_picker_preset a ;;
-                        b|B) _ui_picker_preset b ;;
-                        j|DOWN) if (( _up_pos < _up_n - 1 )); then _up_pos=$((_up_pos + 1)); fi ;;
-                        k|UP) if (( _up_pos > 0 )); then _up_pos=$((_up_pos - 1)); fi ;;
-                        " ") _ui_picker_toggle "$_up_pos" ;;
-                    esac
-                    _ui_picker_up "$_up_lines"
-                    _ui_picker_render 1
-                done
-            fi
-            ;;
-    esac
-
-    for _up_i in "${!_up_ids[@]}"; do
-        if [[ -n "${_up_reason[$_up_i]}" ]]; then
-            _up_result_ref["${_up_ids[$_up_i]}"]="unavailable"
-        else
-            _up_result_ref["${_up_ids[$_up_i]}"]="${_up_cur[$_up_i]}"
-        fi
-    done
-    exec 3>&- 4<&-
     return 0
 }

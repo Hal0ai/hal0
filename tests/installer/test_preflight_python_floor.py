@@ -220,12 +220,14 @@ class TestInstallShCallSiteGuard:
     def _guard_block() -> str:
         text = _INSTALL_SH.read_text(encoding="utf-8")
         m = re.search(
-            r"if ! preflight_python; then.*?\nfi\n(?=\n# `python3 -m venv` capability)",
+            # The guard lives in a function so the pre-flight step can run it
+            # before or after the answers seam; the script below calls it.
+            r"_hal0_resolve_main_python_or_die\(\) \{.*?\n\}\n",
             text,
             re.DOTALL,
         )
-        assert m is not None, "preflight_python guard block not found in install.sh"
-        return m.group(0)
+        assert m is not None, "resolve-or-die function not found in install.sh"
+        return m.group(0) + "_hal0_resolve_main_python_or_die\n"
 
     def _run_guard(self, tmp_path: Path, printed: str, bin_files: tuple[str, ...]):
         d = tmp_path / "bin"
@@ -276,11 +278,13 @@ class TestInstallShWiring:
     def test_unresolved_floor_mismatch_is_fatal(self) -> None:
         text = _INSTALL_SH.read_text(encoding="utf-8")
         m = re.search(
-            r"if ! preflight_python; then(.*?)\nfi\n",
+            # The resolve-or-die block lives in a function so the pre-flight
+            # step can run it before or after the answers seam.
+            r"_hal0_resolve_main_python_or_die\(\) \{(.*?)\n\}\n",
             text,
             re.DOTALL,
         )
-        assert m is not None, "preflight_python guard block not found in install.sh"
+        assert m is not None, "resolve-or-die block not found in install.sh"
         body = m.group(1)
         assert "resolve_main_python" in body
         assert re.search(r"\bdie\b", body), (

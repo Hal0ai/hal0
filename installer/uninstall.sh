@@ -369,6 +369,11 @@ do
     rm_path "${UNIT_FILE}"
 done
 
+# The installer's record that it stopped the assistant from the setup screens:
+# it is about the units removed just above, so it goes with them even on a
+# default run (the rest of ${ETC_DIR}/agents is kept).
+rm_path "${ETC_DIR}/agents/hermes-stopped-by-setup"
+
 # Per-instance slot/agent drop-in dirs the orchestrator renders at runtime
 # (hal0-slot@<name>.service.d/, hal0-agent@<name>.service.d/) plus the named
 # drop-ins the installer ships. Glob-sweep so extra agents/slots come clean.
@@ -542,6 +547,11 @@ fi
 
 # ── Data dirs ─────────────────────────────────────────────────────────────────
 step "Data directories"
+
+# After an uninstall no install is in progress: clear the marker an aborted
+# install left behind, so the next install does not look unfinished. rm -f
+# removes a planted link itself, never its target.
+rm -f "${VAR_DIR}/.install-in-progress"
 
 if [[ "${PURGE}" -eq 0 ]]; then
     # Conservative default — keep config + state so a re-install reuses them.

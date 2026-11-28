@@ -92,7 +92,9 @@ curl -fsSL https://hal0.dev/install.sh | sudo bash -s -- --box
 `--box` is consumed by the bootstrap script. It verifies the signed release
 tarball exactly as for a bare-metal install, then hands the verified tree to
 `installer/box/box.sh`. Other installer flags (for example `--bare`) pass
-through to the installer inside the box.
+through to the installer inside the box. Only the one-line install takes
+`--box`: `install.sh` run from an unpacked release tree does not accept it and
+stops with `unknown flag: --box`.
 
 The launcher then, in order: runs preflight, installs any missing host
 packages, creates the `hal0box` user and its sub-ID ranges, builds the box

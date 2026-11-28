@@ -9,11 +9,10 @@ The properties under test are the ones that would turn an ~18.5 GB download into
 an incident:
 
 * it is never pulled without consent, and the consent prompt states the size;
-* a headless install NEVER blocks and NEVER pulls (the prompt is bash-side, so
-  the invariant tested here is that ``--plan`` is pure and side-effect-free and
-  that install.sh's gate is the same ``_interactive`` one the other prompts
-  use — asserted against install.sh's text in
-  ``tests/installer/test_install_single_entry_point.py``);
+* a headless install NEVER blocks and NEVER pulls (the questions are asked by
+  the setup screens, so the invariant tested here is that ``--plan`` is pure and
+  side-effect-free; that install.sh asks nothing itself is asserted against its
+  text in ``tests/installer/test_install_single_entry_point.py``);
 * declining, skipping, or failing all leave the install successful;
 * the size printed is the size that gets downloaded (no bash-side hardcode).
 

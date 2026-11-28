@@ -30,6 +30,34 @@ applying. Add those subsections to a version's section to surface them; see
 
 ## [Unreleased]
 
+### Highlights
+
+- **The installer asks its questions once, at the start, on a few screens.** Right after its first checks it shows how you want to set up hal0 (Recommended, Minimal or Customize), asks where models are stored, shows a review, and then installs without stopping. It used to ask six questions at three separate moments. (#4049, #4050)
+- **A flag fixes one row on the screens instead of hiding every question.** On the Customize screens `--no-hermes`, `--no-owui` and the other component flags show their row as set by the flag; on the Recommended and Minimal path there is no component row, so the flag simply applies. `--bare` fixes the setup type to Minimal, shown as set by the flag.
+- **An upgrade reuses your answers.** It reuses the answers saved by the last install. A box installed before this change has none saved, so it is asked once (or, with no terminal, takes the defaults); `--reconfigure` asks again.
+
+### Breaking
+
+- **The one-line install now shows the setup screens to a person at a terminal.** `curl -fsSL https://hal0.dev/install.sh | sudo bash` used to take every default when piped. A run with a terminal attached now shows the screens and waits there, so a script that runs the installer inside a terminal session must set `HAL0_NONINTERACTIVE=1` or pass `--answers=FILE` with a JSON answers document; a run with no terminal is unattended as before.
+- **An unknown installer flag now stops the run.** The installer used to warn and carry on with its defaults. It now prints one line (`unknown flag: ... (run with --help for the list)`) and exits with status 1 before anything changes, so fix a mistyped flag in your script.
+- **`hal0 setup` run by hand asks nothing.** It prints one line and stops. To change what was chosen at install, run the installer again with `--reconfigure`. The unattended forms the installer itself uses (`--auto`, `--answers`, `--plan`, `--emit-answers`) are unchanged.
+- **An image model given by number, or by an id the installer does not offer, now stops the install before anything changes.** An unknown id in `HAL0_BRAIN_MODEL` or `HAL0_AGENT_MODEL` does the same. These used to warn and carry on, with no image model downloaded. Image models in `HAL0_IMAGE_MODELS` are now checked as ids, so a menu number no longer works: use `recommended`, or one of the ids the setup screens offer: `sdxl-lightning`, `sdxl-turbo`, `sd-1.5-pruned-emaonly`, `qwen-image-lightning`, `qwen-image`. Other image models are installed afterwards with `hal0 comfyui models install <id>`.
+- **The first upgrade run at a terminal on a box installed before this change shows the setup screens once, and confirming them sets the assistant's terminal tool to what the review screen says.** Like every `--reconfigure`, it leaves the tool off unless you tick it on the Customize screens, and the assistant restarts once. To keep it on, tick "Let the assistant run commands on this machine?" on the Customize screens or set `HAL0_HERMES_TERMINAL=1`; to skip the screens, set `HAL0_NONINTERACTIVE=1`. (#4093)
+- **On the setup screens the Recommended setup now includes the large chat model when it fits the box.** It is Qwen3.8 27B, about 18.5 GB to download and 25 GB of GPU memory, and the review screen shows its size before anything downloads; the last release's question defaulted to no. To leave it out, choose Customize and then "No chat model for now". An unattended install downloads it only when asked (`HAL0_PULL_AGENT_MODEL=1`).
+- **Running the setup screens again with the assistant turned off now stops and disables an installed assistant, and keeps it stopped.** On a box that already has Hermes, confirm the screens (`--reconfigure`, Customize) with the assistant row off and the installer stops `hal0-agent@hermes` and its messaging gateway; it stays installed, and later upgrades and unattended runs do not start it. To avoid it, leave the row on; a run that shows no screens changes nothing, whatever skip flag it carries. To start it again, turn the row on in the screens, or run `sudo systemctl enable --now hal0-agent@hermes`. (#4031)
+
+### Added
+
+- **`--answers=FILE` (`HAL0_ANSWERS_FILE`)** reads the install choices from a JSON answers document instead of asking. The file is checked in full first, and a bad one stops the install before anything changes. It never carries a key or a token.
+- **`--reconfigure`** shows the setup screens again on a box that already has hal0, instead of reusing the saved answers.
+
+### Changed
+
+- **The separate image-model menu at the terminal is gone.** Image models are chosen on the Customize screens or by setting `HAL0_IMAGE_MODELS` (`recommended`, or a list of ids); unset downloads none, as it already did for an unattended run.
+- **The installer's component checklist, model-folder question, Hugging Face token question, terminal-tool question and its agent-model and image-model offers are now screens of the one setup flow.** The Recommended path asks one thing, where models are stored; Customize adds screens for what the box does, models, storage, network and the assistant and memory.
+- **Getting started and the README describe the setup screens.** The install page, the beginner's guide, the first-model page and the README's flag table no longer describe the separate prompts.
+- **The installer stops with one line when its release tree lacks the setup screens.** That means a broken download; fetch the release again.
+- **The `Components:` line is logged on every run,** not only on an interactive one.
 ### Fixed
 
 - **The installer no longer adds the NPU software to a box that has no NPU.** The NPU step used to run on every Ubuntu or Debian host: it added the `lemonade-team` package source, installed `libxrt-npu2`, `libxrt-utils-npu` and FastFlowLM, and ended with a `flm validate` warning that read as a fault. It now does that only when the NPU device is present; otherwise it prints one line saying so and installs nothing. `HAL0_NPU_SETUP=on` runs the step anyway, for an NPU passed through after the install, and `HAL0_NPU_SETUP=off` skips it (#4006)

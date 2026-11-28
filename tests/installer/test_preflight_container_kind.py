@@ -372,9 +372,20 @@ def test_runtime_gate_lxc_advice_is_unchanged(tmp_path: Path) -> None:
 
 def _install_gate_region() -> str:
     text = _INSTALL_SH.read_text(encoding="utf-8")
-    start = text.index('if [[ "${DEV_MODE}" -eq 0 ]]; then\n    gpu_rc=0\n')
-    end = text.index("# ── Operator input: model store + HuggingFace token", start)
-    return text[start:end]
+    # The pre-flight is split around the answers seam: the detection half
+    # captures gpu_rc (the line `gpu_rc=0` up to the facts-file block), and the
+    # second half holds the gate that acts on it (its own opening lines up to
+    # "Operator input"). Both pieces are cut out of the real text and joined.
+    detect_start = text.index(
+        'gpu_rc=0\nif [[ "${DEV_MODE}" -eq 0 ]]; then\n    HAL0_GPU_GATE=1 preflight_gpu'
+    )
+    detect_end = text.index("# ── Facts file ──", detect_start)
+    gate_start = text.index(
+        'if [[ "${DEV_MODE}" -eq 0 ]]; then\n    # gpu_rc was captured by the detection half',
+        detect_end,
+    )
+    gate_end = text.index("# ── Operator input: model store + HuggingFace token", gate_start)
+    return text[detect_start:detect_end] + text[gate_start:gate_end]
 
 
 def _install_gate(tmp_path: Path, kind: str, gpu_rc: int, extra: dict[str, str]) -> tuple[int, str]:
