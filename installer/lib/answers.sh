@@ -13,8 +13,8 @@
 # Env:     HAL0_ANSWERS_FILE  path of an answers document (read here only).
 #          HAL0_FACTS_FILE    where the facts file goes; exported by
 #                             hal0_collect_answers with its default filled in.
-# Sets:    HAL0_ANSWERS_APPLIED=1 when a document was applied, else 0. The
-#          legacy prompts in install.sh skip themselves when it is 1.
+# Sets:    HAL0_ANSWERS_APPLIED=1 when a document was applied, else 0 (the
+#          setup screens always apply one; install.sh reads it after the seam).
 #          HAL0_SAVED_ANSWERS_FILE: where the applied document is kept, in
 #          root's own directory (exported by hal0_collect_answers).
 #          HAL0_WIZARD_RAN=1 when the setup screens wrote the applied document;
@@ -668,9 +668,9 @@ _hal0_wizard_one_line() {
 # evaluated) and split at its first `=`: accepted only as
 # `HF_TOKEN=<letters, digits, _ and ->`, so a trailing `=` is refused, not
 # dropped. It goes to _HAL0_WIZARD_HF_TOKEN, not exported; install.sh hands it
-# to HF_TOKEN_VAL, the variable the legacy prompt fills. Anything else: one
-# warning that never shows the file's content, and no token. The file is
-# removed either way.
+# to HF_TOKEN_VAL, the variable the later steps read the token from. Anything
+# else: one warning that never shows the file's content, and no token. The file
+# is removed either way.
 _hal0_wizard_take_token() {
     local file="${1}" line="" tname="" tvalue="" LC_ALL=C
     export -n line tname tvalue

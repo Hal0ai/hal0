@@ -617,12 +617,22 @@ def test_reconfigure_is_documented_in_the_usage_text() -> None:
     assert "[--reconfigure]" in usage and "  --reconfigure " in usage
 
 
-def test_usage_text_says_a_piped_run_can_show_the_screens() -> None:
+def test_usage_text_describes_the_setup_screens_and_the_headless_run() -> None:
     usage = " ".join(_slice("--help|-h)", "exit 0").split())
-    assert "a piped (\\`curl … | bash\\`) or headless run takes the default." not in usage
-    assert "setup screens" in usage and "terminal can be opened" in usage
-    # and stays true for a tree without them
-    assert "Without the setup screens" in usage
+    assert "the setup screens ask for it with the other choices" in usage
+    assert "a piped (\\`curl … | bash\\`) run shows them too when a terminal can be opened" in usage
+    assert "HAL0_NONINTERACTIVE=1, or when no terminal can be opened" in usage
+    assert "an upgrade reuses the answers saved by the last install unless --reconfigure" in usage
+    assert "nothing is asked" in usage and "--answers" in usage
+    # the words of the interactive prompts and of a tree without the screens are gone
+    for stale in (
+        "Without the setup screens",
+        "interactive component picker",
+        "Interactive prompts",
+        "asks on an interactive terminal",
+        "only run when stdin is a terminal",
+    ):
+        assert stale not in usage, stale
 
 
 # ── exit 0 ──────────────────────────────────────────────────────────────────

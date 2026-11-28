@@ -291,12 +291,12 @@ Usage: install.sh [--dev] [--no-start] [--models-dir=PATH] [--summary-json=PATH]
   --models-dir=PATH   absolute path where HuggingFace pulls land
                       (default: /var/lib/hal0/models — or \$PWD/.hal0ai/var/lib/hal0/models
                       under --dev). Can also be set with HAL0_MODELS_DIR=PATH.
-                      Omit it and the installer asks on an interactive terminal.
-                      With the setup screens in this release, a piped
-                      (\`curl … | bash\`) run shows them too when the terminal
-                      can be opened; a headless run (HAL0_NONINTERACTIVE=1, or
-                      no terminal) takes the default. Without the setup screens
-                      a piped or headless run takes the default.
+                      Omit it and the setup screens ask for it with the other
+                      choices, before anything is changed; a piped
+                      (\`curl … | bash\`) run shows them too when a terminal
+                      can be opened. With HAL0_NONINTERACTIVE=1, or when no
+                      terminal can be opened, the flag, the variable or the
+                      default is used.
   --summary-json=PATH write a machine-readable install summary (versions,
                       ports, bind host, model pulled, per-step durations,
                       warning count) to PATH as JSON, atomically. See
@@ -320,11 +320,15 @@ Components (each flag skips one optional piece; env twin in parentheses):
   --no-brain-model    skip the brain model pull (HAL0_SKIP_BRAIN_MODEL=1)
   --bare              every component above off: inference only
   --bare-inference    synonym for --bare
-Any component flag also suppresses the interactive component picker.
+A component flag answers that question for the setup screens, which show it as
+fixed instead of asking.
 
-Interactive prompts (component checklist, models dir, HuggingFace token, Hermes
-terminal tool) only run when stdin is a terminal. Set HAL0_NONINTERACTIVE=1 to
-force the flag/env values everywhere.
+The setup screens ask every question up front (components, models dir,
+HuggingFace token, Hermes terminal tool) when a terminal can be opened, also
+under \`curl … | bash\`; an upgrade reuses the answers saved by the last install
+unless --reconfigure is given. Set HAL0_NONINTERACTIVE=1, or run with no
+terminal, and nothing is asked: the flags, the variables and the defaults are
+used, or the document from --answers.
 
 HAL0_HERMES_TERMINAL=1 gives the bundled Hermes agent a terminal tool, letting
 it run commands as the hal0 user (root-equivalent on this box). It is OFF by
@@ -3337,7 +3341,18 @@ unset _cp_line _cp_id _cp_word
 # later.
 if [[ -n "${HAL0_HERMES_TERMINAL:-}" ]]; then
     export HAL0_HERMES_TERMINAL
-    info "Hermes terminal tool: taken from the environment (HAL0_HERMES_TERMINAL=${HAL0_HERMES_TERMINAL})"
+    # Said as it is: the setup screens' answer when the reader exported it in
+    # this run (HAL0_ANSWERS_EXPORTED), the environment's otherwise.
+    _ht_source="taken from the environment"
+    if [[ "${HAL0_WIZARD_RAN:-0}" == "1" ]]; then
+        for _ht_name in "${HAL0_ANSWERS_EXPORTED[@]+"${HAL0_ANSWERS_EXPORTED[@]}"}"; do
+            if [[ "${_ht_name}" == "HAL0_HERMES_TERMINAL" ]]; then
+                _ht_source="set by the setup screens"
+            fi
+        done
+    fi
+    info "Hermes terminal tool: ${_ht_source} (HAL0_HERMES_TERMINAL=${HAL0_HERMES_TERMINAL})"
+    unset _ht_source _ht_name
 fi
 # ── hal0 brain model (v1.0) ─────────────────────────────────────────────────
 # The brain is the platform steward: the dashboard's sidebar chat targets the
@@ -4851,7 +4866,7 @@ else
 
     # A box that already has Hermes keeps its recorded terminal-tool decision
     # unless this run was given an explicit answer (HAL0_HERMES_TERMINAL: the
-    # prompt, the setup screens or the environment). The provisioning above only
+    # setup screens or the environment). The provisioning above only
     # runs on a box without Hermes, so here the answer is applied by
     # `hal0 agent reprovision hermes`: its root prelude records the answer, it
     # re-renders config.yaml from it, and it restarts the agent and gateway.
@@ -5359,9 +5374,10 @@ fi
 # ── No Stage-2 handoff (v1.0) ───────────────────────────────────────────────
 # There used to be a "Launch the guided hal0 setup now? [Y/n]" prompt here
 # (issue #1112's Stage-2). It is deliberately GONE: install.sh is the single
-# user-facing entry point, and every answer that wizard collected is now
-# either asked by the setup screens (this script only carries the model store
-# and HF token on, in the "Operator input" block) or already done by it (slot scaffolding, extensions, NPU probe).
+# user-facing entry point, and every answer that Stage-2 flow collected is now
+# either asked by the setup screens, up front (this script only carries the
+# model store and HF token on, in the "Operator input" block), or already done
+# by this script (slot scaffolding, extensions, NPU probe).
 # Offering it again sent operators through a five-question flow that only
 # re-derived what had just been derived. What is genuinely left after an
 # install is picking models per slot, which is a dashboard job — see the
