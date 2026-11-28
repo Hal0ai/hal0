@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Read an installer answers document and print allow-listed NAME=value lines.
 
-Usage:  python3 -I answers_reader.py --origin wizard|file [--] DOCUMENT.json
+Usage:  python3 -I answers_reader.py --origin wizard|file [--default-store PATH] [--] DOCUMENT.json
 
 Runs as root, before hal0's package is installed: standard library only, one
 file, Python 3.10 or newer. The document is data. This program never evaluates
@@ -79,8 +79,10 @@ DENIED_TREES = (
     "/var/log",  # logs other services own
     "/var/lib",  # service state (hal0's own models directory is the exception below)
 )
-# The one place under a denied tree that is a model store by design.
-ALLOWED_UNDER_DENIED = "/var/lib/hal0/models"
+# The one place under a denied tree that is a model store by design, unless the
+# installer passes its own (--default-store, for a --dev prefix). Taken from the
+# command line only, never from the document.
+DEFAULT_STORE = "/var/lib/hal0/models"
 
 # Keys the document may carry, per object. Anything else is "unknown".
 _TOP_KEYS = frozenset(
@@ -348,7 +350,7 @@ def _bool(obj: dict[str, Any], key: str, where: str, problems: _Problems) -> boo
 
 
 def _abs_path(obj: dict[str, Any], key: str, where: str, problems: _Problems,
-              *, installer_creates: bool = False) -> str | None:
+              *, default_store: str = DEFAULT_STORE) -> str | None:
     value = obj.get(key)
     if value is None:
         return None
@@ -368,9 +370,8 @@ def _abs_path(obj: dict[str, Any], key: str, where: str, problems: _Problems,
     if ".." in value.split("/"):
         problems.error(f"{full}: must not contain a '..' segment")
         return None
-    if not _safe_location(value, full, problems, installer_creates=installer_creates):
-        return None
-    return _normal(value)  # exported and saved in this form; _safe_location checked it
+    # Exported and saved in the canonical form: the one _safe_location checked.
+    return _safe_location(value, full, problems, default_store=default_store)
 
 
 def _inside(path: str, tree: str) -> bool:
@@ -463,56 +464,78 @@ def _unsafe_parent(norm: str) -> str | None:
     return None
 
 
-def _safe_location(value: str, full: str, problems: _Problems, *,
-                   installer_creates: bool = False) -> bool:
-    """Refuse a model-store path that is too shallow, in a system tree, or a file.
+def _canonical(norm: str) -> str | None:
+    """`norm` with its existing part resolved, or None when it cannot be resolved.
 
-    With `installer_creates`, a path that does not exist yet must also be
-    something the installer will create: inside hal0's own models directory, or
-    under a root-owned parent that no group or other user can write to.
+    realpath of the deepest existing ancestor (a link is followed when it leads
+    somewhere that exists; a dangling or looping one counts as not existing),
+    joined with the remaining components, which are already normalised. The
+    existing part of the result has no link in it.
     """
-    norm = _normal(value)
+    parts = [p for p in norm.split("/") if p]
+    walk = ""
+    done = 0
+    for part in parts:
+        if not os.path.exists(f"{walk}/{part}"):
+            break
+        walk = f"{walk}/{part}"
+        done += 1
     try:
-        real = _normal(os.path.realpath(norm))
+        base = os.path.realpath(walk) if walk else "/"
     except (OSError, ValueError):
+        return None
+    return _normal("/".join([base, *parts[done:]]))
+
+
+def _safe_location(value: str, full: str, problems: _Problems, *,
+                   default_store: str = DEFAULT_STORE) -> str | None:
+    """The canonical form of a model-store path, or None after reporting why not.
+
+    The path is canonicalised first (_canonical) and every check runs on that
+    form: not inside a system tree (by name and by inode identity), not too
+    close to the root, not an existing file, and, when it does not exist yet,
+    something the installer can create safely: inside the default store, or
+    under a root-owned parent that no group or other user can write to. No
+    message names the canonical path; the document's own text is echoed (escaped).
+    """
+    canon = _canonical(_normal(value))
+    if canon is None:
         problems.error(f"{full}: {_q(value)} cannot be resolved")
-        return False
-    for candidate in (norm, real):
-        if _inside(candidate, ALLOWED_UNDER_DENIED):
-            continue
+        return None
+    inside_default = _inside(canon, default_store)
+    if not inside_default:
         for tree in DENIED_TREES:
-            if _inside(candidate, tree):
-                how = "" if candidate == norm else " (through a link)"
-                problems.error(f"{full}: {_q(value)} is inside {tree}{how}, a system location")
-                return False
-    if not (_inside(norm, ALLOWED_UNDER_DENIED) and _inside(real, ALLOWED_UNDER_DENIED)):
-        tree = _denied_by_identity(norm)
+            if _inside(canon, tree):
+                problems.error(f"{full}: {_q(value)} is inside {tree}, a system location")
+                return None
+        tree = _denied_by_identity(canon)
         if tree is not None:
             problems.error(
                 f"{full}: {_q(value)} is inside {tree} under a second name "
                 "(another mount of the same folder), a system location"
             )
-            return False
-    if len([part for part in norm.split("/") if part]) < 2:
+            return None
+    if len([part for part in canon.split("/") if part]) < 2:
         problems.error(f"{full}: {_q(value)} is too close to the root; use a folder like /mnt/models")
-        return False
+        return None
     try:
-        exists = os.path.lexists(norm)
-        is_dir = os.path.isdir(norm)
+        exists = os.path.lexists(canon)
+        is_dir = os.path.isdir(canon)
     except (OSError, ValueError):
         exists, is_dir = True, False
     if exists and not is_dir:
         problems.error(f"{full}: {_q(value)} exists and is not a directory")
-        return False
-    if installer_creates and not exists and not _inside(norm, ALLOWED_UNDER_DENIED):
-        reason = _unsafe_parent(norm)
+        return None
+    if not exists and not inside_default:
+        reason = _unsafe_parent(canon)
         if reason is not None:
             problems.error(
-                f"{full}: {_q(value)} will not be created: {reason}. Create the folder "
-                "yourself first, or choose a path under a folder that only root can change"
+                f"{full}: {_q(value)}: the folder does not exist and its parent is not one "
+                f"only root can change ({reason}); create the folder first, or choose "
+                "one on a disk that root owns"
             )
-            return False
-    return True
+            return None
+    return canon
 
 
 def _ident(value: Any, full: str, problems: _Problems) -> str | None:
@@ -780,7 +803,7 @@ def _model_id(value: Any, full: str, role: str, manifest: dict[str, set[str]] | 
 
 
 def _build(doc: dict[str, Any], origin: str, problems: _Problems,
-           manifest_path: str = _MANIFEST) -> dict[str, str]:
+           manifest_path: str = _MANIFEST, default_store: str = DEFAULT_STORE) -> dict[str, str]:
     out: dict[str, str] = {"HAL0_NONINTERACTIVE": "1"}
 
     strict_raw = doc.get("strict", False)
@@ -809,10 +832,10 @@ def _build(doc: dict[str, Any], origin: str, problems: _Problems,
 
     # model_store
     store = _section(doc, "model_store", problems)
-    path = _abs_path(store, "path", "model_store", problems)
+    path = _abs_path(store, "path", "model_store", problems, default_store=default_store)
     if path is not None:
         out["HAL0_MODELS_DIR"] = path
-    flm = _abs_path(store, "flm_path", "model_store", problems, installer_creates=True)
+    flm = _abs_path(store, "flm_path", "model_store", problems, default_store=default_store)
     if flm is not None:
         out["HAL0_FLM_MODELS_DIR"] = flm
 
@@ -998,39 +1021,65 @@ def _build(doc: dict[str, Any], origin: str, problems: _Problems,
     return out
 
 
-def _parse_args(argv: list[str]) -> tuple[str, str, str] | None:
-    origin = None
-    path = None
-    manifest = _MANIFEST
+class _Options:
+    """What the command line gave: origin, document, manifest, default store."""
+
+    def __init__(self) -> None:
+        self.origin: str | None = None
+        self.path: str | None = None
+        self.manifest = _MANIFEST
+        self.default_store = DEFAULT_STORE
+
+
+def _valid_default_store(value: str) -> bool:
+    """--default-store is a path like a document's: absolute, plain characters, no `..`."""
+    return (
+        value.startswith("/")
+        and len(value) <= MAX_PATH
+        and bool(_FS_PATH.match(value))
+        and ".." not in value.split("/")
+        and len([p for p in value.split("/") if p]) >= 2
+    )
+
+
+def _parse_args(argv: list[str]) -> _Options | None:
+    opts = _Options()
+    seen_store = False
     args = list(argv)
     while args:
         arg = args.pop(0)
-        if arg == "--origin" and args and origin is None:
-            origin = args.pop(0)
+        if arg == "--origin" and args and opts.origin is None:
+            opts.origin = args.pop(0)
         elif arg == "--models-manifest" and args:
-            manifest = args.pop(0)
+            opts.manifest = args.pop(0)
+        elif arg == "--default-store" and args and not seen_store:
+            opts.default_store = _normal(args[0]) if args[0].startswith("/") else args[0]
+            args.pop(0)
+            seen_store = True
         elif arg == "--":
-            if len(args) == 1 and path is None:
-                path = args.pop(0)
+            if len(args) == 1 and opts.path is None:
+                opts.path = args.pop(0)
             else:
                 return None
-        elif not arg.startswith("-") and path is None:
-            path = arg
+        elif not arg.startswith("-") and opts.path is None:
+            opts.path = arg
         else:
             return None
-    if origin not in ORIGINS or not path:
+    if opts.origin not in ORIGINS or not opts.path:
         return None
-    return origin, path, manifest
+    return opts
 
 
-def _saved_document(doc: dict[str, Any]) -> dict[str, Any]:
+def _saved_document(doc: dict[str, Any], stores: dict[str, str] | None = None) -> dict[str, Any]:
     """The document as it is kept after an install: only keys the format knows.
 
     Unknown keys are dropped at every level that has a key table (a pasted
     secret would sit in one); `huggingface` and `apps.hermes.terminal_tool`
     are known but never kept. `slots` entries keep only the keys the loader reads.
-    Document key order holds.
+    Document key order holds. `stores` maps `path` and `flm_path` to the
+    canonical form the reader exported; those are what is kept.
     """
+    stores = stores or {}
     tables: dict[str, frozenset[str]] = dict(_SECTION_KEYS)
     tables["access"] = frozenset({"admin_key"})
     saved: dict[str, Any] = {}
@@ -1055,16 +1104,32 @@ def _saved_document(doc: dict[str, Any]) -> dict[str, Any]:
             ]
         elif key in tables and isinstance(value, dict):
             value = {k: v for k, v in value.items() if k in tables[key]}
-            if key == "model_store":  # kept as exported: the normalised form
-                value = {k: _normal(v) if isinstance(v, str) else v for k, v in value.items()}
+            if key == "model_store":  # kept as exported: the canonical form
+                value = {
+                    k: stores.get(k, _normal(v)) if isinstance(v, str) else v
+                    for k, v in value.items()
+                }
         saved[key] = value
     return saved
+
+
+def _bad_default_store(value: str) -> bool:
+    """True (after one message that echoes nothing) when --default-store is not a usable path."""
+    if _valid_default_store(value):
+        return False
+    sys.stderr.write(
+        "error: --default-store must be an absolute path of plain characters "
+        "with no '..' part\n"
+    )
+    return True
 
 
 def _emit_saved(argv: list[str]) -> int:
     """`--emit-saved DOCUMENT`: validate as a file-origin run, print the saved form."""
     path = None
     manifest = _MANIFEST
+    default_store = DEFAULT_STORE
+    seen_store = False
     args = list(argv)
     while args:
         arg = args.pop(0)
@@ -1074,11 +1139,20 @@ def _emit_saved(argv: list[str]) -> int:
             args.pop(0)  # not needed in this mode
         elif arg == "--models-manifest" and args:
             manifest = args.pop(0)
+        elif arg == "--default-store" and args and not seen_store:
+            default_store = args.pop(0)
+            seen_store = True
         else:
             path = None
             break
     if not path:
-        sys.stderr.write("usage: answers_reader.py --emit-saved DOCUMENT.json\n")
+        sys.stderr.write(
+            "usage: answers_reader.py [--default-store PATH] --emit-saved DOCUMENT.json\n"
+        )
+        return 2
+    if default_store.startswith("/"):
+        default_store = _normal(default_store)
+    if _bad_default_store(default_store):
         return 2
     problems = _Problems()
     doc = _load(path, problems)
@@ -1086,9 +1160,14 @@ def _emit_saved(argv: list[str]) -> int:
     if doc is not None:
         try:
             _walk_strings(doc, "", problems)
-            _build(doc, "file", problems, manifest)
+            values = _build(doc, "file", problems, manifest, default_store)
             if not problems.errors:
-                text = json.dumps(_saved_document(doc), indent=2, ensure_ascii=False) + "\n"
+                stores = {
+                    key: values[name]
+                    for key, name in (("path", "HAL0_MODELS_DIR"), ("flm_path", "HAL0_FLM_MODELS_DIR"))
+                    if name in values
+                }
+                text = json.dumps(_saved_document(doc, stores), indent=2, ensure_ascii=False) + "\n"
         except RecursionError:
             problems.error("the answers document is nested too deeply")
     # Warnings are not repeated here: the apply run already printed them.
@@ -1104,18 +1183,22 @@ def _emit_saved(argv: list[str]) -> int:
 def main(argv: list[str]) -> int:
     if "--emit-saved" in argv:
         return _emit_saved(argv)
-    parsed = _parse_args(argv)
-    if parsed is None:
-        sys.stderr.write("usage: answers_reader.py --origin wizard|file [--models-manifest PATH] [--] DOCUMENT.json\n")
+    opts = _parse_args(argv)
+    if opts is None or opts.origin is None or opts.path is None:
+        sys.stderr.write(
+            "usage: answers_reader.py --origin wizard|file [--models-manifest PATH] "
+            "[--default-store PATH] [--] DOCUMENT.json\n"
+        )
         return 2
-    origin, path, manifest_path = parsed
+    if _bad_default_store(opts.default_store):
+        return 2
     problems = _Problems()
-    doc = _load(path, problems)
+    doc = _load(opts.path, problems)
     lines: list[str] = []
     if doc is not None:
         try:
             _walk_strings(doc, "", problems)
-            values = _build(doc, origin, problems, manifest_path)
+            values = _build(doc, opts.origin, problems, opts.manifest, opts.default_store)
         except RecursionError:
             problems.error("the answers document is nested too deeply")
             values = {}

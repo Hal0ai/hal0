@@ -713,7 +713,7 @@ def test_existing_regular_file_is_refused(tmp_path: Path, key: str) -> None:
 def test_existing_directory_and_missing_path_are_accepted(tmp_path: Path) -> None:
     (tmp_path / "d").mkdir()
     for value in (str(tmp_path / "d"), str(tmp_path / "not" / "yet")):
-        assert run({"version": 1, "model_store": {"path": value}}, tmp_path).returncode == 0
+        assert run({"version": 1, "model_store": {"path": value}}, tmp_path, env=_ME).returncode == 0
 
 
 # ── credentials and secrets never reach the (world-readable) install log ────
@@ -968,11 +968,11 @@ def test_flm_path_in_another_persons_directory_is_refused(tmp_path: Path) -> Non
 
 
 def test_flm_path_reason_never_echoes_a_resolved_path(tmp_path: Path) -> None:
-    (tmp_path / "real").mkdir()
-    (tmp_path / "link").symlink_to(tmp_path / "real")
+    # a dangling link on the way: refused, and the link's target is not named
+    (tmp_path / "link").symlink_to(tmp_path / "nowhere")
     proc = _flm(tmp_path, str(tmp_path / "link" / "flm"), env=_ME)
     assert proc.returncode == 2 and "a link" in proc.stderr
-    assert str(tmp_path / "real") not in proc.stderr
+    assert str(tmp_path / "nowhere") not in proc.stderr
 
 
 def test_flm_path_under_a_group_or_sticky_ancestor_is_refused(tmp_path: Path) -> None:
@@ -1008,11 +1008,11 @@ def test_an_existing_flm_directory_is_accepted_whoever_owns_it(tmp_path: Path) -
     assert proc.returncode == 0, proc.stderr
 
 
-def test_the_model_store_path_is_not_subject_to_the_ancestor_rule(tmp_path: Path) -> None:
+def test_the_model_store_path_is_subject_to_the_ancestor_rule_too(tmp_path: Path) -> None:
     value = str(tmp_path / "x" / "store")
     proc = run({"version": 1, "model_store": {"path": value}}, tmp_path,
-               env={"HAL0_ANSWERS_TEST_ROOT_UID": "0"})
-    assert proc.returncode == 0, proc.stderr
+               env={"HAL0_ANSWERS_TEST_ROOT_UID": "0" if os.getuid() else "1"})
+    assert proc.returncode == 2 and "model_store.path" in proc.stderr
 
 
 def test_a_nonsense_seam_value_means_root_is_uid_0(tmp_path: Path) -> None:
@@ -1219,7 +1219,7 @@ def test_store_paths_are_exported_and_saved_normalised(tmp_path: Path, key: str,
                                                         canonical: str) -> None:
     given, canonical = given.format(t=tmp_path), canonical.format(t=tmp_path)
     doc = {"version": 1, "model_store": {key: given}}
-    env = _ME
+    env = _ME if given.startswith(str(tmp_path)) else None  # a real root-owned /mnt otherwise
     proc = run(doc, tmp_path, env=env)
     name = "HAL0_MODELS_DIR" if key == "path" else "HAL0_FLM_MODELS_DIR"
     assert f"{name}={canonical}" in lines(proc)
@@ -1248,3 +1248,195 @@ def test_a_null_public_url_is_still_fine(tmp_path: Path) -> None:
     assert lines(run({"version": 1, "network": {"public_url": None}}, tmp_path)) == [
         "HAL0_NONINTERACTIVE=1"
     ]
+
+
+# ── one canonical path, resolved once in the reader (round 3) ───────────────
+#
+# Both store paths are canonicalised before any check: realpath of the deepest
+# existing ancestor joined with the normalised remaining components. Every check
+# runs on that form, and it is what is exported and saved. The installer's sinks
+# therefore receive a path whose existing part has no link in it.
+
+_NOT_ME = {"HAL0_ANSWERS_TEST_ROOT_UID": str(os.getuid() + 1)}  # nobody here is "root"
+
+
+def _store(tmp_path: Path, key: str, value: str, env: dict[str, str] | None = None,
+           *extra: str, doc_dir: Path | None = None):
+    path = tmp_path / "answers.json"
+    path.write_text(json.dumps({"version": 1, "model_store": {key: value}}), encoding="utf-8")
+    return subprocess.run(
+        [sys.executable, "-I", str(READER), "--origin", "wizard", *extra, "--", str(path)],
+        capture_output=True, text=True, check=False, env={**os.environ, **(env or {})},
+    )
+
+
+def _name(key: str) -> str:
+    return "HAL0_MODELS_DIR" if key == "path" else "HAL0_FLM_MODELS_DIR"
+
+
+@pytest.mark.parametrize("key", _STORE_KEYS)
+def test_a_symlinked_ancestor_resolving_to_an_allowed_place_is_accepted_and_resolved(
+        tmp_path: Path, key: str) -> None:
+    real = tmp_path / "real"
+    real.mkdir()
+    (tmp_path / "link").symlink_to(real)
+    proc = _store(tmp_path, key, str(tmp_path / "link" / "a" / "models"), _ME)
+    assert f"{_name(key)}={real}/a/models" in lines(proc)
+    assert proc.stderr == ""  # nothing is said about the change
+    saved = _emit({"version": 1, "model_store": {key: str(tmp_path / "link" / "a" / "models")}},
+                  tmp_path, env=_ME)
+    assert json.loads(saved.stdout)["model_store"] == {key: f"{real}/a/models"}
+
+
+@pytest.mark.parametrize("key", _STORE_KEYS)
+def test_a_store_that_is_itself_a_link_to_a_directory_is_exported_resolved(
+        tmp_path: Path, key: str) -> None:
+    real = tmp_path / "tank" / "models"
+    real.mkdir(parents=True)
+    (tmp_path / "models").symlink_to(real)
+    proc = _store(tmp_path, key, str(tmp_path / "models"), _NOT_ME)  # exists: no ancestor rule
+    assert f"{_name(key)}={real}" in lines(proc)
+
+
+@pytest.mark.parametrize("key", _STORE_KEYS)
+def test_a_system_folder_that_is_itself_a_link_is_a_legitimate_path(tmp_path: Path,
+                                                                    key: str) -> None:
+    # like /home -> /var/home: the link is followed, the result is checked
+    (tmp_path / "var" / "home").mkdir(parents=True)
+    (tmp_path / "home").symlink_to(tmp_path / "var" / "home")
+    proc = _store(tmp_path, key, str(tmp_path / "home" / "me" / "models"), _ME)
+    assert f"{_name(key)}={tmp_path}/var/home/me/models" in lines(proc)
+
+
+@pytest.mark.parametrize("key", _STORE_KEYS)
+@pytest.mark.parametrize("target", ["/etc", "/usr/share", "/var/lib/other", "/var/log", "/run"])
+def test_a_link_resolving_into_a_denied_tree_is_refused(tmp_path: Path, key: str,
+                                                        target: str) -> None:
+    if not os.path.isdir(target):
+        pytest.skip(f"{target} does not exist here")
+    (tmp_path / "link").symlink_to(target)
+    for value in (str(tmp_path / "link"), str(tmp_path / "link" / "m" / "models")):
+        proc = _store(tmp_path, key, value, _ME)
+        assert proc.returncode == 2 and proc.stdout == "", value
+        assert f"model_store.{key}" in proc.stderr and "system location" in proc.stderr
+        assert os.path.realpath(target) + "/" not in proc.stderr.replace(value, "")
+
+
+@pytest.mark.parametrize("key", _STORE_KEYS)
+def test_the_depth_rule_runs_on_the_canonical_path(tmp_path: Path, key: str) -> None:
+    # /x/link -> / : two components as written, none once resolved
+    (tmp_path / "link").symlink_to("/")
+    proc = _store(tmp_path, key, str(tmp_path / "link"), _ME)
+    assert proc.returncode == 2 and proc.stdout == ""
+
+
+def test_the_canonical_path_is_never_echoed_in_a_message(tmp_path: Path) -> None:
+    real = tmp_path / "secret-real-name"
+    real.mkdir()
+    (tmp_path / "link").symlink_to(real)
+    proc = _store(tmp_path, "path", str(tmp_path / "link" / "m"), _NOT_ME)
+    assert proc.returncode == 2
+    assert "secret-real-name" not in proc.stderr
+
+
+@pytest.mark.parametrize("key", _STORE_KEYS)
+def test_a_missing_store_under_a_user_owned_ancestor_is_refused(tmp_path: Path, key: str) -> None:
+    proc = _store(tmp_path, key, str(tmp_path / "a" / "models"), _NOT_ME)
+    assert proc.returncode == 2 and proc.stdout == ""
+    assert f"model_store.{key}" in proc.stderr
+    assert "does not exist" in proc.stderr and "only root can change" in proc.stderr
+    assert "create the folder first" in proc.stderr and "a disk that root owns" in proc.stderr
+    assert str(tmp_path) not in proc.stderr.replace(str(tmp_path / "a" / "models"), "")
+
+
+@pytest.mark.parametrize("key", _STORE_KEYS)
+@pytest.mark.parametrize("mode", [0o775, 0o1777, 0o757])
+def test_a_missing_store_under_a_writable_ancestor_is_refused(tmp_path: Path, key: str,
+                                                              mode: int) -> None:
+    parent = tmp_path / "p"
+    parent.mkdir()
+    parent.chmod(mode)
+    proc = _store(tmp_path, key, str(parent / "models"), _ME)
+    assert proc.returncode == 2 and "does not exist" in proc.stderr
+
+
+@pytest.mark.parametrize("key", _STORE_KEYS)
+def test_an_existing_store_under_a_user_owned_ancestor_is_accepted(tmp_path: Path,
+                                                                   key: str) -> None:
+    (tmp_path / "a" / "models").mkdir(parents=True)
+    proc = _store(tmp_path, key, str(tmp_path / "a" / "models"), _NOT_ME)
+    assert f"{_name(key)}={tmp_path}/a/models" in lines(proc)
+
+
+@pytest.mark.parametrize("key", _STORE_KEYS)
+def test_a_missing_store_under_a_root_owned_ancestor_is_accepted(tmp_path: Path, key: str) -> None:
+    proc = _store(tmp_path, key, str(tmp_path / "a" / "models"), _ME)
+    assert f"{_name(key)}={tmp_path}/a/models" in lines(proc)
+
+
+@pytest.mark.parametrize("key", _STORE_KEYS)
+def test_a_missing_store_with_a_dangling_link_on_the_way_is_refused(tmp_path: Path,
+                                                                    key: str) -> None:
+    (tmp_path / "link").symlink_to(tmp_path / "nowhere")
+    proc = _store(tmp_path, key, str(tmp_path / "link" / "models"), _ME)
+    assert proc.returncode == 2 and f"model_store.{key}" in proc.stderr
+    assert str(tmp_path / "nowhere") not in proc.stderr
+
+
+@pytest.mark.parametrize("key", _STORE_KEYS)
+def test_the_default_store_needs_no_safe_parent_and_the_rule_is_not_waived_elsewhere(
+        tmp_path: Path, key: str) -> None:
+    proc = _store(tmp_path, key, "/var/lib/hal0/models/x", _NOT_ME)
+    assert proc.returncode == 0, proc.stderr
+    proc = _store(tmp_path, key, "/var/lib/hal0/models-x/x", _NOT_ME)
+    assert proc.returncode == 2
+
+
+@pytest.mark.parametrize("key", _STORE_KEYS)
+def test_default_store_argument_makes_a_dev_prefix_store_acceptable(tmp_path: Path,
+                                                                    key: str) -> None:
+    dev = tmp_path / "dev" / "var" / "lib" / "hal0"  # nothing exists: a fresh --dev prefix
+    value = f"{dev}/models/store"
+    refused = _store(tmp_path, key, value, _NOT_ME)
+    assert refused.returncode == 2
+    accepted = _store(tmp_path, key, value, _NOT_ME, "--default-store", f"{dev}/models")
+    assert f"{_name(key)}={value}" in lines(accepted)
+    saved = subprocess.run(
+        [sys.executable, "-I", str(READER), "--default-store", f"{dev}/models",
+         "--emit-saved", str(tmp_path / "answers.json")],
+        capture_output=True, text=True, check=False, env={**os.environ, **_NOT_ME},
+    )
+    assert saved.returncode == 0, saved.stderr
+    assert json.loads(saved.stdout)["model_store"] == {key: value}
+
+
+def test_default_store_argument_is_the_only_exception_it_names(tmp_path: Path) -> None:
+    # the literal /var/lib/hal0/models stops being special once another store is passed
+    proc = _store(tmp_path, "path", "/var/lib/hal0/models/x", _NOT_ME,
+                  "--default-store", str(tmp_path / "dev" / "models"))
+    assert proc.returncode == 2 and "system location" in proc.stderr
+
+
+@pytest.mark.parametrize("bad", ["relative/models", "", "/mnt/with\nnewline", "/mnt/a;b",
+                                 "/mnt/../x", "/" + "a" * 5000])
+def test_default_store_argument_is_validated_like_a_path(tmp_path: Path, bad: str) -> None:
+    for mode in ("apply", "saved"):
+        if mode == "apply":
+            proc = _store(tmp_path, "path", "/mnt/disk/models", None, "--default-store", bad)
+        else:
+            (tmp_path / "answers.json").write_text('{"version": 1}', encoding="utf-8")
+            proc = subprocess.run(
+                [sys.executable, "-I", str(READER), "--default-store", bad,
+                 "--emit-saved", str(tmp_path / "answers.json")],
+                capture_output=True, text=True, check=False)
+        assert proc.returncode == 2 and proc.stdout == "", (mode, bad)
+        assert "default-store" in proc.stderr
+        assert "newline" not in proc.stderr and "aaaa" not in proc.stderr
+
+
+def test_a_document_cannot_name_the_default_store(tmp_path: Path) -> None:
+    doc = {"version": 1, "model_store": {"path": "/mnt/disk/models", "default_store": "/etc"},
+           "default_store": "/etc"}
+    proc = run(doc, tmp_path)
+    assert proc.returncode == 0 and "default_store" not in proc.stdout
+    assert all("/etc" not in line for line in proc.stdout.splitlines())

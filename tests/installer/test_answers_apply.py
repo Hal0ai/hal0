@@ -228,3 +228,42 @@ def test_hal0_answers_python_prints_the_choice(tmp_path: Path) -> None:
     assert proc.stdout.splitlines() == [f"{bin_dir}/python3", "rc=0"]
     proc = _bash_path("PATH=/nonexistent; hal0_answers_python; echo rc=$?", tmp_path, bin_dir, "")
     assert proc.stdout.strip() == "rc=1"
+
+
+# ── the default store is passed in, not assumed (round 3) ───────────────────
+
+
+def _argv_reader(tmp_path: Path) -> Path:
+    fake = tmp_path / "argv_reader.py"
+    fake.write_text(
+        "import sys\n"
+        f"open({str(tmp_path / 'argv.txt')!r}, 'a').write(repr(sys.argv[1:]) + '\\n')\n"
+        "print('HAL0_PORT=1234')\n",
+        encoding="utf-8",
+    )
+    return fake
+
+
+def test_apply_and_save_pass_the_default_store_from_var_dir(tmp_path: Path) -> None:
+    fake = _argv_reader(tmp_path)
+    proc = _bash(
+        f'VAR_DIR="{tmp_path}/dev/var"; hal0_apply_answers /x/doc.json file; echo "rc=$?"',
+        tmp_path,
+        reader=fake,
+    )
+    assert proc.stdout.splitlines() == ["rc=0"], proc.stderr
+    calls = (tmp_path / "argv.txt").read_text(encoding="utf-8").splitlines()
+    assert len(calls) == 2  # the apply run and the save-form run
+    store = f"{tmp_path}/dev/var/models"
+    assert eval(calls[0]) == ["--origin", "file", "--default-store", store, "--", "/x/doc.json"]
+    assert eval(calls[1]) == ["--default-store", store, "--emit-saved", "/x/doc.json"]
+
+
+def test_without_var_dir_the_reader_keeps_its_own_default(tmp_path: Path) -> None:
+    fake = _argv_reader(tmp_path)
+    proc = _bash('unset VAR_DIR; hal0_apply_answers /x/doc.json file; echo "rc=$?"', tmp_path,
+                 reader=fake)
+    assert proc.stdout.splitlines() == ["rc=0"], proc.stderr
+    calls = (tmp_path / "argv.txt").read_text(encoding="utf-8").splitlines()
+    assert all("--default-store" not in call for call in calls)
+

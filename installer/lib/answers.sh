@@ -67,6 +67,18 @@ hal0_answers_python() {
     return 1
 }
 
+# Sets store_arg (the caller's local array) to `--default-store ${VAR_DIR}/models`
+# when VAR_DIR is known, else to nothing (the reader then assumes the standard
+# /var/lib/hal0/models). The reader's "inside the default store" exception
+# follows what the installer will create, so a --dev prefix works. Never taken
+# from the document.
+_hal0_default_store_arg() {
+    store_arg=()
+    if [[ -n "${VAR_DIR:-}" ]]; then
+        store_arg=(--default-store "${VAR_DIR}/models")
+    fi
+}
+
 # Apply the answers document at PATH; ORIGIN is `file` or `wizard`.
 # Runs the reader (${PY} -I, standard library only), then exports what it
 # printed. All-or-nothing: every line is checked against the allow-list and
@@ -97,7 +109,10 @@ hal0_apply_answers() {
     fi
 
     local output rc=0
-    output="$("${_HAL0_ANSWERS_PY}" -I "${_HAL0_ANSWERS_READER}" --origin "${origin}" -- "${path}")" || rc=$?
+    local -a store_arg=()
+    _hal0_default_store_arg
+    output="$("${_HAL0_ANSWERS_PY}" -I "${_HAL0_ANSWERS_READER}" --origin "${origin}" \
+        "${store_arg[@]+"${store_arg[@]}"}" -- "${path}")" || rc=$?
     if [[ "${rc}" -ne 0 ]]; then
         echo "Stopped: the answers document was not accepted." >&2
         return "${rc}"
@@ -193,6 +208,8 @@ _hal0_answers_warn() {
 # On failure: nothing saved at the end. Always returns 0.
 _hal0_prepare_saved_answers() {
     local path="${1:-}" out rc=0 py="${_HAL0_ANSWERS_PY:-}" err_file err=""
+    local -a store_arg=()
+    _hal0_default_store_arg
     # A local keeps the export attribute of a same-named variable in the
     # environment; these hold document text and must not reach child processes.
     export -n out err
@@ -203,7 +220,8 @@ _hal0_prepare_saved_answers() {
         return 0
     fi
     err_file="$(mktemp 2>/dev/null)" || err_file=/dev/null
-    out="$("${py}" -I "${_HAL0_ANSWERS_READER}" --emit-saved "${path}" 2>"${err_file}")" || rc=$?
+    out="$("${py}" -I "${_HAL0_ANSWERS_READER}" "${store_arg[@]+"${store_arg[@]}"}" \
+        --emit-saved "${path}" 2>"${err_file}")" || rc=$?
     if [[ "${err_file}" != /dev/null ]]; then
         IFS= read -r err <"${err_file}" || true
         rm -f -- "${err_file}"
