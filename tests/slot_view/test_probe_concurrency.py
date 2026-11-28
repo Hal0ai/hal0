@@ -8,13 +8,19 @@ the two properties that fix rests on:
   * the per-slot probes overlap (wall-clock ≈ the slowest slot, not the sum);
   * one wedged slot cannot hold the whole list past ``_PROBE_TIMEOUT_S``.
 
-Timings are asserted with generous headroom — the failure they guard against
-is an order of magnitude, not a few ms.
+Overlap is asserted as a rendezvous, not as a wall-clock bound (#3919): the
+fake provider's liveness probe waits at a barrier that only opens when several
+probes are in the executor at the same moment. Serial probes never fill it.
+A loaded runner makes that slower, never wrong; the old ``elapsed < n *
+PROBE_S`` bound measured the runner as much as the code. The wedged-slot tests
+below still time things, with generous headroom: the failure they guard
+against is an order of magnitude, not a few ms.
 """
 
 from __future__ import annotations
 
 import asyncio
+import threading
 from types import SimpleNamespace
 from typing import Any
 
@@ -73,23 +79,101 @@ class SlowProvider:
         return True
 
 
+#: How long a probe waits at the rendezvous before giving up. Only reached
+#: when the probes do NOT overlap, so it bounds a failing run, not a passing
+#: one. A barrier that times out once is broken for every later caller, so a
+#: regression costs this long once and then fails the remaining probes at
+#: once: the test fails with a message in about ten seconds and cannot hang.
+RENDEZVOUS_S = 10.0
+
+
+class RendezvousProvider:
+    """Liveness probes meet ``parties`` at a time, or the meeting fails.
+
+    ``is_active`` is synchronous, like the real provider's, so it runs on an
+    executor thread: ``parties`` of them must be inside it together for the
+    barrier to open. ``health`` is a coroutine and counts how many are awaited
+    at once.
+    """
+
+    def __init__(self, parties: int) -> None:
+        self.parties = parties
+        self._barrier = threading.Barrier(parties, timeout=RENDEZVOUS_S)
+        self.meetings = 0
+        self.broken = 0
+        self._lock = threading.Lock()
+        self.max_health_in_flight = 0
+        self._health_in_flight = 0
+
+    def is_active(self, slot: dict[str, Any] | str) -> bool:
+        try:
+            self._barrier.wait()
+        except threading.BrokenBarrierError:
+            with self._lock:
+                self.broken += 1
+            return False
+        with self._lock:
+            self.meetings += 1
+        return True
+
+    async def health(self, port: int) -> dict[str, Any]:
+        self._health_in_flight += 1
+        self.max_health_in_flight = max(self.max_health_in_flight, self._health_in_flight)
+        try:
+            # The probes of one meeting leave is_active together; yield so the
+            # others reach this line before any of them finishes.
+            await asyncio.sleep(0.05)
+            return {"ok": True}
+        finally:
+            self._health_in_flight -= 1
+
+    def running_image(self, slot: dict[str, Any] | str) -> str | None:
+        return None
+
+    def image_present(self, image: str) -> bool:
+        return True
+
+
 def _configs(n: int, prefix: str = "s") -> list[dict[str, Any]]:
     return [{"name": f"{prefix}{i}", "port": 8100 + i, "profile": ""} for i in range(n)]
 
 
 async def test_probes_overlap_instead_of_summing() -> None:
-    n = 10
-    provider = SlowProvider(delay=PROBE_S)
-    loop = asyncio.get_running_loop()
-    started = loop.time()
+    """Several slots' liveness probes are in flight at the same moment.
+
+    Eight slots, meeting four at a time. Probes run one after another could
+    never fill the barrier: each would wait out ``RENDEZVOUS_S`` alone, break
+    it, and report the slot stopped. So every slot reading "running" proves
+    the overlap, whatever the runner's speed.
+    """
+    parties = 4
+    n = 2 * parties
+    assert parties <= sv_mod._PROBE_CONCURRENCY, "the cap must allow one full meeting"
+    provider = RendezvousProvider(parties)
+
     out = await container_enrichment(_configs(n), provider=provider)
-    elapsed = loop.time() - started
 
     assert len(out) == n
+    assert provider.broken == 0, f"{provider.broken} probe(s) waited alone: the probes serialised"
+    assert provider.meetings == n
     assert all(e["container_status"] == "running" for e in out.values())
-    # Serial would be >= n * 2 * PROBE_S (is_active + health per slot) = 5 s.
-    assert elapsed < n * PROBE_S, f"probes serialised: {elapsed:.2f}s for {n} slots"
-    assert provider.max_in_flight > 1, "no probe overlap at all"
+    # The second stage overlaps too: probes that left is_active together are
+    # awaited together, not one after another.
+    assert provider.max_health_in_flight > 1, "no /health overlap at all"
+
+
+async def test_serial_probes_would_fail_the_rendezvous(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The test above has teeth: with the fan-out forced to one probe at a
+    time, no meeting ever fills and every slot reads stopped."""
+    monkeypatch.setattr(sv_mod, "_PROBE_CONCURRENCY", 1)
+    monkeypatch.setattr(sv_mod, "_PROBE_TIMEOUT_S", 0.3)
+    provider = RendezvousProvider(parties=2)
+    monkeypatch.setattr(provider, "_barrier", threading.Barrier(2, timeout=0.1))
+
+    out = await container_enrichment(_configs(4), provider=provider)
+
+    assert provider.meetings == 0
+    assert all(e["container_status"] != "running" for e in out.values())
 
 
 async def test_probe_fanout_is_bounded() -> None:
