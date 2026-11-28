@@ -18,6 +18,12 @@
 # each command it would have sent and answers the read-only questions from
 # canned text. Nothing is created on the host or in the output directory.
 #
+# Operating note: the guest takes a DHCP address on the host's bridge
+# (HAL0_MATRIX_BRIDGE), and the product the install starts listens on all of its
+# interfaces, so for the duration of the run the guest's services are reachable
+# from the whole network that bridge is on. Run it on a network where that is
+# acceptable; the container is destroyed at the end of the run.
+#
 # Settings (environment): HAL0_PVE, HAL0_MATRIX_VMID_MIN, HAL0_MATRIX_VMID_MAX,
 # HAL0_MATRIX_BRIDGE, HAL0_MATRIX_STORAGE (see lib/pve.sh).
 # shellcheck disable=SC2329  # trap handlers, background jobs and the dry-run ssh shadow
@@ -316,10 +322,26 @@ synth_driver() { # <exit code> <timed_out true|false>
     "$1" "$2" >"${ART}/driver.json"
 }
 
+# record_version: the hal0 version the install really put in the guest, so a
+# result says which version it measured (the stable source installs whatever
+# the release site serves at run time). The fixed command prints one line;
+# what comes back is untrusted: one line of at most 100 characters that looks
+# like `hal0 <version>`, else nothing is recorded.
+record_version() {
+  local out line
+  out="$(_PVE_STREAM=version ct_exec "$VMID" 'hal0 --version 2>/dev/null | head -n 1' 2>/dev/null)" || return 0
+  IFS= read -r line <<<"$out" || true
+  [[ ${#line} -le 100 ]] || return 0
+  if [[ "$line" =~ ^hal0\ ([0-9][0-9A-Za-z.+~_-]{0,63}(\ \(release\ [0-9A-Za-z.+~_-]{1,64}\))?)$ ]]; then
+    printf 'installed_version=%s\n' "${BASH_REMATCH[1]}" >>"${ART}/run.txt"
+  fi
+}
+
 collect_post() {
   POST_DONE=1
   _PVE_STREAM=post ct_exec "$VMID" "bash /root/collect.sh post" >"${ART}/post.txt" 2>>"${ART}/collect.err" \
     || log "collect post failed"
+  record_version
 }
 
 pull_artifacts() {
@@ -485,7 +507,7 @@ sentinel() {
 
 start_watchdog() {
   local wd_start
-  WATCH_FILE="$(mktemp)"
+  WATCH_FILE="$(mktemp "${ART}/watch.XXXXXX")"
   watchdog "$$" &
   WATCH_PID=$!
   wd_start="$(stat_field "$WATCH_PID" 19)" || wd_start=""
@@ -714,7 +736,7 @@ HELD_SIG=""
 trap 'HELD_SIG=2' INT
 trap 'HELD_SIG=15' TERM
 trap 'HELD_SIG=1' HUP
-create_rcfile="$(mktemp)"
+create_rcfile="$(mktemp "${ART}/create-rc.XXXXXX")"
 (
   trap '' INT TERM HUP
   rc=0

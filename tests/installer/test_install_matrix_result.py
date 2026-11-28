@@ -168,7 +168,7 @@ def test_output_keys_are_exactly_the_documented_set(tmp_path):
         "step_durations_seconds", "last_step", "disk_used_bytes", "bytes_downloaded",
         "slot_count", "slots", "doctor", "failed_units", "api_health_seconds", "chat", "memory",
         "hermes", "harness_prereqs", "warnings", "errors", "components", "aborted",
-        "abort_detail",
+        "abort_detail", "installed_version",
     }  # fmt: skip
 
 
@@ -195,6 +195,26 @@ def test_run_note_gives_the_abort_reason_and_detail(tmp_path):
     )
     assert res["aborted"] == "host_memory_low"
     assert res["abort_detail"] == "host memory fell below 12 GB (5 GB available)"
+
+
+def test_run_note_gives_the_installed_version(tmp_path):
+    res = run_note(tmp_path, "vmid=172\ninstalled_version=1.8.2 (release 2026.11.28)\n")
+    assert res["installed_version"] == "1.8.2 (release 2026.11.28)"
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        None,
+        "vmid=172\n",
+        "installed_version=\n",
+        "installed_version=not a version\n",
+        "installed_version=1.8.2; rm x\n",
+        "installed_version=" + "1" * 200 + "\n",
+    ],
+)
+def test_run_note_without_a_version_shaped_value_gives_null(tmp_path, text):
+    assert run_note(tmp_path, text)["installed_version"] is None
 
 
 def test_run_note_without_an_abort_gives_nulls(tmp_path):

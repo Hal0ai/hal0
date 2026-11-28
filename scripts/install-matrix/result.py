@@ -9,7 +9,8 @@
 ``--pre``, ``--post`` and ``--probe`` are ``key=value`` files printed by
 collect.sh. ``--run`` is the harness's own ``run.txt`` (also ``key=value``); it
 gives ``aborted`` (why the watchdog stopped the run) and ``abort_detail``, both
-null when absent. ``--driver`` is the JSON tty_drive.py
+null when absent, and ``installed_version`` (the hal0 version read from the
+guest after the install; null when absent or not version-shaped). ``--driver`` is the JSON tty_drive.py
 (or run-shape.sh, for an unattended run) wrote. ``--summary`` is the installer's
 ``--summary-json`` file. Any input may be missing or unreadable: its fields
 come out as null. A number collect.sh could not measure (-1) is also null.
@@ -217,6 +218,19 @@ def shape_row(shape_id: str):
     return None
 
 
+_VERSION = re.compile(r"[0-9][0-9A-Za-z.+~_-]{0,63}( \(release [0-9A-Za-z.+~_-]{1,64}\))?")
+
+
+def version_text(note: dict[str, str] | None):
+    """The hal0 version run-shape.sh read from the guest after the install
+    (``installed_version=`` in run.txt). The guest wrote it, so it is checked
+    again here: one version-shaped line, 100 characters at most, else null."""
+    value = text(note, "installed_version")
+    if value and len(value) <= 100 and _VERSION.fullmatch(value):
+        return value
+    return None
+
+
 def assemble(args: argparse.Namespace) -> dict:
     pre, post, probe = read_kv(args.pre), read_kv(args.post), read_kv(args.probe)
     driver, summary = read_json(args.driver), read_json(args.summary)
@@ -277,6 +291,7 @@ def assemble(args: argparse.Namespace) -> dict:
         "components": _flat_map(summary.get("components"), numbers_only=False),
         "aborted": text(note, "aborted") or None,
         "abort_detail": text(note, "abort_detail") or None,
+        "installed_version": version_text(note),
     }
 
 

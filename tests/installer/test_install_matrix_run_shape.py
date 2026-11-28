@@ -159,6 +159,7 @@ case "$plain" in
     [[ -z "${FAKE_SUM_SLEEP:-}" ]] || exec sleep "$FAKE_SUM_SLEEP"
     echo '{"hal0_version": "9.9.9", "elapsed_seconds": 7, "step_durations_seconds": {"Pre-flight checks": 2}, "warnings": 0, "errors": 0}'
     exit 0 ;;
+  *"hal0 --version"*) printf '%s\n' "${FAKE_VERSION-hal0 1.8.2}"; exit 0 ;;
   *"hal0 uninstall"*) exit 0 ;;
   *"list-unit-files"*) echo; exit 0 ;;
   *"summary-json"*)
@@ -623,6 +624,40 @@ def test_the_memory_watch_stays_in_force_while_cleanup_collects(host):
     assert not (host.state / "present").exists(), "the destroy went on"
     assert "LEFT BEHIND" not in err
     assert "aborted=host_memory_low" in (host.out / "run.txt").read_text().splitlines()
+
+
+def test_the_result_says_which_hal0_version_was_installed(host):
+    r = host.run("u2604-cpu-unattended", "--vmid", "172", "--out", str(host.out))
+    assert r.returncode == 0, r.stderr
+    assert json.loads((host.out / "result.json").read_text())["installed_version"] == "1.8.2"
+    assert any("hal0 --version" in c.replace("\\", "") for c in host.calls())
+
+
+@pytest.mark.parametrize(
+    "answer",
+    ["", "hal0 1.8.2; id", "something else entirely", "hal0 " + "9" * 300, "no version here"],
+    ids=["empty", "injection", "wrong-shape", "too-long", "none"],
+)
+def test_a_guest_answer_that_is_not_a_version_is_not_recorded(host, answer):
+    r = host.run(
+        "u2604-cpu-unattended", "--vmid", "172", "--out", str(host.out), FAKE_VERSION=answer
+    )
+    assert r.returncode == 0, r.stderr
+    assert json.loads((host.out / "result.json").read_text())["installed_version"] is None
+    assert "installed_version" not in (host.out / "run.txt").read_text()
+
+
+def test_the_harness_makes_its_small_files_in_the_runs_output_folder(host, tmp_path):
+    """TMPDIR (RAM on the machine that runs the harness) points nowhere: a run
+    that needed the default temp directory for the watchdog or the create
+    status file would fail."""
+    r = host.run(
+        "u2604-cpu-unattended", "--vmid", "172", "--out", str(host.out),
+        TMPDIR=str(tmp_path / "no-such-temp-dir"),
+    )  # fmt: skip
+    assert r.returncode == 0, r.stderr
+    assert not (tmp_path / "no-such-temp-dir").exists()
+    assert not [p.name for p in host.out.iterdir() if p.name.startswith(("watch.", "create-rc."))]
 
 
 def _capped(**extra):
@@ -1201,7 +1236,7 @@ def test_successful_terminal_run(host):
     assert result["disk_used_bytes"] == 4000
     assert "uninstall" not in result and "vmid" not in result
     note = (host.out / "run.txt").read_text().splitlines()
-    assert note == ["vmid=172", "uninstall_ok=1", "residue=clean"]
+    assert note == ["vmid=172", "installed_version=1.8.2", "uninstall_ok=1", "residue=clean"]
     assert result["harness_prereqs"] == []
     assert stat.S_IMODE(host.out.stat().st_mode) == 0o700
     for f in host.out.iterdir():
