@@ -625,3 +625,53 @@ ui_component_picker() {
     exec 3>&- 4<&-
     return 0
 }
+
+# ── ui_closing_screen ───────────────────────────────────────────────────────
+# The last thing a person sees: where to create the first chat account and,
+# when THIS run created an admin key (_HAL0_ADMIN_KEY_MINTED=1, set by the
+# answers engine), the key itself, shown once.
+#
+# The key is a secret and stdout/stderr are copied into a log that other users
+# can read. So its value goes to the terminal device only (UI_TTY_OUT, default
+# /dev/tty), through a shell builtin redirected to a spare descriptor: never to
+# stdout/stderr, never as a program argument (it would show in the process
+# list). With no terminal, or no key line in the file, nothing about the value
+# is printed anywhere and the log points at the root-only env file instead.
+# Every terminal write is guarded and the function always returns 0, so it can
+# never fail an install running under `set -e` and an ERR trap.
+ui_closing_screen() {
+    local _tty="${UI_TTY_OUT:-/dev/tty}"
+
+    if [[ "${DEV_MODE:-0}" == "0" && "${NO_START:-0}" == "0" \
+        && "${IS_UPGRADE:-0}" == "0" && "${COMPONENT_STATES[openwebui]:-}" == "on" ]]; then
+        info "Create the first chat account now: http://${HOST:-localhost}:3001"
+        printf '   The first account to sign up becomes the chat page'"'"'s administrator.\n'
+    fi
+
+    [[ "${_HAL0_ADMIN_KEY_MINTED:-0}" == "1" ]] || return 0
+
+    local _line="" _key="" _shown=0
+    if { exec 5>>"${_tty}"; } 2>/dev/null; then
+        { while IFS= read -r _line; do
+            if [[ "${_line}" == HAL0_ADMIN_KEY=* ]]; then _key="${_line#HAL0_ADMIN_KEY=}"; fi
+        done < "${API_ENV:-/nonexistent}"; } 2>/dev/null || true
+        _line=""
+        if [[ -n "${_key}" ]]; then
+            {
+                printf '\n%sAdmin key (shown once): %s%s\n' "${BOLD}" "${_key}" "${RST}" >&5
+                printf 'It is needed to change settings from another machine. Chat stays open without it.\n' >&5
+            } 2>/dev/null || true
+            _shown=1
+        fi
+        _key=""
+        { exec 5>&-; } 2>/dev/null || true
+    fi
+    unset _key _line
+
+    if [[ "${_shown}" == "1" ]]; then
+        info "An admin key was created and shown on the terminal."
+    else
+        info "An admin key was created. It is stored in ${API_ENV:-the api.env file} (root only)."
+    fi
+    return 0
+}

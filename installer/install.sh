@@ -5412,6 +5412,8 @@ info "Total install time: $((SECONDS / 60))m $((SECONDS % 60))s"
 [[ -n "${HAL0_INSTALL_LOG:-}" ]] && info "Install log: ${HAL0_INSTALL_LOG}"
 # Keep the applied answers document (no token, no terminal grant); never fails the install.
 hal0_save_answers
+# Last thing the person sees: the first-account line and, once, the admin key.
+ui_closing_screen
 
 # ── --summary-json ───────────────────────────────────────────────────────────
 # Versioned, machine-readable install summary (docs/getting-started/install.mdx).
