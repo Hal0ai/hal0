@@ -258,7 +258,7 @@ WantedBy=multi-user.target
   `GET /api/memory/models` and the `memory_embedder` row of `hal0 doctor all`
   say so and nothing is rewritten. `hal0 memory embedder switch <model>` is
   the one way to change it; see
-  [Change the embedding model](/docs/guides/enable-memory#change-the-embedding-model).
+  [Switch the memory embedder](/docs/guides/switch-memory-embedder).
 - **Reranker** — the engine reranks each recall's candidates. `[memory.models]`
   sets it, rendered into `showcase-lanes.conf`; a Settings save rewrites the
   drop-in and restarts the engine. Unset keys keep the engine default.

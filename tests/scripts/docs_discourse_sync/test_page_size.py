@@ -233,3 +233,20 @@ def test_split_rest_api_pages_have_distinct_topics() -> None:
         docs["reference/api/rest-api-credentials"].external_id
         == "hal0-docs--reference--api--rest-api-credentials"
     )
+
+
+def test_split_memory_pages_have_distinct_topics() -> None:
+    # Three memory pages sat within 300 characters of the headroom (#3896,
+    # #3955). The embedder switch moved out of enable-memory, the knowledge
+    # pages of a coding bank out of fold-in-memory-banks, and the embedder and
+    # migration commands out of cli-memory. Each original keeps its topic; each
+    # new page gets one of its own.
+    docs = {d.rel_key: d for d in discovery.discover_docs(REPO_ROOT / "docs")}
+    pairs = [
+        ("guides/enable-memory", "guides/switch-memory-embedder"),
+        ("guides/fold-in-memory-banks", "guides/fold-in-knowledge-pages"),
+        ("reference/cli-memory", "reference/cli-memory-migrate"),
+    ]
+    for original, second in pairs:
+        assert docs[original].external_id == "hal0-docs--" + original.replace("/", "--")
+        assert docs[second].external_id == "hal0-docs--" + second.replace("/", "--")
