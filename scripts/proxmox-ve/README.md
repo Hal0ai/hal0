@@ -58,7 +58,18 @@ hal0's own settings:
 | `var_unprivileged` | `1` | `0` builds a privileged container (see below) |
 | `var_external_installer` | *(ask)* | `yes` skips the confirmation before hal0's installer runs |
 
-A fully unattended run sets `mode=default var_external_installer=yes`.
+A fully unattended run sets `mode=default var_external_installer=yes`. On a
+host with more than one storage pool that can hold containers, also set
+`var_container_storage` (and `var_template_storage` if more than one pool can
+hold templates): without them the engine opens its storage dialog, and with
+no terminal to answer it the run ends with "User exited script" before
+anything is created.
+
+```bash
+mode=default var_external_installer=yes \
+var_container_storage=local-zfs var_template_storage=local \
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/Hal0ai/hal0/main/scripts/proxmox-ve/ct/hal0.sh)"
+```
 
 ## Unprivileged by default
 
@@ -199,5 +210,7 @@ Manual; needs a Proxmox VE host.
 2. `hal0-npu-passthrough <CTID>`, then `flm validate` passes inside.
 3. `var_gpu=no`: finishes as a CPU-only container.
 4. `update` inside the container runs `hal0 update` and exits 0, twice.
-5. `mode=default var_external_installer=yes` with `var_ctid` set: no prompt.
+5. `mode=default var_external_installer=yes` with `var_ctid` and, on a host
+   with several pools, `var_container_storage` and `var_template_storage`
+   set: no prompt.
 6. `pct destroy <CTID>` leaves no leaked storage.
