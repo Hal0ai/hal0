@@ -29,9 +29,14 @@ from hal0.api._redact import (
 )
 from hal0.redaction import MASK, redact_secret_shapes, redact_shareable_text, secret_spans
 
+#: ``_cpu_timed`` measures a call up to this many times and reports the best.
+_CPU_TIMED_TRIES = 3
+#: A measurement under this is not repeated: every guard's bound is 1 s or more.
+_CPU_TIMED_CLEARLY_FAST_S = 0.25
+
 
 def _cpu_timed(redact: Callable[[str], str], text: str) -> tuple[str, float]:
-    """Run ``redact(text)``; return its output and the CPU seconds the process spent.
+    """Run ``redact(text)``; return its output and the CPU seconds the call spent.
 
     The one clock every ``@pytest.mark.timing`` guard in this file shares. They
     exist to catch a super-linear scan (tens of seconds on 80 KB), so they bound
@@ -39,10 +44,26 @@ def _cpu_timed(redact: Callable[[str], str], text: str) -> tuple[str, float]:
     ``time.perf_counter()`` also counts the time the process waits for a core,
     and on a box with every core busy that tripped bounds on code that was fine
     (#3209).
+
+    The clock is ``time.thread_time()``, the CPU of the calling thread alone.
+    ``time.process_time()`` counts every thread of the process, so a thread
+    another test left running was charged to the call. A garbage collection
+    that happens to start inside the call still runs on this thread. Late in a
+    full run, a call that takes under 0.1 s on its own was measured at 1.35 s
+    with the process clock (release-check for v1.8.2, on ``TestGluedSecrets``);
+    nothing in the redaction code had changed. A scan that is super-linear is
+    slow every time it runs, and that kind of noise is not, so a measurement
+    that is not clearly fast is taken again and the best of three counts.
     """
-    start = time.process_time()
-    out = redact(text)
-    return out, time.process_time() - start
+    out = ""
+    best = float("inf")
+    for _ in range(_CPU_TIMED_TRIES):
+        start = time.thread_time()
+        out = redact(text)
+        best = min(best, time.thread_time() - start)
+        if best < _CPU_TIMED_CLEARLY_FAST_S:
+            break
+    return out, best
 
 
 # ── is_sensitive_key ──────────────────────────────────────────────────────
