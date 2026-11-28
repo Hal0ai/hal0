@@ -62,7 +62,9 @@ def _is_closed_resource_error(exc: Any) -> bool:
     if isinstance(exc, type) and issubclass(exc, anyio.ClosedResourceError):
         return True
     if hasattr(exc, "exceptions"):
-        return any(_is_closed_resource_error(sub) for sub in exc.exceptions)
+        return bool(exc.exceptions) and all(
+            _is_closed_resource_error(sub) for sub in exc.exceptions
+        )
     return False
 
 

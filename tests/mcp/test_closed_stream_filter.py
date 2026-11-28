@@ -73,6 +73,23 @@ def test_closed_stream_filter_drops_exception_group_with_closed_resource_error(
     assert len(records) == 0
 
 
+def test_closed_stream_filter_preserves_mixed_exception_group(clean_logger: Any) -> None:
+    logger, records = clean_logger
+    logger.addFilter(ClosedStreamFilter())
+
+    try:
+        raise ExceptionGroup(
+            "stream error",
+            [anyio.ClosedResourceError(), RuntimeError("writer failed")],
+        )
+    except ExceptionGroup:
+        logger.exception("Error in standalone SSE writer")
+
+    assert len(records) == 1
+    assert "Error in standalone SSE writer" in records[0].getMessage()
+    assert records[0].levelno == logging.ERROR
+
+
 def test_closed_stream_filter_preserves_other_exceptions(clean_logger: Any) -> None:
     logger, records = clean_logger
     logger.addFilter(ClosedStreamFilter())
