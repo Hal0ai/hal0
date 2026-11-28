@@ -48,6 +48,9 @@ record = {
 saved = opt("--saved")
 if saved:
     record["saved_text"] = open(saved, encoding="utf-8").read()
+given = opt("--answers")
+if given:
+    record["answers_bytes"] = open(given, "rb").read().hex()
 with open(os.environ["STUB_LOG"], "a", encoding="utf-8") as fh:
     fh.write(json.dumps(record) + "\n")
 def write(path, text):
@@ -60,7 +63,12 @@ if "STUB_SECRET" in os.environ and secret:
     write(secret, os.environ["STUB_SECRET"])
 if "STUB_CHOSEN" in os.environ and chosen:
     write(chosen, os.environ["STUB_CHOSEN"])
+sys.stdout.write(os.environ.get("STUB_STDOUT", ""))
+sys.stdout.flush()
 sys.stderr.write(os.environ.get("STUB_STDERR", ""))
+if "STUB_STDERR_HEX" in os.environ:
+    sys.stderr.flush()
+    sys.stderr.buffer.write(bytes.fromhex(os.environ["STUB_STDERR_HEX"]))
 sys.exit(int(os.environ.get("STUB_RC", "0")))
 '''
 
@@ -232,7 +240,7 @@ def test_command_line_matches_contract(tmp_path: Path, stub: dict[str, str]) -> 
         "--chosen-folder-out", f"{work}/chosen-folder",
         "--hal0-version", "9.9.9",
         "--saved", f"{work}/saved.json",
-        "--answers", str(given),
+        "--answers", f"{work}/given.json",
         "--headless",
         "--reconfigure",
         "--",
@@ -251,6 +259,87 @@ def test_headless_whenever_a_document_is_given(tmp_path: Path, stub: dict[str, s
     assert _state(proc)["RC"] == "0", proc.stderr
     argv = _records(tmp_path)[0]["argv"]
     assert "--headless" in argv and argv.index("--headless") < argv.index("--")
+
+
+def _given_refused(proc: subprocess.CompletedProcess[str], tmp_path: Path) -> list[str]:
+    state = _state(proc)
+    assert state["RC"] == "1" and state["APPLIED"] == "0", proc.stdout + proc.stderr
+    assert _records(tmp_path) == [], "the wizard must not start"
+    assert state["LEFT"] == ""
+    lines = proc.stderr.strip().splitlines()
+    assert lines[-1] == "Stopped: the answers document was not accepted.", lines
+    return lines[:-1]
+
+
+def test_a_given_fifo_is_refused_before_the_wizard_starts(tmp_path: Path,
+                                                          stub: dict[str, str]) -> None:
+    fifo = tmp_path / "given.json"
+    os.mkfifo(fifo)
+    proc = _collect(tmp_path, {**stub, "STUB_DOC": DOC, "HAL0_ANSWERS_FILE": str(fifo)})
+    reasons = _given_refused(proc, tmp_path)
+    assert len(reasons) == 1 and "not a regular file" in reasons[0], reasons
+
+
+def test_a_given_oversized_file_is_refused_before_the_wizard_starts(
+        tmp_path: Path, stub: dict[str, str]) -> None:
+    big = tmp_path / "given.json"
+    big.write_bytes(b'{"version": 1, "x": "' + b"a" * (1 << 20) + b'"}')
+    proc = _collect(tmp_path, {**stub, "STUB_DOC": DOC, "HAL0_ANSWERS_FILE": str(big)})
+    reasons = _given_refused(proc, tmp_path)
+    assert len(reasons) == 1 and "larger than 1 MiB" in reasons[0], reasons
+
+
+def test_a_given_invalid_document_is_refused_by_the_reader_first(
+        tmp_path: Path, stub: dict[str, str]) -> None:
+    bad = tmp_path / "given.json"
+    bad.write_text('{"version": 1, "install": {"type": "bogus\\u001b[31m"}}', encoding="utf-8")
+    proc = _collect(tmp_path, {**stub, "STUB_DOC": DOC, "HAL0_ANSWERS_FILE": str(bad)})
+    reasons = _given_refused(proc, tmp_path)
+    assert reasons and "\x1b" not in proc.stderr
+
+
+def test_the_wizard_reads_a_checked_copy_of_the_given_file(tmp_path: Path,
+                                                           stub: dict[str, str]) -> None:
+    given = tmp_path / "given.json"
+    body = b'{"version": 1, "memory": {"enabled": false}}\n'
+    given.write_bytes(body)
+    given.chmod(0o644)
+    proc = _collect(tmp_path, {**stub, "STUB_DOC": DOC, "HAL0_ANSWERS_FILE": str(given)})
+    assert _state(proc)["RC"] == "0", proc.stdout + proc.stderr
+    (rec,) = _records(tmp_path)
+    argv = rec["argv"]
+    copy = Path(argv[argv.index("--answers") + 1])
+    assert copy.parent == Path(argv[argv.index("--out") + 1]).parent
+    assert copy != given
+    assert bytes.fromhex(rec["answers_bytes"]) == body
+    assert _state(proc)["LEFT"] == ""
+
+
+# ── what the wizard prints ──────────────────────────────────────────────────
+
+
+def test_the_wizards_output_is_filtered_before_the_log(tmp_path: Path,
+                                                       stub: dict[str, str]) -> None:
+    noise = ("\x1b[31mred\x07\n" + "A" * 5000 + "\n"
+             + "".join(f"line {i}\n" for i in range(100)))
+    env = {**stub, "STUB_RC": "2", "STUB_STDERR": noise, "STUB_STDOUT": "out\x1b]0;t\x07\n",
+           "STUB_STDERR_HEX": (b"nul\x00byte \xff\xfe tail").hex()}
+    proc = _collect(tmp_path, env)
+    assert _state(proc)["RC"] == "1"
+    lines = proc.stderr.split("\n")
+    assert lines[-1] == ""
+    lines = lines[:-1]
+    assert len(lines) == 20, lines
+    assert all(len(ln) <= 300 for ln in lines)
+    assert all(all(0x20 <= ord(c) < 0x7F for c in ln) for ln in lines)
+    # the wizard's standard output reaches only the filter, never the installer's stdout
+    assert "out" not in proc.stdout.split("RC=")[0]
+    assert "out?]0;t?" in lines
+    assert "?[31mred?" in lines and "A" * 300 in lines
+    # the whole stays at 20 lines; a NUL and other bytes become '?'
+    proc = _collect(tmp_path, {**stub, "STUB_RC": "2",
+                               "STUB_STDERR_HEX": (b"nul\x00byte \xff\xfe tail\n").hex()})
+    assert proc.stderr == "nul?byte ?? tail\n"
 
 
 def test_no_headless_and_no_reconfigure_by_default(tmp_path: Path, stub: dict[str, str]) -> None:

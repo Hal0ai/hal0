@@ -398,34 +398,53 @@ _hal0_wizard_workdir() {
 # /var/lib/hal0 and can rename what is in it) cannot swap the file between this
 # check and the wizard's read. "Root" is the set the helper trusts: uid 0, or
 # the uid running a non-root --dev install.
+#
+# The same program copies a document the person gave (--answers) for the
+# wizard, with KIND `given`: that file is the person's, so there is no folder
+# walk and no owner or mode rule, but it is opened the way the reader opens it
+# (non-blocking, so a FIFO cannot hang root; no controlling terminal), must be
+# a regular file of at most 1 MiB, and is copied O_EXCL 0600 into the work
+# directory. Arguments: KIND SRC DEST [NOFOLLOW_PY]. Exit 0 copied, 1 no such
+# file (saved only), 3 anything else.
 _HAL0_SAVED_COPY_PY='
 import importlib.util, os, stat, sys
-spec = importlib.util.spec_from_file_location("hal0_nofollow", sys.argv[1])
-nf = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(nf)
-src, dest = sys.argv[2], sys.argv[3]
-parent, name = os.path.split(src)
-try:
-    dfd = nf.open_dir(parent, require_trusted_dir=True)
-except FileNotFoundError:
-    sys.exit(1)
-except OSError:
-    sys.exit(3)
-try:
+kind, src, dest = sys.argv[1], sys.argv[2], sys.argv[3]
+flags = os.O_RDONLY | os.O_NONBLOCK | os.O_NOCTTY | os.O_CLOEXEC
+if kind == "given":
     try:
-        fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_NOCTTY | os.O_CLOEXEC,
-                     dir_fd=dfd)
+        fd = os.open(src, flags)
+    except OSError:
+        sys.exit(3)
+    nf = None
+elif kind == "saved":
+    spec = importlib.util.spec_from_file_location("hal0_nofollow", sys.argv[4])
+    nf = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(nf)
+    parent, name = os.path.split(src)
+    try:
+        dfd = nf.open_dir(parent, require_trusted_dir=True)
     except FileNotFoundError:
         sys.exit(1)
     except OSError:
         sys.exit(3)
-finally:
-    os.close(dfd)
+    try:
+        try:
+            fd = os.open(name, flags | os.O_NOFOLLOW, dir_fd=dfd)
+        except FileNotFoundError:
+            sys.exit(1)
+        except OSError:
+            sys.exit(3)
+    finally:
+        os.close(dfd)
+else:
+    sys.exit(3)
 limit = 1 << 20
 with os.fdopen(fd, "rb") as fh:
     st = os.fstat(fh.fileno())
-    if (not stat.S_ISREG(st.st_mode) or st.st_uid not in nf._trusted_uids()
-            or stat.S_IMODE(st.st_mode) != 0o600 or st.st_nlink != 1):
+    if not stat.S_ISREG(st.st_mode) or st.st_size > limit:
+        sys.exit(3)
+    if nf is not None and (st.st_uid not in nf._trusted_uids()
+                           or stat.S_IMODE(st.st_mode) != 0o600 or st.st_nlink != 1):
         sys.exit(3)
     data = fh.read(limit + 1)
 if len(data) > limit:
@@ -442,8 +461,8 @@ _hal0_saved_answers_copy() {
     local dest="${1}" file="${HAL0_SAVED_ANSWERS_FILE:-}" rc=0
     [[ -n "${file}" ]] || return 1
     [[ -e "${file}" || -L "${file}" ]] || return 1
-    "${PY}" -I -c "${_HAL0_SAVED_COPY_PY}" "${REPO_ROOT:-}/src/hal0/security/nofollow.py" \
-        "${file}" "${dest}" </dev/null >/dev/null 2>&1 || rc=$?
+    "${PY}" -I -c "${_HAL0_SAVED_COPY_PY}" saved "${file}" "${dest}" \
+        "${REPO_ROOT:-}/src/hal0/security/nofollow.py" </dev/null >/dev/null 2>&1 || rc=$?
     case "${rc}" in
         0) return 0 ;;
         1) return 1 ;;
@@ -452,6 +471,86 @@ _hal0_saved_answers_copy() {
     _hal0_answers_warn "the saved answers ${file} are not a file only root wrote (root-owned, mode 0600, in a folder only root can change); the setup screens start without them"
     return 1
 }
+
+# _hal0_answers_check PATH: run the reader on PATH exactly as an apply would
+# (origin `file`), keep nothing it prints on standard output, and let its own
+# (escaped) messages through on standard error. Returns its status.
+_hal0_answers_check() {
+    local rc=0
+    local -a store_arg=()
+    _hal0_default_store_arg
+    "${PY}" -I "${_HAL0_ANSWERS_READER}" --origin file \
+        "${store_arg[@]+"${store_arg[@]}"}" -- "${1}" </dev/null >/dev/null || rc=$?
+    return "${rc}"
+}
+
+# _hal0_given_answers_copy DEST: the document the person gave (HAL0_ANSWERS_FILE)
+# for the wizard. The reader checks it first, as the apply would, so the wizard
+# never opens a file the reader has not accepted (a FIFO, a device, a huge
+# file); then a copy is made in the root-only work directory (see
+# _HAL0_SAVED_COPY_PY, kind `given`), and the reader checks the copy too, since
+# the person's file may have changed between the two opens. The wizard is handed
+# only DEST; the given path is not opened again. Returns 0 when DEST holds an
+# accepted copy, else 1 with the reason on standard error.
+_hal0_given_answers_copy() {
+    local dest="${1}" given="${HAL0_ANSWERS_FILE:-}" rc=0
+    if ! _hal0_answers_check "${given}"; then
+        echo "Stopped: the answers document was not accepted." >&2
+        return 1
+    fi
+    "${PY}" -I -c "${_HAL0_SAVED_COPY_PY}" given "${given}" "${dest}" \
+        </dev/null >/dev/null 2>&1 || rc=$?
+    if [[ "${rc}" -ne 0 ]]; then
+        rm -f -- "${dest}"
+        echo "error: the answers document changed or went away while it was being read" >&2
+        echo "Stopped: the answers document was not accepted." >&2
+        return 1
+    fi
+    if ! _hal0_answers_check "${dest}"; then
+        rm -f -- "${dest}"
+        echo "Stopped: the answers document was not accepted." >&2
+        return 1
+    fi
+    return 0
+}
+
+# What the wizard prints (it should print only one-line `hal0 setup: ...`
+# errors; its screens go to the terminal device) reaches the installer's
+# standard error, which is copied into a log other users can read, only through
+# this filter: every byte outside printable ASCII becomes `?`, a line is cut at
+# 300 characters, and at most 20 lines are passed on. The rest is read and
+# dropped, so the wizard never blocks on a full pipe. Lines are built from
+# bounded chunks, so a line with no end cannot fill memory.
+_HAL0_WIZARD_OUTPUT_PY='
+import os, sys
+table = bytes(b if 0x20 <= b < 0x7F else 0x3F for b in range(256))
+inp, out = sys.stdin.buffer, sys.stdout.buffer
+lines, cur, pending = 0, bytearray(), False
+def emit():
+    global lines, cur, pending
+    if lines < 20:
+        out.write(bytes(cur).translate(table) + b"\n")
+        out.flush()
+    lines += 1
+    cur, pending = bytearray(), False
+while True:
+    chunk = os.read(inp.fileno(), 65536)
+    if not chunk:
+        break
+    start = 0
+    while True:
+        nl = chunk.find(b"\n", start)
+        piece = chunk[start:] if nl < 0 else chunk[start:nl]
+        if len(cur) < 300:
+            cur += piece[: 300 - len(cur)]
+        pending = pending or bool(piece)
+        if nl < 0:
+            break
+        emit()
+        start = nl + 1
+if pending:
+    emit()
+'
 
 # _hal0_saved_store COPY: set _HAL0_SAVED_STORE to the model store the root-only
 # saved answers name, read through the reader (never parsed here) and picked
@@ -546,8 +645,14 @@ _hal0_wizard_call() {
     local dir="${1}" rc=0 headless=0 origin=wizard arg chosen="" line=""
     local out="${dir}/answers.json" secret="${dir}/hf-token.env"
     local chosen_out="${dir}/chosen-folder" saved_copy="${dir}/saved.json"
-    local -a cmd=()
+    local given_copy="${dir}/given.json"
+    local -a cmd=() status=()
     export -n line chosen
+    # A document the person gave is checked by the reader before anything else,
+    # and the wizard reads only a checked copy of it.
+    if [[ -n "${HAL0_ANSWERS_FILE:-}" ]]; then
+        _hal0_given_answers_copy "${given_copy}" || return 1
+    fi
     cmd=("${PY}" -I "${_HAL0_WIZARD_ENTRY_PATH}"
         --catalog "${_HAL0_WIZARD_CATALOG_PATH}"
         --models "${_HAL0_WIZARD_MODELS_PATH}")
@@ -568,7 +673,7 @@ _hal0_wizard_call() {
     # someone else must never be walked through with Enter on pre-filled
     # screens, and it must never earn the chosen-folder signal.
     if [[ -n "${HAL0_ANSWERS_FILE:-}" ]]; then
-        cmd+=(--answers "${HAL0_ANSWERS_FILE}")
+        cmd+=(--answers "${given_copy}")
         headless=1
     fi
     if [[ "${HAL0_NONINTERACTIVE:-0}" == "1" ]]; then
@@ -595,8 +700,18 @@ _hal0_wizard_call() {
     done
 
     # Standard input is not the wizard's: it asks on the terminal device, and a
-    # `curl | bash` install still has the script on standard input.
-    "${cmd[@]}" </dev/null || rc=$?
+    # `curl | bash` install still has the script on standard input. What it
+    # prints on standard output or error reaches the installer's standard error
+    # only through _HAL0_WIZARD_OUTPUT_PY. The filter ignores an interrupt, so
+    # it keeps draining while the wizard handles one. The wizard's own status is
+    # the first of the pipeline's.
+    if "${cmd[@]}" </dev/null 2>&1 \
+        | { trap '' INT; exec "${PY}" -I -c "${_HAL0_WIZARD_OUTPUT_PY}" >&2; }; then
+        status=("${PIPESTATUS[@]}")
+    else
+        status=("${PIPESTATUS[@]}")
+    fi
+    rc="${status[0]:-1}"
     case "${rc}" in
         0) ;;
         10 | 130) return "${rc}" ;;
