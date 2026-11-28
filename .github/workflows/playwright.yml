@@ -52,10 +52,23 @@ jobs:
           # it is available locally.
           MERGE_BASE="$(git merge-base "${BASE}" "${HEAD}" || echo "${BASE}")"
           echo "merge base: ${MERGE_BASE}"
-          if git diff --name-only "${MERGE_BASE}" "${HEAD}" | grep -qE '^(ui/|\.github/workflows/playwright\.yml$)'; then
+          # Capture the file list first, then test it (#3477). Piping git into
+          # `grep -q` let grep exit at its first match while git was still
+          # writing: git died of SIGPIPE, `pipefail` made the pipeline fail,
+          # and the `if` took the else branch. A pull request that changed
+          # this workflow (which sorts before ordinary paths) along with many
+          # other files was classified "no UI change", its shards were
+          # skipped, and the required check still reported green. With the
+          # list in a variable git always runs to completion; if git itself
+          # fails, `set -e` fails this step, which is red, never a silent skip.
+          FILES="$(git diff --name-only "${MERGE_BASE}" "${HEAD}")"
+          COUNT="$(grep -c . <<<"${FILES}" || true)"
+          if grep -qE '^(ui/|\.github/workflows/playwright\.yml$)' <<<"${FILES}"; then
             echo "ui=true" >> "$GITHUB_OUTPUT"
+            echo "classifier: ${COUNT} changed file(s), UI touched: γ shards run."
           else
             echo "ui=false" >> "$GITHUB_OUTPUT"
+            echo "classifier: ${COUNT} changed file(s), none under ui/ and not this workflow."
             echo "::notice::no ui/ change — γ shards skipped, summary reports."
           fi
 
