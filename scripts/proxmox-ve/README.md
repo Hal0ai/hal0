@@ -100,6 +100,13 @@ the container with `flm validate` and `hal0 doctor all`.
   forwards the nodes that already exist.
 - **No reverse proxy or TLS.** The dashboard listens on `0.0.0.0:8080` with
   no login by default. Keep the container on a trusted LAN.
+- **No DNS repair.** The container inherits the host's DNS servers. If the
+  host resolves through something a container cannot reach (a Tailscale or
+  other VPN resolver), the build still succeeds, because the engine injects
+  public DNS while it runs, and name resolution then fails after the first
+  restart: updates stop and the memory engine cannot start. Set `var_ns`
+  (for example `var_ns=1.1.1.1`) on such a host, or later run
+  `pct set <CTID> -nameserver 1.1.1.1`.
 - **No model store.** Models land on the container's disk. Bind-mount a
   host directory with `pct set <CTID> -mp0 ...` to keep them elsewhere.
 
