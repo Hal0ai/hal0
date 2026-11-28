@@ -3231,6 +3231,8 @@ fi
 #      releases. Verified BEFORE dpkg install; fail-soft if unreachable
 #      (NPU-less hal0 still ships — FLM trio gates on `flm validate`).
 #
+# The step runs only when the NPU device node is present, or with HAL0_NPU_SETUP=on.
+#
 # Refs: ADR-0009 (FLM trio NPU packing).
 ui_step "NPU prerequisites (FastFlowLM)" "~10-60s (apt hosts only)"
 
@@ -3288,7 +3290,7 @@ _npu_node="${HAL0_NPU_ACCEL_NODE:-/dev/accel/accel0}"
 if [[ "${HAL0_NPU_SETUP:-auto}" == "off" ]]; then
     info "HAL0_NPU_SETUP=off — NPU software not installed; unset it and re-run the installer to install it later"
 elif [[ "${HAL0_NPU_SETUP:-auto}" == "auto" && ! -e "${_npu_node}" ]]; then
-    info "no NPU found (no ${_npu_node}), so the NPU software is not installed; if an NPU is added or passed through later, re-run the installer, or set HAL0_NPU_SETUP=on"
+    info "no NPU device (${_npu_node}), so the NPU software is not installed. If this box has an NPU, load its driver (amdxdna) or pass the device into this container, then re-run the installer; or set HAL0_NPU_SETUP=on."
 elif [[ "${DEV_MODE}" -eq 1 ]]; then
     # Dev installs don't touch the host's apt or third-party package
     # sources — devs install once manually (see installer/README.md).
