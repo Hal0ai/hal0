@@ -110,7 +110,7 @@ The one-line form, `curl -fsSL https://hal0.dev/install.sh | sudo bash`,
 shows the same setup screens when you type it at a terminal. Over ssh without
 `-t`, or in a job with no terminal, there are no screens and the install is
 unattended; a script that runs it inside a terminal session sets
-`HAL0_NONINTERACTIVE=1`. An unattended run takes the Recommended setup. Where the GPU memory pool is at least 25 GB, that includes downloading the Qwen3.8 27B chat model (about 18.5 GB); set `HAL0_PULL_AGENT_MODEL=0` to skip it.
+`HAL0_NONINTERACTIVE=1`. An unattended run takes the Recommended setup without the large chat model; to download it on an unattended run, set `HAL0_PULL_AGENT_MODEL=1` or name it in an answers file (`models.starter`).
 
 ### What the installer asks
 

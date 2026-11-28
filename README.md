@@ -182,7 +182,7 @@ runs without stopping. The one-line `curl | sudo bash` install shows the
 screens too when a terminal can be opened; over ssh without `-t`, or in CI
 with no terminal, there are no screens and the install is unattended. A script
 that runs the installer inside a terminal session sets `HAL0_NONINTERACTIVE=1`
-or passes `--answers=FILE`. An unattended run takes the Recommended setup. Where the GPU memory pool is at least 25 GB, that includes downloading the Qwen3.8 27B chat model (about 18.5 GB); set `HAL0_PULL_AGENT_MODEL=0` to skip it. An upgrade reuses the answers saved by
+or passes `--answers=FILE`. An unattended run takes the Recommended setup without the large chat model; to download it on an unattended run, set `HAL0_PULL_AGENT_MODEL=1` or name it in an answers file (`models.starter`). An upgrade reuses the answers saved by
 the last install; a box installed before this change has none saved, so it is
 asked once. Add `--reconfigure` to be asked again. A component flag such as
 `--no-hermes` shows its row as fixed on the Customize screens (on the other
@@ -204,7 +204,7 @@ Full step list and the complete env-var table:
 | `HAL0_SKIP_SETUP=1` | Skip first-run seeding **and** the brain, agent and image model steps |
 | `--no-brain-model` / `HAL0_SKIP_BRAIN_MODEL=1` | Keep the seeding, skip the brain pull (`brain` stays model-less) |
 | `HAL0_BRAIN_MODEL=<id>` | Force a specific curated brain quant |
-| `HAL0_PULL_AGENT_MODEL=1` / `=0` | Download the chat model picked for this box / download none, without the screens |
+| `HAL0_PULL_AGENT_MODEL=1` / `=0` | Download the chat model picked for this box / download none, without the screens (an unattended run with it unset downloads none) |
 | `HAL0_IMAGE_MODELS=recommended` / `=<id>,<id>` / `=none` | Download starter image models / download none. Unset downloads none |
 | `HAL0_PY_AUTOINSTALL=1` | Let the installer install `python3.12` when the box has no Python in 3.12-3.14 |
 | `--no-owui` / `HAL0_SKIP_OPENWEBUI=1` | Skip Open WebUI |

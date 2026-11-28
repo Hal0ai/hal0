@@ -40,7 +40,6 @@ applying. Add those subsections to a version's section to surface them; see
 
 - **The one-line install now shows the setup screens to a person at a terminal.** `curl -fsSL https://hal0.dev/install.sh | sudo bash` used to take every default when piped. A run with a terminal attached now shows the screens and waits there, so a script that runs the installer inside a terminal session must set `HAL0_NONINTERACTIVE=1` or pass `--answers=FILE` with a JSON answers document; a run with no terminal is unattended as before.
 - **An unknown installer flag now stops the run.** The installer used to warn and carry on with its defaults. It now prints one line (`unknown flag: ... (run with --help for the list)`) and exits with status 1 before anything changes, so fix a mistyped flag in your script.
-- **An unattended install now downloads the large chat model where one fits.** The Recommended setup that an unattended run takes includes the Qwen3.8 27B chat model (about 18.5 GB), pulled only where the GPU memory pool is at least 25 GB; before, an unattended run pulled it only with `HAL0_PULL_AGENT_MODEL=1`. Set `HAL0_PULL_AGENT_MODEL=0` to keep the old behaviour.
 - **`hal0 setup` run by hand asks nothing.** It prints one line and stops. To change what was chosen at install, run the installer again with `--reconfigure`. The unattended forms the installer itself uses (`--auto`, `--answers`, `--plan`, `--emit-answers`) are unchanged.
 
 ### Added
