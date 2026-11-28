@@ -23,7 +23,7 @@ _SIDECAR = "/mnt/ai-models/qwopus3.6-27b-v2/mmproj-F32.mmproj"
 
 
 def _profile(vision: str = "auto") -> ProfileConfig:
-    return ProfileConfig(flags="-fa on -b 512 -ub 512 --parallel 1 --no-mmap", vision=vision)
+    return ProfileConfig(flags="-fa on -b 512 -ub 512 --parallel 1 -lm none", vision=vision)
 
 
 def _slot_cfg(**overrides: Any) -> dict[str, Any]:

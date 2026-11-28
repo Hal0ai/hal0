@@ -228,6 +228,7 @@ export const FLAG_ALIASES = {
   "-mg": "--main-gpu",
   "-np": "--parallel",
   "-kvu": "--kv-unified",
+  "-lm": "--load-mode",
   "-ngld": "--n-gpu-layers-draft",
   "-m": "--model",
   "-a": "--alias",

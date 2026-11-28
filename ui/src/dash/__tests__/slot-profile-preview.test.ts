@@ -167,7 +167,7 @@ describe('profileApplyPreview — Auto profile (no runtime opinion)', () => {
 
   it('still counts flags and still restarts — applying a tune is a restart', () => {
     const p = preview({
-      profile: { name: 'chat', runner: '', flags: '-fa on -b 512 --mlock' },
+      profile: { name: 'chat', runner: '', flags: '-fa on -b 512 -lm mlock' },
       baselineRunner: '',
       currentDevice: 'cpu',
     })
@@ -202,7 +202,7 @@ describe('profileApplyPreview — flag delta (profile vs outgoing profile, nothi
       profile: { name: 'next', runner: '', flags: '-b 2048' },
       baselineRunner: '',
       currentDevice: 'cpu',
-      currentProfile: { name: 'old', flags: '-b 2048 --mlock' },
+      currentProfile: { name: 'old', flags: '-b 2048 -lm mlock' },
     })
     expect(p!.flags).toBe(1)
   })

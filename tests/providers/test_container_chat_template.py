@@ -29,7 +29,7 @@ from hal0.providers.container import ContainerProvider, _llama_launch_plan
 
 def _moe_profile() -> ProfileConfig:
     return ProfileConfig(
-        flags="-fa on -ctk q8_0 -ctv q8_0 -b 512 -ub 512 --parallel 1 --no-mmap",
+        flags="-fa on -ctk q8_0 -ctv q8_0 -b 512 -ub 512 --parallel 1 -lm none",
         speculation="off",
     )
 

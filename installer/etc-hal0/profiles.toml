@@ -40,7 +40,7 @@
 # Example — a custom workload profile cloned from `chat`:
 #
 #   [profile.my-moe]
-#   flags       = "-fa on -ctk q8_0 -ctv q8_0 -b 8192 -ub 2048 --parallel 1 --no-mmap"
+#   flags       = "-fa on -ctk q8_0 -ctv q8_0 -b 8192 -ub 2048 --parallel 1 -lm none"
 #   ctx_size    = 32768
 #   vision      = "off"
 #   cloned_from = "chat"

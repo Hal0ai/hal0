@@ -216,7 +216,9 @@ and auth/TLS settings, llama.cpp's built-in preset switches), bare positional
 arguments or `--reasoning-format none`. Violations are a 400 with
 `slot.hardware_flag_denied`, `slot.managed_arg_denied`,
 `profiles.model_fact_flag_denied`, `slot.host_owned_flag_denied`,
-`slot.positional_arg_denied` or `slot.reasoning_format_none_denied`.
+`slot.positional_arg_denied` or `slot.reasoning_format_none_denied`. A flag
+llama-server has removed, such as `--no-mmap`, is a 422 with
+`slot.removed_flag_denied` that names the replacement.
 
 ## Publishing your own
 
