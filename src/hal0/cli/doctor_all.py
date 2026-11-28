@@ -2636,7 +2636,8 @@ def check_openwebui_memory_filter(
             key,
             label,
             _WARN,
-            f"Open WebUI answered {http_status} with a body hal0 does not understand; "
+            f"Open WebUI answered{f' HTTP {http_status}' if http_status else ''} with a body "
+            "hal0 does not understand; "
             "its Functions API may have changed in this Open WebUI version",
         )
     if http_status:
@@ -2645,7 +2646,7 @@ def check_openwebui_memory_filter(
             label,
             _WARN,
             f"Open WebUI answered HTTP {http_status} to the Functions request at {base_url}; "
-            "see its log (`journalctl -u openwebui`)",
+            "see its log (`journalctl -u hal0-openwebui -n 40`)",
         )
     why = f" ({state['reason']})" if state.get("reason") else ""
     return Check(

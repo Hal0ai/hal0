@@ -223,11 +223,14 @@ def inspect_hindsight_rag_function(
             "active": bool(existing.get("is_active")),
             "global": bool(existing.get("is_global")),
         }
+    except json.JSONDecodeError:
+        # A 2xx whose body is not JSON: Open WebUI answered, with something
+        # that is not its Functions API (a login page, a proxy's HTML).
+        return {"status": "unavailable", "function_id": FUNCTION_ID, "reason": "unexpected_body"}
     except (
         OSError,
         TimeoutError,
         ValueError,
-        json.JSONDecodeError,
         # Not an OSError: a listener that is not HTTP (BadStatusLine), a
         # malformed URL (InvalidURL), a cut-off body (IncompleteRead). A
         # diagnostic must report these, never raise through its caller.

@@ -60,6 +60,8 @@ def test_installed_current_active_and_global_passes(tmp_path: Path) -> None:
         ({"status": "absent"}, "restart hal0-api"),
         ({"status": "absent"}, "hal0 update component openwebui"),
         ({"status": "unavailable", "http_status": 500}, "answered HTTP 500"),
+        ({"status": "unavailable", "http_status": 500}, "journalctl -u hal0-openwebui"),
+        ({"status": "unavailable", "reason": "unexpected_body"}, "does not understand"),
         (
             {"status": "unavailable", "http_status": 200, "reason": "unexpected_body"},
             "does not understand",
@@ -197,3 +199,29 @@ def test_inspect_marks_an_unexpected_body() -> None:
         200,
         "unexpected_body",
     )
+
+
+def test_inspect_reads_a_body_that_is_not_json_as_an_answer() -> None:
+    """Open WebUI answered, with something that is not its Functions API."""
+    import json as _json
+
+    def request(method: str, path: str, payload: dict | None = None):
+        raise _json.JSONDecodeError("Expecting value", "<html>", 0)
+
+    out = fs.inspect_hindsight_rag_function(requester=request)
+    assert (out["status"], out["reason"]) == ("unavailable", "unexpected_body")
+
+
+def test_the_log_hint_names_the_unit_hal0_installs() -> None:
+    """The row's log hint must be a command that shows something: the unit is
+    the one the service registry names for Open WebUI."""
+    from hal0.services.registry import service_by_id
+
+    unit = service_by_id("openwebui").unit
+    assert unit == "hal0-openwebui.service"
+
+
+def test_an_unexpected_body_without_a_status_reads_cleanly(tmp_path: Path) -> None:
+    row, _ = _row(tmp_path, state={"status": "unavailable", "reason": "unexpected_body"})
+    assert "None" not in row.detail
+    assert "Open WebUI answered with a body hal0 does not understand" in row.detail
