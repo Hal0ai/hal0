@@ -73,13 +73,49 @@ def test_in_lxc_predicate_agrees_with_the_classifier() -> None:
         assert result.returncode == expected_rc, f"{kind}: {result.stderr}"
 
 
+def _classify(tmp_path: Path, marker: str | None, pid1: str) -> str:
+    run_dir = tmp_path / "run"
+    (run_dir / "systemd").mkdir(parents=True)
+    if marker is not None:
+        (run_dir / "systemd" / "container").write_text(marker, encoding="utf-8")
+    environ = tmp_path / "pid1-environ"
+    environ.write_bytes(pid1.encode())
+    uid_map = tmp_path / "uid_map"
+    uid_map.write_text("         0     100000      65536\n", encoding="utf-8")
+    result = _run(
+        "hal0_lxc_kind",
+        {
+            "HAL0_CONTAINER_RUN_DIR": str(run_dir),
+            "HAL0_BOX_RELEASE_FILE": str(tmp_path / "no-box-release"),
+            "HAL0_PID1_ENVIRON_FILE": str(environ),
+            "HAL0_UID_MAP_FILE": str(uid_map),
+        },
+    )
+    assert result.returncode == 0, result.stderr
+    return result.stdout.strip()
+
+
+def test_pid1_lxc_without_a_marker_is_lxc(tmp_path: Path) -> None:
+    assert _classify(tmp_path, None, "PATH=/bin\0container=lxc\0") == "lxc-unprivileged"
+
+
+def test_pid1_lxc_libvirt_without_a_marker_is_a_plain_container(tmp_path: Path) -> None:
+    assert _classify(tmp_path, None, "PATH=/bin\0container=lxc-libvirt\0") == "container"
+
+
+def test_marker_lxc_libvirt_is_a_plain_container(tmp_path: Path) -> None:
+    assert _classify(tmp_path, "lxc-libvirt\n", "") == "container"
+
+
 def test_classifier_is_used_not_reimplemented() -> None:
     """The old inline ``grep container=lxc /proc/1/environ`` checks are the
     thing this function replaces — a stray copy would drift from the
     privileged/unprivileged split and resurrect the wrong-remedy bug."""
     preflight = _PREFLIGHT.read_text(encoding="utf-8")
-    # One occurrence remains by design: the probe inside hal0_lxc_kind itself.
+    # One occurrence remains by design: the exact-match probe inside
+    # hal0_lxc_kind itself.
     assert preflight.count("container=lxc") == 1
+    assert "grep -qx 'container=lxc'" in preflight
 
     install_sh = (_REPO_ROOT / "installer" / "install.sh").read_text(encoding="utf-8")
     assert "hal0_lxc_kind" in install_sh

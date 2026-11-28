@@ -205,10 +205,15 @@ hal0_lxc_kind() {
         printf 'box\n'
         return 0
     fi
-    local marker_present=0 pid1_lxc=0
+    local marker_present=0 pid1_lxc=0 pid1_any=0
     [[ -f "${run_dir}/systemd/container" ]] && marker_present=1
-    grep -qa 'container=lxc' "${pid1_environ}" 2>/dev/null && pid1_lxc=1
-    if (( marker_present == 0 && pid1_lxc == 0 )); then
+    # PID 1's environment is NUL-separated; the whole value of the container
+    # entry must be exactly lxc, the way the marker's content is compared
+    # (libvirt's LXC says lxc-libvirt and is a plain container).
+    tr '\0' '\n' 2>/dev/null < "${pid1_environ}" | grep -qx 'container=lxc' && pid1_lxc=1
+    # Any other non-empty container entry still says "a container".
+    tr '\0' '\n' 2>/dev/null < "${pid1_environ}" | grep -q '^container=.' && pid1_any=1
+    if (( marker_present == 0 && pid1_any == 0 )); then
         printf 'none\n'
         return 0
     fi
@@ -216,7 +221,7 @@ hal0_lxc_kind() {
     # says nothing, so PID 1's environment decides then.
     local marker=""
     if (( marker_present == 1 )); then
-        IFS= read -r marker < "${run_dir}/systemd/container" 2>/dev/null || true
+        { IFS= read -r marker < "${run_dir}/systemd/container"; } 2>/dev/null || true
         marker="${marker//[[:space:]]/}"
     fi
     if [[ -n "${marker}" ]]; then
