@@ -219,7 +219,11 @@ class TestInstallShCallSiteGuard:
     @staticmethod
     def _guard_block() -> str:
         text = _INSTALL_SH.read_text(encoding="utf-8")
-        m = re.search(r"if ! preflight_python; then.*?\nfi\n", text, re.DOTALL)
+        m = re.search(
+            r"if ! preflight_python; then.*?\nfi\n(?=\n# `python3 -m venv` capability)",
+            text,
+            re.DOTALL,
+        )
         assert m is not None, "preflight_python guard block not found in install.sh"
         return m.group(0)
 
@@ -246,6 +250,8 @@ class TestInstallShCallSiteGuard:
         assert proc.returncode != 0
         assert "REACHED" not in proc.stdout
         assert "below hal0's floor" in proc.stderr
+        assert "could not be used" in proc.stdout  # warn stub writes to stdout
+        assert "attempting" not in proc.stdout
 
     def test_name_that_is_not_an_executable_stops_the_install(self, tmp_path: Path) -> None:
         proc = self._run_guard(tmp_path, "python3.99\\n", ())

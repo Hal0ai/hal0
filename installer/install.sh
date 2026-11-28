@@ -593,12 +593,14 @@ if ! preflight_python; then
     if ! command -v "${PY}" >/dev/null 2>&1; then
         die "python interpreter '${PY}' not found — install with: $(python_venv_hint)"
     fi
-    if resolved_py="$(HAL0_PY_AUTOINSTALL=1 resolve_main_python)" && [[ -n "${resolved_py}" && "${resolved_py}" != *$'\n'* ]] \
-        && command -v "${resolved_py}" >/dev/null 2>&1; then
+    resolved_name="$(HAL0_PY_AUTOINSTALL=1 resolve_main_python)" || resolved_name=""
+    if [[ -n "${resolved_name}" && "${resolved_name}" != *$'\n'* ]] && command -v "${resolved_name}" >/dev/null 2>&1; then
+        resolved_py="${resolved_name}"
         info "using ${resolved_py} for the main hal0 venv (default ${PY} is below hal0's 3.12 floor)"
         PY="${resolved_py}"
         export HAL0_PYTHON="${PY}"
     else
+        [[ -z "${resolved_name}" ]] || warn "the Python the installer just set up could not be used (unexpected answer from the interpreter lookup)"
         die "python '${PY}' is below hal0's floor (pyproject.toml requires-python >=3.12) and no compatible interpreter could be found or installed.
   install one manually, e.g.: $(pkg_install_cmd python3.12 python3.12-venv 2>/dev/null || echo 'install python3.12'), then re-run with HAL0_PYTHON=python3.12"
     fi
