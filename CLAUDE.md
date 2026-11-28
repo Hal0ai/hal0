@@ -46,8 +46,10 @@ Filing rules, for agents exactly as for people:
 3. Do not file a finding whose only impact is cosmetic unless the same
    session fixes it.
 
-A weekly routine triages `needs-triage`, picks `ready-for-agent` work, and
-posts a plain-English summary on the pinned "Weekly triage digest" issue.
+A weekly routine triages `needs-triage`, lists the `ready-for-agent` work to
+take next, compares the pinned runner images with their upstream releases,
+and posts a plain-English summary on the pinned "Weekly triage digest"
+issue. It opens no pull requests.
 Prefer filing an issue over documenting around a product bug.
 
 ## Planning

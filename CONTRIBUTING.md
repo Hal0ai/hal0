@@ -146,10 +146,11 @@ triaged, exactly one priority label. New issues also carry at least one
 `area:slots`, `area:api`, `area:agents`, `area:ui`, `area:runners`,
 `area:security`, `area:ci`, `area:docs`), so that everything touching one
 part of hal0 can be listed. `ready-for-agent` marks work an agent
-can finish on its own with tests. A weekly routine triages the inbox, fixes
-a few `ready-for-agent` issues, and posts a summary on the pinned "Weekly
+can finish on its own with tests. A weekly routine triages the inbox, lists
+the `ready-for-agent` issues to take next, compares the pinned runner images
+with their upstream releases, and posts a summary on the pinned "Weekly
 triage digest" issue, which is the quickest way to see the state of the
-queue.
+queue. It opens no pull requests.
 
 ## Planning a release
 
