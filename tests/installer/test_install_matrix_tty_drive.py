@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import signal
 import stat
 import subprocess
 import sys
@@ -32,6 +33,7 @@ def drive(
     *,
     extra: list[str] | None = None,
     command: list[str] | None = None,
+    stdin: str | None = None,
     wall: int = 30,
 ) -> tuple[subprocess.CompletedProcess[str], dict, str]:
     (tmp_path / "script.sh").write_text(script)
@@ -52,6 +54,7 @@ def drive(
         cwd=tmp_path,
         capture_output=True,
         text=True,
+        input=stdin,
         timeout=wall,
         check=False,
     )
@@ -196,14 +199,127 @@ def test_cpu_consent_rule_matches_installer_prompt() -> None:
     assert re.search(rx, "Continue with a CPU-only install anyway? [y/N] ")
 
 
-def test_terminal_defaults_match_installer_prompts() -> None:
+def _installer_prompts() -> list[str]:
+    """Every prompt string install.sh can put on the terminal."""
+    src = (REPO / "installer" / "install.sh").read_text()
+    prompts = re.findall(r'^\s*_tty_read \w+ "([^"]+)"', src, flags=re.M)
+    confirm = re.search(r"printf '%s' \"([^\"]+)\" >/dev/tty", src)
+    assert confirm, "CPU-only prompt not found in install.sh"
+    return [*prompts, confirm.group(1)]
+
+
+def test_terminal_defaults_cover_every_installer_prompt() -> None:
+    prompts = _installer_prompts()
+    assert len(prompts) >= 6, prompts
     rules = _rules("terminal-defaults.tsv")
-    prompts = [
-        "Where should downloaded models live? [/srv/models]: ",
-        "HuggingFace token (input hidden, Enter to skip): ",
-        "Continue with a CPU-only install anyway? [y/N] ",
-    ]
-    assert len(rules) == len(prompts)
-    for (rx, _), prompt in zip(rules, prompts):
-        assert re.search(rx, prompt), (rx, prompt)
-    assert [r for _, r in rules] == ["\\n", "\\n", "y\\n"]
+    for prompt in prompts:
+        hits = [rx for rx, _ in rules if re.search(rx, prompt)]
+        assert len(hits) == 1, (prompt, hits)
+    # No rule may be dead: each one answers some installer prompt, except the
+    # component checklist drawn by installer/lib/ui.sh.
+    ui = (REPO / "installer" / "lib" / "ui.sh").read_text()
+    assert "a) defaults  b) bare inference  p) pick  [a]" in ui
+    checklist = "a) defaults  b) bare inference  p) pick  [a]: "
+    texts = [*prompts, checklist]
+    for rx, _ in rules:
+        assert any(re.search(rx, t) for t in texts), rx
+
+
+def test_terminal_defaults_replies() -> None:
+    replies = dict(_rules("terminal-defaults.tsv"))
+    cpu = [r for rx, r in replies.items() if "CPU-only" in rx]
+    assert cpu == ["y\\n"]
+    assert [r for rx, r in replies.items() if "CPU-only" not in rx] == ["\\n"] * 6
+
+
+def test_match_buffer_is_bounded(tmp_path: Path) -> None:
+    script = (
+        "i=0; while [ $i -lt 40000 ]; do\n"
+        '  echo "package install log line $i padding padding padding padding padding padding"\n'
+        "  i=$((i+1))\ndone\n"
+        'read -r -p "Continue? [y/N] " a < /dev/tty\necho "got:$a"\n'
+    )
+    started = time.monotonic()
+    proc, res, text = drive(tmp_path, script, "Continue\\?\ty\\n\n", wall=60)
+    elapsed = time.monotonic() - started
+    assert proc.returncode == 0
+    assert res["questions_answered"] == 1
+    assert "got:y" in text
+    assert len(text) > 3_000_000
+    assert elapsed < 25
+
+
+def test_command_runs_with_default_signal_dispositions(tmp_path: Path) -> None:
+    proc, res, text = drive(tmp_path, "grep SigIgn /proc/self/status\n", "")
+    assert proc.returncode == 0
+    mask = int(re.search(r"SigIgn:\s*([0-9a-f]+)", text).group(1), 16)  # type: ignore[union-attr]
+    assert not mask & (1 << (signal.SIGPIPE - 1))
+    assert not mask & (1 << (signal.SIGXFSZ - 1))
+
+
+def test_pty_has_a_24x80_window(tmp_path: Path) -> None:
+    proc, _, text = drive(tmp_path, "stty size < /dev/tty\n", "")
+    assert proc.returncode == 0
+    assert "24 80" in text
+
+
+def test_driver_stdin_is_not_forwarded(tmp_path: Path) -> None:
+    script = 'read -r -t 1 a < /dev/tty || true\necho "got:[$a]"\n'
+    proc, _, text = drive(tmp_path, script, "", stdin="stray\n")
+    assert proc.returncode == 0
+    assert "got:[]" in text
+
+
+def test_existing_output_files_are_recreated_0600(tmp_path: Path) -> None:
+    for name in ("transcript.txt", "result.json"):
+        old = tmp_path / name
+        old.write_text("old")
+        old.chmod(0o644)
+    proc, _, _ = drive(tmp_path, "exit 0\n", "")
+    assert proc.returncode == 0
+    for name in ("transcript.txt", "result.json"):
+        assert stat.S_IMODE((tmp_path / name).stat().st_mode) == 0o600
+
+
+def test_child_that_closes_its_terminal_is_not_reported_as_killed(tmp_path: Path) -> None:
+    script = "exec 0<&- 1>&- 2>&-\nsleep 1\nexit 5\n"
+    proc, res, _ = drive(tmp_path, script, "")
+    assert proc.returncode == 5
+    assert res["exit_code"] == 5
+
+
+def test_result_written_when_driver_is_terminated(tmp_path: Path) -> None:
+    (tmp_path / "script.sh").write_text("echo ready\nsleep 60\n")
+    (tmp_path / "answers.tsv").write_text("")
+    drv = subprocess.Popen(
+        [
+            sys.executable, "-I", str(DRIVER),
+            "--answers", str(tmp_path / "answers.tsv"),
+            "--transcript", str(tmp_path / "transcript.txt"),
+            "--result", str(tmp_path / "result.json"),
+            "--", "bash", "script.sh",
+        ],
+        cwd=tmp_path,
+    )
+    try:
+        for _ in range(100):
+            t = tmp_path / "transcript.txt"
+            if t.exists() and b"ready" in t.read_bytes():
+                break
+            time.sleep(0.1)
+        else:
+            pytest.fail("child never printed")
+        drv.send_signal(signal.SIGTERM)
+        assert drv.wait(timeout=20) == 128 + signal.SIGTERM
+    finally:
+        if drv.poll() is None:
+            drv.kill()
+    res = json.loads((tmp_path / "result.json").read_text())
+    assert res["exit_code"] == 128 + signal.SIGTERM
+
+
+def test_unanswered_tail_is_plain_text(tmp_path: Path) -> None:
+    script = 'printf "\\033[1;31mSecret handshake?\\033[0m "\nsleep 30\n'
+    _, res, _ = drive(tmp_path, script, "", extra=["--idle-timeout", "2"])
+    assert "Secret handshake?" in res["unanswered_tail"]
+    assert "\x1b" not in res["unanswered_tail"]

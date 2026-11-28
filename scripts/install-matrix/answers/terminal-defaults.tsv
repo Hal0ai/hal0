@@ -1,5 +1,12 @@
-# Accept the default at every interactive prompt (installer/install.sh, _tty_read callers),
-# plus the CPU-only consent question (_confirm_cpu_only).
+# Accept the default at every prompt an interactive install can show.
+# Prompt texts come from installer/install.sh (_tty_read callers and
+# _confirm_cpu_only) and installer/lib/ui.sh (ui_component_picker).
+# The component checklist opens with the preset line
+# "a) defaults  b) bare inference  p) pick  [a]"; Enter takes a) defaults.
+a\) defaults  b\) bare inference  p\) pick	\n
 Where should downloaded models live\?	\n
 HuggingFace token \(input hidden, Enter to skip\)	\n
+Enable Hermes' terminal tool \(run commands as a root-equivalent user\)\?	\n
+Download the agent model now\?	\n
+Image models to download \(numbers, 'recommended', or Enter to skip\)	\n
 Continue with a CPU-only install anyway\?	y\n
