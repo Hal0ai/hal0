@@ -53,6 +53,10 @@ curl -fsSL https://hal0.dev/install.sh | sudo bash
 > the memory embedder changes only through `hal0 memory embedder switch`, and
 > an existing memory store stays on its banks until `hal0 memory migrate
 > fold-in` moves it.
+> Coming from 1.8.1 or earlier, read
+> [Upgrading to 1.8.2](docs/guides/update-and-rollback-release-notes.mdx#upgrading-to-182)
+> as well: a box whose Open WebUI has been used needs a backup of
+> `/var/lib/hal0/openwebui` before the update.
 > The project has followed semver since v1.0.0; a minor release's
 > **Breaking** notes flag behaviour changes an operator or a script may
 > notice. Upgrades start at 1.5.0; on anything older, read
