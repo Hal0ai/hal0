@@ -16,6 +16,7 @@ from typing import Any
 CATALOG_VERSION = 1
 KNOWN_NEEDS = frozenset({"podman", "gpu", "npu_device", "flm_build", "memory_python"})
 REQUIRED_PRESETS = ("recommended", "minimal")
+REQUIRED_QUESTIONS = ("setup_type", "cpu_only", "model_store")  # the screens index these
 
 
 class CatalogError(ValueError):
@@ -217,6 +218,9 @@ def load_catalog(path: Path, models_path: Path | None = None) -> Catalog:
     data = _read_object(path)
     questions = [_question(path, q) for q in _list(path, data, "questions")]
     _unique(path, "question", [q.id for q in questions])
+    for qid in REQUIRED_QUESTIONS:
+        if all(q.id != qid for q in questions):
+            raise CatalogError(f"{path}: question '{qid}' is missing")
     components = [_component(path, c) for c in _list(path, data, "components")]
     _unique(path, "component", [c.id for c in components])
 

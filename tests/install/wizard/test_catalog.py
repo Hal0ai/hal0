@@ -221,3 +221,16 @@ def test_a_preset_value_that_is_not_finite_is_refused(catalog_path: Path, tmp_pa
     p.write_text(json.dumps(data))
     with pytest.raises(CatalogError, match=r"network\.port"):
         load_catalog(p)
+
+
+@pytest.mark.parametrize("qid", ["setup_type", "cpu_only", "model_store"])
+def test_a_catalog_without_a_question_the_screens_need_is_refused(
+    catalog_path: Path, tmp_path: Path, qid: str
+) -> None:
+    data = json.loads(catalog_path.read_text())
+    data["questions"] = [q for q in data["questions"] if q["id"] != qid]
+    p = tmp_path / "c.json"
+    p.write_text(json.dumps(data))
+    with pytest.raises(CatalogError, match=f"question '{qid}' is missing") as err:
+        load_catalog(p)
+    assert str(p) in str(err.value)

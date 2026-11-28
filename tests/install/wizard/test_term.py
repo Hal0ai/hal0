@@ -373,12 +373,20 @@ def test_a_signal_while_closing_still_restores_the_terminal(
         raise _Boom
 
     previous = signal.signal(signal.SIGTERM, raise_boom)
+    caught: list[_Boom] = []
     try:
         monkeypatch.setattr(termios, "tcsetattr", signal_first)
-        with pytest.raises(_Boom), Terminal(slave_path, raw=True):
-            armed.append(True)
+        try:
+            with Terminal(slave_path, raw=True):
+                armed.append(True)
+            # The held signal is handled once the mask returns, a few steps later.
+            for _ in range(100_000):
+                pass
+        except _Boom as exc:
+            caught.append(exc)
     finally:
         signal.signal(signal.SIGTERM, previous)
+    assert caught and not armed
     assert _attrs(slave_path) == before
 
 

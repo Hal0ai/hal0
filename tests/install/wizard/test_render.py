@@ -9,7 +9,7 @@ from hal0.install.wizard.catalog import Catalog
 from hal0.install.wizard.document import Override
 from hal0.install.wizard.facts import Facts
 from hal0.install.wizard.flow import State, press, start, view
-from hal0.install.wizard.flow_model import View
+from hal0.install.wizard.flow_model import Row, Screen, View
 from hal0.install.wizard.render import render, strip_ansi
 
 ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
@@ -265,3 +265,49 @@ def test_an_information_row_gets_no_lead_mark_when_the_cursor_is_on_it(
     assert review.cursor == 0
     lines = _lines(review, 80)
     assert not any(x.startswith(" > ") for x in lines)
+
+
+_OWN_CODES = ("\x1b[38;5;214m", "\x1b[2m", "\x1b[0m")
+
+
+def _without_own_codes(lines: list[str]) -> str:
+    text = "\n".join(lines)
+    for code in _OWN_CODES:
+        text = text.replace(code, "")
+    return text
+
+
+def _models_view(catalog: Catalog, facts: Facts, label: str) -> View:
+    ladder = tuple(
+        replace(r, label=label) if r.model == "small-1" else r for r in catalog.model_ladder
+    )
+    return view(run(to_jobs(replace(catalog, model_ladder=ladder), facts), "ENTER"))
+
+
+@pytest.mark.parametrize("plain", [False, True])
+@pytest.mark.parametrize("width", [30, 80])
+def test_a_label_from_the_models_file_cannot_drive_the_terminal(
+    ladder_catalog: Catalog, usable_facts: Facts, plain: bool, width: int
+) -> None:
+    facts = replace(usable_facts, gpu_pool_gb=96.0)
+    bad = "Small\x1b[2J\nGone"
+    hostile = render(_models_view(ladder_catalog, facts, bad), width=width, plain=plain, color=True)
+    clean = render(
+        _models_view(ladder_catalog, facts, "S" * len(bad)), width=width, plain=plain, color=True
+    )
+    shown = _without_own_codes(hostile)
+    assert "\x1b" not in shown
+    assert all("\n" not in line and "\r" not in line for line in hostile)
+    assert "Small?[2J?Gone" in shown.replace("\n", "")
+    assert len(hostile) == len(clean)
+
+
+def test_every_drawn_text_is_cleaned_of_control_characters() -> None:
+    dirty = "a\x1b]0;x\x07b\rc\x7fd\te"
+    row = Row("r", dirty, dirty, "choice", None, "open", dirty)
+    v = View(Screen.MODELS, dirty, dirty, (dirty,), (row,), 0, dirty, dirty, dirty)
+    for plain in (False, True):
+        out = _without_own_codes(render(v, width=200, plain=plain, color=True))
+        assert not any(ord(c) < 0x20 and c != "\n" for c in out)
+        assert "\x7f" not in out
+        assert "a?]0;x?b?c?d?e" in out

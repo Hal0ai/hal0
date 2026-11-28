@@ -1209,3 +1209,15 @@ def test_a_keyboard_interrupt_inside_the_screens_is_still_130(
     out = tmp_path / "a.json"
     argv = ["--catalog", str(catalog_path), "--out", str(out), "--tty", pty_pair[1]]
     assert cli.main(argv, environ={"TERM": "xterm"}) == 130 and not out.exists()
+
+
+def test_a_catalog_without_the_consent_question_is_a_usage_error_on_the_headless_path(
+    catalog_path: Path, tmp_path: Path, consent_facts_path: Path
+) -> None:
+    data = json.loads(catalog_path.read_text())
+    data["questions"] = [q for q in data["questions"] if q["id"] != "cpu_only"]
+    bare = _write_json(tmp_path / "bare.json", data)
+    out = tmp_path / "a.json"
+    r = wizard("--catalog", bare, "--facts", consent_facts_path, "--out", out, "--headless")
+    assert r.returncode == 2 and not out.exists()
+    assert r.stderr == f"hal0 setup: {bare}: question 'cpu_only' is missing\n"

@@ -7,6 +7,7 @@ Width counts visible characters and treats every character as one column; wide
 from __future__ import annotations
 
 import re
+from dataclasses import replace
 
 from .flow_model import Row, View
 
@@ -20,8 +21,34 @@ _Line = list[_Piece]
 _Segment = tuple[str, str, str, bool]  # (text, style, separator before it, start a new line)
 
 
+# Text comes from input files too: no control character may reach the terminal.
+_CONTROLS = {**{code: "?" for code in range(0x20)}, 0x7F: "?"}
+
+
 def strip_ansi(text: str) -> str:
     return _ANSI.sub("", text)
+
+
+def _clean(text: str) -> str:
+    return text.translate(_CONTROLS)
+
+
+def _cleaned(view: View) -> View:
+    """The view with every control character in its text replaced by `?`."""
+    rows = tuple(
+        replace(r, label=_clean(r.label), detail=_clean(r.detail), note=_clean(r.note))
+        for r in view.rows
+    )
+    return replace(
+        view,
+        title=_clean(view.title),
+        position=_clean(view.position),
+        intro=tuple(_clean(t) for t in view.intro),
+        rows=rows,
+        editing=None if view.editing is None else _clean(view.editing),
+        error=None if view.error is None else _clean(view.error),
+        hint=_clean(view.hint),
+    )
 
 
 def _length(line: _Line) -> int:
@@ -196,7 +223,12 @@ def _plain_hint(view: View) -> str:
 
 
 def render(view: View, *, width: int, plain: bool, color: bool) -> list[str]:
-    """The screen as lines no wider than `width - 1` visible characters."""
+    """The screen as lines no wider than `width - 1` visible characters.
+
+    Control characters in the view's text are drawn as `?`; only the renderer's
+    own colour codes reach the terminal.
+    """
+    view = _cleaned(view)
     avail = max(width - 1, 1)
     colored = color and not plain
     lines: list[_Line] = _title_lines(view, avail)
