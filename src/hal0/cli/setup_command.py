@@ -37,7 +37,7 @@ from hal0.cli._shared import _api_base, _auth_headers, _client_kwargs
 from hal0.config import paths
 from hal0.config.schema import HardwareInfo
 from hal0.hardware.probe import HardwareProbe, HardwareProbeError
-from hal0.install.extensions import EXTENSIONS, get_extension
+from hal0.install.extensions import EXTENSIONS
 from hal0.install.orchestrate import Selections, SlotSelection
 from hal0.install.profile_derive import npu_healthy
 from hal0.registry.model_store import describe_store_state
@@ -67,11 +67,15 @@ _SETUP_SLOTS = {
 #: static seed (installer/etc-hal0/slots/flm.toml).
 _BRAIN_SLOT = ("brain", 8089)
 
-#: Capabilities scaffolded (empty, no model) by ``--auto``. ``coder`` is added
-#: separately, gated on an agent extension. ``apply_setup`` derives each slot's
-#: device and skips any that don't apply to the hardware (e.g. NPU-only ``stt``
-#: without ``npu_opt_in``).
-_SCAFFOLD_CAPS = ("chat", "embed", "rerank", "stt", "tts")
+#: Capabilities scaffolded (empty, no model) by ``--auto``: ``chat`` (the
+#: ``agent`` slot) plus the ``brain`` scaffold below. These are exactly the
+#: slots of ``hal0.install.static_seeds.FRESH_INSTALL_SEEDS`` that need a
+#: scaffold (``memory`` comes from its seed file). ``embed``, ``rerank``,
+#: ``stt``, ``tts`` and ``coder`` are created on request
+#: (``ensure_seed_slot``), not by ``--auto``. ``stt`` is served by the NPU and
+#: returns with the NPU plan. An answers document's ``slots`` entries are
+#: unaffected.
+_SCAFFOLD_CAPS = ("chat",)
 
 
 def _api_reachable(timeout: float = 0.5) -> bool:
@@ -87,11 +91,6 @@ def _api_reachable(timeout: float = 0.5) -> bool:
         return r.status_code < 500
     except Exception:
         return False
-
-
-def _kind(ext_id: str) -> str | None:
-    e = get_extension(ext_id)
-    return e.kind if e else None
 
 
 def _existing_slot_names() -> frozenset[str]:
@@ -125,10 +124,9 @@ def build_auto_selections(
     unset for the operator to choose later.  We never pick a model for the user.
 
     When *with_extensions* is ``False`` every extension is disabled (all keys
-    present, all values ``False``).  The coder slot is gated on an agent
-    extension being enabled, so it is skipped when extensions are off.  The
-    ``agent`` slot (the chat capability's slot — ADR-0023's LLM anchor) and
-    the ``brain`` scaffold are always included.
+    present, all values ``False``).  The ``agent`` slot (the chat capability's
+    slot — ADR-0023's LLM anchor) and the ``brain`` scaffold are always
+    included; no other slot is scaffolded, whatever the extensions.
 
     When *with_slots* is ``False`` NO model picks are seeded at all — the
     returned selection has an empty slot list and no ComfyUI capability
@@ -173,13 +171,6 @@ def build_auto_selections(
         brain_name, brain_port = _BRAIN_SLOT
         if brain_name not in existing_slots:
             slots.append(SlotSelection("chat", brain_name, brain_port, None))
-        # Coder slot only when an agent extension is enabled (and not present).
-        if (
-            any(_kind(eid) == "agent" and on for eid, on in ext.items())
-            and "coder" not in existing_slots
-        ):
-            name, port = _SETUP_SLOTS["coder"]
-            slots.append(SlotSelection("coder", name, port, None))
     return Selections(
         storage_dir=storage_dir,
         slots=slots,
