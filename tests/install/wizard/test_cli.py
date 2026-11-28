@@ -1250,3 +1250,316 @@ def test_the_unchecked_wording_lives_in_one_place() -> None:
         p.name for p in package.glob("*.py") if "could not be checked on this box" in p.read_text()
     ]
     assert owners == ["flow_model.py"]
+
+
+# ------------------------------------------------- the chosen-folder signal
+
+NOT_THERE = "hal0 setup: --chosen-folder-out must name a path that does not exist"
+CUSTOM_KEYS = [DOWN, DOWN, ENTER]
+
+
+def _screens_run(
+    spawn: Callable[..., subprocess.Popen[str]],
+    pty_pair: tuple[int, str],
+    keys: list[bytes],
+    *args: object,
+    env: dict[str, str] | None = None,
+) -> int:
+    """Start the wizard on the pty, type the keys once the first screen is up, return the exit code."""
+    master, slave = pty_pair
+    p = spawn("--tty", slave, *args, env=env)
+    wait_for_output(master)
+    for key in keys:
+        os.write(master, key)
+    return wait_exit(p, master)[0]
+
+
+def test_three_enters_record_the_short_path_folder(
+    catalog_path: Path,
+    tmp_path: Path,
+    pty_pair: tuple[int, str],
+    spawn: Callable[..., subprocess.Popen[str]],
+) -> None:
+    out, mark = tmp_path / "a.json", tmp_path / "folder"
+    code = _screens_run(
+        spawn,
+        pty_pair,
+        [ENTER * 3],
+        "--catalog",
+        catalog_path,
+        "--out",
+        out,
+        "--chosen-folder-out",
+        mark,
+    )
+    assert code == 0
+    assert mark.read_bytes() == b"/var/lib/hal0/models\n"
+    assert stat.S_IMODE(mark.stat().st_mode) == 0o600
+
+
+def test_a_folder_typed_on_the_folder_screen_is_recorded(
+    catalog: Catalog,
+    catalog_path: Path,
+    tmp_path: Path,
+    pty_pair: tuple[int, str],
+    spawn: Callable[..., subprocess.Popen[str]],
+) -> None:
+    master, slave = pty_pair
+    out, mark, folder = tmp_path / "a.json", tmp_path / "folder", tmp_path / "my models"
+    p = spawn(
+        "--catalog",
+        catalog_path,
+        "--out",
+        out,
+        "--tty",
+        slave,
+        "--chosen-folder-out",
+        mark,
+        env={"HAL0_PLAIN": "1"},
+    )
+    screens = _Screens(master)
+    screens.answer(catalog.questions["setup_type"].title, "")
+    screens.wait(catalog.questions["model_store"].title)
+    screens.wait("> ")
+    match = re.search(rb"(\d+)\) Type another folder\.\.\.", screens.seen)
+    assert match is not None
+    os.write(master, match.group(1) + b"\n")
+    screens.wait("Type the value and press Enter")
+    screens.wait("> ")
+    os.write(master, str(folder).encode() + b"\n")
+    screens.answer("Ready to install", "")
+    assert wait_exit(p, master)[0] == 0
+    assert mark.read_text() == f"{folder}\n"
+    assert json.loads(out.read_text())["model_store"]["path"] == str(folder)
+
+
+def test_customize_that_leaves_the_folder_alone_records_nothing(
+    catalog_path: Path,
+    tmp_path: Path,
+    pty_pair: tuple[int, str],
+    spawn: Callable[..., subprocess.Popen[str]],
+) -> None:
+    out, mark = tmp_path / "a.json", tmp_path / "folder"
+    code = _screens_run(
+        spawn,
+        pty_pair,
+        [*CUSTOM_KEYS, ENTER * 8],
+        "--catalog",
+        catalog_path,
+        "--out",
+        out,
+        "--chosen-folder-out",
+        mark,
+    )
+    assert code == 0 and out.exists() and not mark.exists()
+    assert json.loads(out.read_text())["install"]["type"] == "custom"
+
+
+def test_customize_with_the_folder_changed_records_the_new_folder(
+    catalog_path: Path,
+    tmp_path: Path,
+    pty_pair: tuple[int, str],
+    spawn: Callable[..., subprocess.Popen[str]],
+) -> None:
+    out, mark = tmp_path / "a.json", tmp_path / "folder"
+    typed = [c.encode() for c in "/srv/m"]
+    code = _screens_run(
+        spawn,
+        pty_pair,
+        [*CUSTOM_KEYS, ENTER, ENTER, b" ", *typed, ENTER, ENTER * 8],
+        "--catalog",
+        catalog_path,
+        "--out",
+        out,
+        "--chosen-folder-out",
+        mark,
+    )
+    assert code == 0
+    assert json.loads(out.read_text())["model_store"]["path"] == "/srv/m"
+    assert mark.read_text() == "/srv/m\n"
+
+
+def test_a_fresh_install_pressing_enter_on_a_prefilled_folder_records_it(
+    catalog_path: Path,
+    tmp_path: Path,
+    pty_pair: tuple[int, str],
+    saved_path: Path,
+    spawn: Callable[..., subprocess.Popen[str]],
+) -> None:
+    mark = tmp_path / "folder"
+    code = _screens_run(
+        spawn,
+        pty_pair,
+        [ENTER * 3],
+        "--catalog",
+        catalog_path,
+        "--saved",
+        saved_path,
+        "--out",
+        tmp_path / "a.json",
+        "--chosen-folder-out",
+        mark,
+    )
+    assert code == 0 and mark.read_text() == f"{tmp_path}\n"
+
+
+def test_a_run_without_screens_records_nothing(
+    catalog_path: Path,
+    tmp_path: Path,
+    pty_pair: tuple[int, str],
+    upgrade_facts_path: Path,
+    saved_path: Path,
+) -> None:
+    base = ["--catalog", catalog_path, "--chosen-folder-out"]
+    cases: list[tuple[list[object], dict[str, str], str | None]] = [
+        (["--headless"], {}, pty_pair[1]),
+        ([], {"HAL0_NONINTERACTIVE": "1"}, pty_pair[1]),
+        ([], {}, str(tmp_path / "absent-terminal")),
+        (["--facts", upgrade_facts_path, "--saved", saved_path], {}, pty_pair[1]),
+    ]
+    for number, (extra, env, tty) in enumerate(cases):
+        mark = tmp_path / f"folder{number}"
+        r = wizard(*base, mark, "--out", tmp_path / f"a{number}.json", *extra, env=env, tty=tty)
+        assert r.returncode == 0, (number, r.stderr)
+        assert not mark.exists(), number
+    assert read_all(pty_pair[0]) == b""
+
+
+@pytest.mark.parametrize("how", ["quit", "interrupt", "stop"])
+def test_quit_interrupt_and_stop_record_nothing(
+    how: str,
+    catalog_path: Path,
+    tmp_path: Path,
+    pty_pair: tuple[int, str],
+    spawn: Callable[..., subprocess.Popen[str]],
+) -> None:
+    out, mark = tmp_path / "a.json", tmp_path / "folder"
+    facts: list[object] = []
+    if how == "stop":
+        facts = [
+            "--facts",
+            _facts_file(tmp_path, "stop.json", gpu={"outcome": "stop", "reason": "no_device"}),
+        ]
+    keys = {"quit": [ENTER, b"q"], "interrupt": [ENTER, b"\x03"], "stop": [ENTER]}[how]
+    code = _screens_run(
+        spawn, pty_pair, keys, "--catalog", catalog_path, *facts, "--out", out,
+        "--chosen-folder-out", mark,
+    )  # fmt: skip
+    assert code == {"quit": 10, "interrupt": 130, "stop": 11}[how]
+    assert not out.exists() and not mark.exists()
+
+
+@pytest.mark.parametrize("fixer", ["flag", "variable"])
+def test_a_folder_fixed_by_a_flag_or_variable_records_nothing(
+    fixer: str,
+    catalog_path: Path,
+    tmp_path: Path,
+    pty_pair: tuple[int, str],
+    spawn: Callable[..., subprocess.Popen[str]],
+) -> None:
+    out, mark = tmp_path / "a.json", tmp_path / "folder"
+    args: list[object] = ["--catalog", catalog_path, "--out", out, "--chosen-folder-out", mark]
+    env: dict[str, str] = {}
+    if fixer == "flag":
+        args += ["--", "--models-dir=/x/y"]
+    else:
+        env["HAL0_MODELS_DIR"] = "/x/y"
+    code = _screens_run(spawn, pty_pair, [ENTER * 3], *args, env=env)
+    assert code == 0
+    assert json.loads(out.read_text())["model_store"]["path"] == "/x/y"
+    assert not mark.exists()
+
+
+@pytest.mark.parametrize("kind", ["file", "folder", "dangling"])
+@pytest.mark.parametrize("headless", [True, False])
+def test_an_existing_path_is_refused_untouched(
+    kind: str, headless: bool, catalog_path: Path, tmp_path: Path, pty_pair: tuple[int, str]
+) -> None:
+    mark, out = tmp_path / "folder", tmp_path / "a.json"
+    if kind == "file":
+        mark.write_text("mine")
+    elif kind == "folder":
+        mark.mkdir()
+    else:
+        mark.symlink_to(tmp_path / "nowhere")
+    r = wizard(
+        "--catalog",
+        catalog_path,
+        "--out",
+        out,
+        "--chosen-folder-out",
+        mark,
+        *(["--headless"] if headless else []),
+        tty=pty_pair[1],
+    )
+    assert r.returncode == 2 and r.stderr == NOT_THERE + "\n" and r.stdout == ""
+    assert not out.exists() and read_all(pty_pair[0]) == b""
+    if kind == "file":
+        assert mark.read_text() == "mine"
+    elif kind == "folder":
+        assert mark.is_dir() and not list(mark.iterdir())
+    else:
+        assert mark.is_symlink() and not (tmp_path / "nowhere").exists()
+
+
+def test_the_folder_is_nowhere_in_the_document_but_its_own_key(
+    catalog: Catalog,
+    catalog_path: Path,
+    tmp_path: Path,
+    pty_pair: tuple[int, str],
+    spawn: Callable[..., subprocess.Popen[str]],
+) -> None:
+    out, mark = tmp_path / "a.json", tmp_path / "folder"
+    code = _screens_run(
+        spawn,
+        pty_pair,
+        [ENTER * 3],
+        "--catalog",
+        catalog_path,
+        "--out",
+        out,
+        "--chosen-folder-out",
+        mark,
+    )
+    doc = json.loads(out.read_text())
+    folder = mark.read_text().strip()
+
+    def holders(node: object, path: str = "") -> list[str]:
+        if isinstance(node, dict):
+            return [h for k, v in node.items() for h in holders(v, f"{path}.{k}" if path else k)]
+        if isinstance(node, list):
+            return [h for v in node for h in holders(v, path)]
+        return [path] if isinstance(node, str) and folder in node else []
+
+    assert code == 0 and holders(doc) == ["model_store.path"]
+    assert sorted(doc["meta"]) == ["saved_at", "saved_by"]
+    assert "chosen" not in out.read_text()
+
+
+def test_a_failed_signal_write_still_exits_0_with_the_document_and_no_partial_file(
+    catalog_path: Path,
+    tmp_path: Path,
+    pty_pair: tuple[int, str],
+    spawn: Callable[..., subprocess.Popen[str]],
+) -> None:
+    out, mark = tmp_path / "a.json", tmp_path / "missing-parent" / "folder"
+    master, slave = pty_pair
+    p = spawn(
+        "--catalog",
+        catalog_path,
+        "--out",
+        out,
+        "--tty",
+        slave,
+        "--chosen-folder-out",
+        mark,
+        capture=True,
+    )
+    wait_for_output(master)
+    os.write(master, ENTER * 3)
+    assert wait_exit(p, master)[0] == 0
+    assert (
+        p.stderr is not None
+        and p.stderr.read() == "hal0 setup: could not record the chosen folder\n"
+    )
+    assert out.exists() and not mark.exists() and not mark.parent.exists()

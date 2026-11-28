@@ -653,3 +653,20 @@ def test_space_on_the_other_folder_row_opens_the_field(
     assert press(run(start(catalog, two_disk_facts), "ENTER"), "SPACE") == run(
         start(catalog, two_disk_facts), "ENTER"
     )
+
+
+@pytest.mark.parametrize("fixer", ["--models-dir", "HAL0_MODELS_DIR"])
+def test_a_folder_fixed_by_a_flag_or_variable_is_never_chosen(
+    catalog: Catalog, usable_facts: Facts, fixer: str
+) -> None:
+    over = [Override("model_store.path", "/mnt/m", fixer)]
+    s = run(start(catalog, usable_facts, over=over), "ENTER", "ENTER", "ENTER")
+    assert outcome(s) is Outcome.DONE
+    assert catalog.questions["model_store"].answer_key not in chosen(s)
+
+
+def test_passing_the_folder_screen_puts_the_folder_in_chosen(
+    catalog: Catalog, usable_facts: Facts
+) -> None:
+    s = run(start(catalog, usable_facts), "ENTER", "ENTER")
+    assert chosen(s)[catalog.questions["model_store"].answer_key] == "/var/lib/hal0/models"

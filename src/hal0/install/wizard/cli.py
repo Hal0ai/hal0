@@ -45,6 +45,8 @@ EXIT_INTERRUPTED = 130
 VERSION_TEXT = "hal0 setup wizard 1"
 _CPU_CONSENT_LINE = "set HAL0_ALLOW_CPU_ONLY=1 to continue without a GPU"
 _NO_TOKEN_PLACE = "no place to keep the token; add it later"
+_FOLDER_EXISTS = "--chosen-folder-out must name a path that does not exist"
+_FOLDER_NOT_RECORDED = "could not record the chosen folder"
 _ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
 
 
@@ -67,6 +69,9 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--saved", type=Path, help="answers saved by an earlier install")
     parser.add_argument("--answers", type=Path, help="an answers document given by the operator")
     parser.add_argument("--secret-out", type=Path, help="where to keep a typed token")
+    parser.add_argument(
+        "--chosen-folder-out", type=Path, help="where to record a model folder chosen on screen"
+    )
     parser.add_argument("--tty", default="/dev/tty", help="the terminal device to use")
     parser.add_argument("--hal0-version", default="unknown", help="the version being installed")
     parser.add_argument("--headless", action="store_true", help="never ask anything")
@@ -196,7 +201,43 @@ def _refresh_copy(state: State, doc: Document) -> None:
         print(f"hal0 setup: {exc}", file=sys.stderr)
 
 
-def _finish(inp: Inputs, state: State, out: Path, secret_out: Path | None) -> int:
+def _chosen_folder(inp: Inputs, state: State, doc: Document) -> str | None:
+    """The model folder the person chose at the terminal in this run, else None.
+
+    It enters the chosen answers only through the folder screen or the storage
+    screen, and never when a flag or variable fixes it. It must also be what the
+    document says. Anything doubtful is None, because this grants something to the
+    installer.
+    """
+    question = inp.catalog.questions.get("model_store")
+    if question is None:
+        return None
+    key = question.answer_key
+    picked = flow.chosen(state).get(key)
+    if not isinstance(picked, str) or not picked or picked != get(doc, key):
+        return None
+    if any(o.key == key for o in inp.over) or any(ord(c) < 32 or ord(c) == 127 for c in picked):
+        return None
+    return picked
+
+
+def _record_folder(folder: str, path: Path) -> None:
+    """Write the chosen folder; a failure leaves no file and the installer stays strict."""
+    try:
+        if os.path.lexists(path):
+            raise DocumentError(_FOLDER_NOT_RECORDED)
+        write_private_text(f"{folder}\n", path)
+    except DocumentError:
+        print(f"hal0 setup: {_FOLDER_NOT_RECORDED}", file=sys.stderr)
+
+
+def _finish(
+    inp: Inputs,
+    state: State,
+    out: Path,
+    secret_out: Path | None,
+    folder_out: Path | None = None,
+) -> int:
     status = flow.outcome(state)
     if status is Outcome.QUIT:
         return EXIT_QUIT
@@ -208,10 +249,20 @@ def _finish(inp: Inputs, state: State, out: Path, secret_out: Path | None) -> in
     token = flow.secret(state)
     if token:
         _keep_token(inp, doc, token, secret_out)
+    folder = None if folder_out is None else _chosen_folder(inp, state, doc)
+    if folder is not None and folder_out is not None:
+        _record_folder(folder, folder_out)
     return EXIT_OK
 
 
 def _run(args: argparse.Namespace, environ: Mapping[str, str]) -> int:
+    if args.chosen_folder_out is not None:
+        try:
+            os.lstat(args.chosen_folder_out)
+        except OSError:
+            pass
+        else:
+            raise _Usage(_FOLDER_EXISTS)
     if args.catalog is None or args.out is None:
         raise _Usage("--catalog and --out are required")
     inp = _read_inputs(args, environ)
@@ -224,7 +275,7 @@ def _run(args: argparse.Namespace, environ: Mapping[str, str]) -> int:
     if not quiet and can_open(args.tty):
         state = run_screens(inp, args.tty, environ, lambda chosen: _document(inp, chosen))
         if state is not None:
-            return _finish(inp, state, args.out, args.secret_out)
+            return _finish(inp, state, args.out, args.secret_out, args.chosen_folder_out)
     return _run_headless(inp, args.out)
 
 
