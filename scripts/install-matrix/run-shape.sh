@@ -25,7 +25,19 @@
 # acceptable; the container is destroyed at the end of the run.
 #
 # Settings (environment): HAL0_PVE, HAL0_MATRIX_VMID_MIN, HAL0_MATRIX_VMID_MAX,
-# HAL0_MATRIX_BRIDGE, HAL0_MATRIX_STORAGE (see lib/pve.sh).
+# HAL0_MATRIX_BRIDGE, HAL0_MATRIX_STORAGE (see lib/pve.sh), and the optional
+# HAL0_MATRIX_NAMESERVER: one to three IPv4 or IPv6 addresses separated by
+# spaces, passed to `pct create` as --nameserver. Set it when a new container on
+# your host inherits resolver settings that do not answer from the guest; unset,
+# nothing is passed.
+#
+# What the network wait tests (ct_wait_network, before anything is installed):
+# that the guest has a global address on its interface (else the state is
+# no_address: look at the bridge and DHCP on the host) and that it resolves
+# hal0.dev (else no_resolver: set HAL0_MATRIX_NAMESERVER). It does NOT test that
+# the release site answers over HTTPS or that a route to it works. On a failed
+# wait the guest's addresses and /etc/resolv.conf are saved to network.txt in the
+# run folder.
 # shellcheck disable=SC2329  # trap handlers, background jobs and the dry-run ssh shadow
 set -euo pipefail
 umask 077
@@ -157,6 +169,8 @@ NONCE="$(head -c 8 /dev/urandom | od -An -tx1 | tr -d ' \n')"
 CT_NONCE="$NONCE"
 
 pve_check_range || die2 "refusing: the VMID range is not usable (see above)"
+# The optional nameserver for the guest, checked before any call to the host.
+NAMESERVER="$(pve_nameserver)" || die2 "refusing: HAL0_MATRIX_NAMESERVER is not usable (see above)"
 
 # One run at a time: a local lock for the whole run, taken before any call to
 # the host. A dry run touches no host and creates no files, so it takes none.
@@ -193,6 +207,7 @@ if [[ "$DRY_RUN" == "1" ]]; then
       "pvesh get"*) printf '[]\n' ;;
       "if test -e"*) printf 'absent\n' ;;
       "bash -s -- gpu"*) printf 'dev /dev/dri/renderD128\nmajor 226\n' ;;
+      *'ip\ -o\ -4\ addr\ show'*) printf '2: eth0    inet 192.0.2.10/24 brd 192.0.2.255 scope global eth0\n' ;;
       "pct config "*)
         vm="${cmd#pct config }"
         printf 'hostname: hal0-mx-%s\ntags: hal0-matrix\ndescription: hal0-matrix run %s%%0A\n' "${vm%% *}" "$NONCE"
@@ -718,6 +733,11 @@ if [[ "$DRY_RUN" == "1" ]]; then
   NEED_FIGURES="$(pve_headroom_need "$SHAPE_HARDWARE" "$SHAPE_MEMORY_MB")" || die2 "refusing: bad headroom figures"
   read -r NEED_GB _ <<<"$NEED_FIGURES"
   plan "host must show ${NEED_GB} GB available to start: the floor plus the container's ${SHAPE_MEMORY_MB} MB memory limit, rounded up to whole GB"
+  if [[ -n "$NAMESERVER" ]]; then
+    plan "nameserver for the guest: ${NAMESERVER} (HAL0_MATRIX_NAMESERVER), passed to pct create as --nameserver"
+  else
+    plan "nameserver for the guest: none set (HAL0_MATRIX_NAMESERVER); the host's resolver settings apply"
+  fi
 fi
 pve_require_headroom "$SHAPE_HARDWARE" "$SHAPE_MEMORY_MB" || die2 "refusing: the Proxmox host does not have enough free memory"
 picked="$(pve_pick_vmid)" || die2 "refusing: no usable VMID (see above)"
@@ -745,6 +765,7 @@ fi
 # and below the uninstall verdict. fresh-test-ct.sh reads it.
 printf 'vmid=%s\n' "$VMID" >"${ART}/run.txt"
 PVE_NOTE_FILE="${ART}/run.txt"  # a cut stream is noted there as truncated=<name>
+CT_NET_REPORT_FILE="${ART}/network.txt"  # what a guest with no network reports (see ct_wait_network)
 
 # ── step 3: from here on every exit path goes through cleanup ────────────────
 trap cleanup EXIT

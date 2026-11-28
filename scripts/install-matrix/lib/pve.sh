@@ -54,6 +54,37 @@ _pve_nonce_ok() {
   return 1
 }
 
+# pve_nameserver: the optional HAL0_MATRIX_NAMESERVER, checked. Unset or empty:
+# prints nothing, returns 0 (nothing is passed to `pct create`). Otherwise one
+# to three IPv4 or IPv6 addresses separated by spaces and nothing else: the
+# characters are checked first (hex digits, `:`, `.` and spaces), then each item
+# must parse as an IP address. Prints the addresses joined by single spaces.
+# On a bad value it says so on one line and returns 1. No address is ever
+# written down in this repository; the operator's setting is the only source.
+pve_nameserver() {
+  local raw="${HAL0_MATRIX_NAMESERVER-}" charset='^[0-9A-Fa-f:. ]+$' item
+  local -a items=()
+  local IFS=$' \t\n'
+  [[ -n "$raw" ]] || return 0
+  if [[ "$raw" =~ $charset ]]; then
+    read -ra items <<<"$raw"
+  fi
+  if [[ ${#items[@]} -ge 1 && ${#items[@]} -le 3 ]]; then
+    for item in "${items[@]}"; do
+      [[ ${#item} -le 45 ]] || { items=(); break; }
+    done
+  fi
+  if [[ ${#items[@]} -ge 1 && ${#items[@]} -le 3 ]] \
+    && python3 -I -c 'import ipaddress, sys
+for a in sys.argv[1:]:
+    ipaddress.ip_address(a)' "${items[@]}" 2>/dev/null; then
+    printf '%s\n' "${items[*]}"
+    return 0
+  fi
+  _pve_err "bad HAL0_MATRIX_NAMESERVER: one to three IPv4 or IPv6 addresses separated by spaces, nothing else"
+  return 1
+}
+
 _pve_vmid_min() { printf '%s' "${HAL0_MATRIX_VMID_MIN:-170}"; }
 _pve_vmid_max() { printf '%s' "${HAL0_MATRIX_VMID_MAX:-189}"; }
 
@@ -465,7 +496,7 @@ _ct_require_owned() {
 ct_create() {
   local vmid="${1:-}" volid="${2:-}" unpriv="${3:-}" cores="${4:-}" mem="${5:-}" disk="${6:-}"
   shift 6 2>/dev/null || { _pve_err "ct_create: too few arguments"; return "$_CT_REFUSED"; }
-  local bridge="${HAL0_MATRIX_BRIDGE:-vmbr0}" storage dev i=0 cmd st _PVE_DEADLINE
+  local bridge="${HAL0_MATRIX_BRIDGE:-vmbr0}" storage dev i=0 cmd st nameserver _PVE_DEADLINE
   _PVE_DEADLINE="$(_pve_t CREATE 600)"
   _pve_in_range "$vmid" || { _pve_err "refusing: VMID '${vmid}' is outside the harness range"; return "$_CT_REFUSED"; }
   [[ "$volid" =~ ^[A-Za-z0-9._+-]+:[A-Za-z0-9._+/-]+$ ]] || { _pve_err "bad template volume id"; return "$_CT_REFUSED"; }
@@ -476,6 +507,8 @@ ct_create() {
   fi
   _pve_nonce_ok "$CT_NONCE" || return "$_CT_REFUSED"
   [[ "$bridge" =~ ^[A-Za-z0-9_.-]+$ ]] || { _pve_err "bad HAL0_MATRIX_BRIDGE"; return "$_CT_REFUSED"; }
+  # Checked before anything is sent; empty when the setting is unset.
+  nameserver="$(pve_nameserver)" || return "$_CT_REFUSED"
   for dev in "$@"; do
     [[ "$dev" =~ ^/dev/[A-Za-z0-9_-]+(/[A-Za-z0-9_-]+)*(,gid=[0-9]+)?$ ]] \
       || { _pve_err "bad device argument: ${dev}"; return "$_CT_REFUSED"; }
@@ -494,6 +527,7 @@ ct_create() {
   cmd+=" --cores ${cores} --memory ${mem} --swap 0"
   cmd+=" --rootfs $(_pve_q "${storage}:${disk}")"
   cmd+=" --net0 $(_pve_q "name=eth0,bridge=${bridge},ip=dhcp")"
+  [[ -z "$nameserver" ]] || cmd+=" --nameserver $(_pve_q "$nameserver")"
   cmd+=" --unprivileged ${unpriv}"
   cmd+=" --features $(_pve_q "$_PVE_FEATURES")"
   cmd+=" --onboot 0"
@@ -591,15 +625,80 @@ ct_exec() {
   pve_run "$(ct_guard "$vmid" "$CT_NONCE")pct exec ${vmid} -- bash -c $(_pve_q "$2")"
 }
 
-# ct_wait_network <vmid> [seconds=120]: the guest resolves hal0.dev.
+# What the network wait found, set by every call to ct_wait_network:
+#   reachable    the guest has a global address and resolves hal0.dev
+#   no_resolver  it has an address, but hal0.dev does not resolve
+#   no_address   it has no global address on its interface
+# CT_NET_REPORT_FILE, when set, is where a failed wait saves what the guest
+# reports (its addresses and /etc/resolv.conf), so the failure can be read after
+# the container is gone.
+CT_NET_STATE=""
+CT_NET_REPORT_FILE=""
+
+# _ct_net_has_address: stdin is the (untrusted) answer of `ip -o addr show scope
+# global`. True when some line is an address line: `inet` or `inet6`, an address
+# of hex digits, `:` and `.` with a prefix length, and `scope global`. The text
+# is only matched, never evaluated.
+_ct_net_has_address() {
+  local line re='[[:space:]]inet6?[[:space:]]+[0-9A-Fa-f:.]{2,45}/[0-9]{1,3}[[:space:]]+(.*[[:space:]])?scope[[:space:]]+global([[:space:]]|$)'
+  while IFS= read -r line; do
+    [[ "$line" =~ $re ]] && return 0
+  done
+  return 1
+}
+
+# _ct_net_has_global <vmid>: the guest has a global IPv4 or IPv6 address. Two
+# guarded execs with fixed text; each answer is cut to 4096 characters before it
+# is looked at, and a call that fails counts as no address.
+_ct_net_has_global() {
+  local out=""
+  out="$(ct_exec "$1" 'ip -o -4 addr show scope global' 2>/dev/null)" || out=""
+  ! _ct_net_has_address <<<"${out:0:4096}" || return 0
+  out="$(ct_exec "$1" 'ip -o -6 addr show scope global' 2>/dev/null)" || out=""
+  _ct_net_has_address <<<"${out:0:4096}"
+}
+
+# _ct_net_report <vmid>: after a failed wait, one guarded exec reads the guest's
+# addresses and resolver file into CT_NET_REPORT_FILE. The answer is untrusted:
+# it is written to the file and nothing else, never evaluated; only printable
+# ASCII and newlines are kept, and at most 8 KB. The call has its own short
+# deadline (HAL0_MATRIX_TIMEOUT_NETREPORT, 15 s), and whatever goes wrong here
+# is lost and never an error: the destroy must not wait on it or fail because
+# of it.
+_ct_net_report() {
+  local out="" CT_EXEC_TIMEOUT
+  [[ -n "$CT_NET_REPORT_FILE" ]] || return 0
+  CT_EXEC_TIMEOUT="$(_pve_t NETREPORT 15)"
+  out="$(ct_exec "$1" 'ip -o addr show; echo "--- /etc/resolv.conf"; cat /etc/resolv.conf 2>&1' 2>&1)" || true
+  { printf '%s\n' "${out:0:16384}" | LC_ALL=C tr -cd '\11\12\40-\176' | head -c 8192 >"$CT_NET_REPORT_FILE"; } 2>/dev/null || true
+  return 0
+}
+
+# ct_wait_network <vmid> [seconds]: wait until the guest has a global address
+# AND resolves hal0.dev, bounded by the deadline (seconds, else
+# HAL0_MATRIX_TIMEOUT_NETWORK, else 120). It sets CT_NET_STATE to the state it
+# last saw. It tests the guest's address and its resolver, in that order. It does
+# NOT test that the release site answers over HTTPS or that a route to it works:
+# a guest that resolves the name but cannot reach it fails later, in the install.
+# Returns 0 only for reachable. On a failure it records `net_state=<state>` in
+# PVE_NOTE_FILE (when set), says which state it found with advice for it, and
+# saves the guest's own report (see _ct_net_report).
 ct_wait_network() {
-  local vmid="${1:-}" limit="${2:-120}" start now err=""
+  local vmid="${1:-}" limit="${2:-}" start now err="" state="no_address"
+  [[ -n "$limit" ]] || limit="$(_pve_t NETWORK 120)"
   _pve_uint_ok "$limit" || { _pve_err "bad timeout"; return 1; }
   _ct_require_owned "$vmid" "$CT_NONCE" || return 1
+  CT_NET_STATE=""
   start="$(date +%s)"
   while :; do
-    if err="$(ct_exec "$vmid" 'getent hosts hal0.dev' 2>&1 >/dev/null)"; then
-      return 0
+    if _ct_net_has_global "$vmid"; then
+      if err="$(ct_exec "$vmid" 'getent hosts hal0.dev' 2>&1 >/dev/null)"; then
+        CT_NET_STATE="reachable"
+        return 0
+      fi
+      state="no_resolver"
+    else
+      state="no_address"
     fi
     now="$(date +%s)"
     if ((now - start >= limit)); then
@@ -607,8 +706,17 @@ ct_wait_network() {
     fi
     sleep "${HAL0_MATRIX_POLL_SLEEP:-2}"
   done
-  _pve_err "guest ${vmid} did not resolve hal0.dev within ${limit}s"
-  [[ -z "$err" ]] || _pve_err "last error: ${err}"
+  # shellcheck disable=SC2034  # read by the caller
+  CT_NET_STATE="$state"
+  [[ -z "$PVE_NOTE_FILE" ]] || printf 'net_state=%s\n' "$state" >>"$PVE_NOTE_FILE" 2>/dev/null || true
+  if [[ "$state" == "no_resolver" ]]; then
+    _pve_err "guest ${vmid} did not resolve hal0.dev within ${limit}s; if the host's resolver does not answer from a new container, set HAL0_MATRIX_NAMESERVER"
+    err="$(printf '%s' "${err:0:300}" | LC_ALL=C tr -cd '\40-\176')" || err=""
+    [[ -z "$err" ]] || _pve_err "last error: ${err}"
+  else
+    _pve_err "guest ${vmid} has no global address on its interface after ${limit}s; check that the bridge (HAL0_MATRIX_BRIDGE) is the right one and that DHCP answers on it"
+  fi
+  _ct_net_report "$vmid"
   return 1
 }
 

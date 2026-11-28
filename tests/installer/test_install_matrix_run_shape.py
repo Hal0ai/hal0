@@ -134,7 +134,19 @@ case "$cmd" in
     rm -f "$FAKE_STATE/present"; exit 0 ;;
 esac
 case "$plain" in
-  *"getent hosts"*) exit 0 ;;
+  # The network wait asks for a global address first: FAKE_NO_ADDR=1 has none.
+  *"ip -o -4 addr show"*)
+    [[ -n "${FAKE_NO_ADDR:-}" ]] || echo '2: eth0    inet 192.0.2.7/24 brd 192.0.2.255 scope global dynamic eth0'
+    exit 0 ;;
+  *"ip -o -6 addr show"*) exit 0 ;;
+  # The failed wait's one read of the guest's addresses and resolver file.
+  *"cat /etc/resolv.conf"*)
+    printf '2: eth0    inet 192.0.2.7/24 scope global eth0\n--- /etc/resolv.conf\nnameserver 192.0.2.1\n'
+    exit 0 ;;
+  *"getent hosts"*)
+    # FAKE_NO_RESOLVER=1: the guest has an address, and no name resolves.
+    [[ -z "${FAKE_NO_RESOLVER:-}" ]] || exit 2
+    exit 0 ;;
   *"command -v curl"*) exit 0 ;;
   *"cat > "*) exit 0 ;;
   *"mkdir -p /root/hal0-src"*) exit 0 ;;
@@ -331,6 +343,75 @@ def test_dry_run_plan_shows_the_needed_sum(host):
     assert "8192 MB" in plan
     gpu = "\n".join(plan_lines(host.dry("u2604-gpu")))
     assert "host must show 54 GB available to start" in gpu
+
+
+NS = "192.0.2.53 2001:db8::53"  # documentation addresses only
+
+
+def test_dry_run_plan_shows_the_nameserver_and_the_create_carries_it(host):
+    r = host.dry("u2604-cpu-unattended", HAL0_MATRIX_NAMESERVER=NS)
+    assert r.returncode == 0, r.stderr
+    lines = plan_lines(r)
+    assert any(f"nameserver for the guest: {NS}" in ln for ln in lines), lines
+    create = next(ln for ln in lines if ln.startswith("[dry-run] ssh pct create"))
+    assert "--nameserver 192.0.2.53\\ 2001:db8::53 " in create
+    none = plan_lines(host.dry("u2604-cpu-unattended"))
+    assert any("nameserver for the guest: none set" in ln for ln in none)
+    assert not any(
+        ln.startswith("[dry-run] ssh pct create") and "--nameserver" in ln for ln in none
+    )
+
+
+@pytest.mark.parametrize(
+    "value", ["192.0.2.53; id", "dns.example", "192.0.2.1 192.0.2.2 192.0.2.3 192.0.2.4"]
+)
+def test_a_bad_nameserver_is_refused_before_any_call_to_the_host(host, value):
+    r = host.run(
+        "u2604-cpu-unattended", "--vmid", "172", "--out", str(host.out),
+        HAL0_MATRIX_NAMESERVER=value,
+    )  # fmt: skip
+    assert r.returncode == 2
+    assert "HAL0_MATRIX_NAMESERVER" in r.stderr
+    assert host.calls() == []
+    assert not host.out.exists()
+
+
+def test_a_real_run_passes_the_nameserver_to_pct_create(host):
+    r = host.run(
+        "u2604-cpu-unattended", "--vmid", "172", "--out", str(host.out),
+        HAL0_MATRIX_NAMESERVER=NS,
+    )  # fmt: skip
+    assert r.returncode == 0, r.stderr
+    create = next(c for c in host.calls() if "pct create" in c)
+    assert "--nameserver 192.0.2.53\\ 2001:db8::53 " in create
+
+
+def test_a_guest_that_resolves_nothing_says_so_and_names_the_variable(host):
+    r = host.run(
+        "u2604-cpu-unattended", "--vmid", "172", "--out", str(host.out),
+        FAKE_NO_RESOLVER="1", HAL0_MATRIX_TIMEOUT_NETWORK="1", HAL0_MATRIX_POLL_SLEEP="0.2",
+    )  # fmt: skip
+    assert r.returncode == 1
+    assert (
+        "guest 172 did not resolve hal0.dev within 1s; if the host's resolver does not "
+        "answer from a new container, set HAL0_MATRIX_NAMESERVER"
+    ) in r.stderr
+    assert "net_state=no_resolver" in (host.out / "run.txt").read_text().splitlines()
+    assert "nameserver 192.0.2.1" in (host.out / "network.txt").read_text()
+    assert not (host.state / "present").exists(), "the container is still destroyed"
+    assert not any("install.sh" in c or "summary-json" in c for c in host.calls())
+
+
+def test_a_guest_with_no_address_says_so_with_advice_about_the_bridge(host):
+    r = host.run(
+        "u2604-cpu-unattended", "--vmid", "172", "--out", str(host.out),
+        FAKE_NO_ADDR="1", HAL0_MATRIX_TIMEOUT_NETWORK="1", HAL0_MATRIX_POLL_SLEEP="0.2",
+    )  # fmt: skip
+    assert r.returncode == 1
+    assert "has no global address" in r.stderr and "DHCP" in r.stderr
+    assert "HAL0_MATRIX_NAMESERVER" not in r.stderr
+    assert "net_state=no_address" in (host.out / "run.txt").read_text().splitlines()
+    assert not (host.state / "present").exists()
 
 
 def test_dry_run_plan_shows_the_probe_deadline_and_its_override(host):

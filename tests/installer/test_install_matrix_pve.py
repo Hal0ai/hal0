@@ -960,6 +960,71 @@ def test_create_uses_bridge_env(fake):
     assert "bridge=vmbr9" in call
 
 
+# Documentation addresses only (RFC 5737 and RFC 3849): no real address is in the repository.
+NS = "192.0.2.53 2001:db8::53"
+
+
+def test_create_passes_the_nameserver_quoted_when_one_is_set(fake):
+    r = _create(fake, env={"HAL0_MATRIX_NAMESERVER": NS})
+    assert r.returncode == 0, r.stderr
+    call = next(c for c in fake.calls() if "pct create" in c)
+    tokens = shlex.split(call)
+    assert tokens[tokens.index("--nameserver") + 1] == NS
+    assert "--nameserver 192.0.2.53\\ 2001:db8::53 " in call, "one quoted word, like the others"
+
+
+@pytest.mark.parametrize("value", [None, ""])
+def test_create_passes_no_nameserver_when_unset_or_empty(fake, value):
+    env = {} if value is None else {"HAL0_MATRIX_NAMESERVER": value}
+    r = _create(fake, env=env)
+    assert r.returncode == 0, r.stderr
+    assert "--nameserver" not in next(c for c in fake.calls() if "pct create" in c)
+
+
+def test_create_takes_up_to_three_addresses_and_joins_them_with_single_spaces(fake):
+    r = _create(fake, env={"HAL0_MATRIX_NAMESERVER": "192.0.2.53   2001:db8::53 192.0.2.54"})
+    assert r.returncode == 0, r.stderr
+    tokens = shlex.split(next(c for c in fake.calls() if "pct create" in c))
+    assert tokens[tokens.index("--nameserver") + 1] == "192.0.2.53 2001:db8::53 192.0.2.54"
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "192.0.2.53; id",
+        "192.0.2.53 $(id)",
+        "`id`",
+        "192.0.2.256",
+        "192.0.2",
+        "192.0.2.53/24",
+        "dns.example",
+        "2001:db8::53::1",
+        "2001:db8::53%eth0",
+        "abcd",
+        "192.0.2.1 192.0.2.2 192.0.2.3 192.0.2.4",
+        "192.0.2.53\n192.0.2.54",
+        "192.0.2.53\t192.0.2.54",
+        " ",
+        "--help",
+    ],
+)
+def test_create_refuses_a_bad_nameserver_before_sending_anything(fake, value):
+    r = fake.run(
+        "ct_create 172 local:vztmpl/x.tar.zst 0 4 8192 40",
+        env={"HAL0_MATRIX_NAMESERVER": value},
+    )
+    assert r.returncode == 90
+    assert "HAL0_MATRIX_NAMESERVER" in r.stderr
+    assert fake.calls() == []
+
+
+def test_the_nameserver_check_prints_the_checked_list(fake):
+    r = fake.run("pve_nameserver", env={"HAL0_MATRIX_NAMESERVER": NS})
+    assert r.stdout == NS + "\n" and r.returncode == 0
+    r = fake.run("pve_nameserver; echo rc=$?")
+    assert r.stdout == "rc=0\n"
+
+
 @pytest.mark.parametrize(
     "args",
     [
@@ -1239,19 +1304,164 @@ def test_push_and_pull_quote_paths(fake, tmp_path):
     ]  # fmt: skip
 
 
+# The wait asks the guest two fixed questions: has it a global address (the
+# `ip` calls; a fake answers them as a real guest would) and does it resolve
+# hal0.dev. The remote text carries the spaces escaped, so the needles do too.
+IP4 = r"-4\ addr\ show\ scope\ global"
+IP6 = r"-6\ addr\ show\ scope\ global"
+ADDR4 = "2: eth0    inet 192.0.2.7/24 brd 192.0.2.255 scope global dynamic eth0\\       valid_lft 3600\n"
+ADDR6 = "2: eth0    inet6 2001:db8::7/64 scope global dynamic mngtmpaddr eth0\n"
+NET_ENV = {"HAL0_MATRIX_POLL_SLEEP": "0"}
+
+
+def _net_rules(fake, *, v4: str = ADDR4, v6: str = "", getent_rc: int = 0, vmid: int = 172):
+    _owned_rules(fake, vmid)
+    fake.rule(IP4, v4)
+    fake.rule(IP6, v6)
+    fake.rule("getent", "", getent_rc)
+    fake.rule(f"pct exec {vmid}", "")
+
+
 def test_wait_network_succeeds_when_resolves(fake):
-    _owned_rules(fake, 172)
-    fake.rule("pct exec 172", "")
-    r = fake.run("ct_wait_network 172 5; echo rc=$?")
-    assert "rc=0" in r.stdout
-    assert "hal0.dev" in next(c for c in fake.calls() if "pct exec" in c)
+    _net_rules(fake)
+    r = fake.run("ct_wait_network 172 5; echo rc=$? state=$CT_NET_STATE")
+    assert "rc=0 state=reachable" in r.stdout
+    assert "hal0.dev" in next(c for c in fake.calls() if "getent" in c)
 
 
 def test_wait_network_times_out(fake):
     _owned_rules(fake, 172)
     fake.rule("pct exec 172", "", 1)
-    r = fake.run("ct_wait_network 172 1; echo rc=$?", env={"HAL0_MATRIX_POLL_SLEEP": "0"})
+    r = fake.run("ct_wait_network 172 1; echo rc=$?", env=NET_ENV)
     assert "rc=1" in r.stdout
+
+
+def test_wait_network_takes_an_ipv6_only_guest_as_having_an_address(fake):
+    _net_rules(fake, v4="", v6=ADDR6)
+    r = fake.run("ct_wait_network 172 5; echo rc=$? state=$CT_NET_STATE")
+    assert "rc=0 state=reachable" in r.stdout
+
+
+def test_wait_network_tells_no_address_from_no_resolver(fake):
+    _net_rules(fake, v4="", v6="")
+    r = fake.run("ct_wait_network 172 1; echo rc=$? state=$CT_NET_STATE", env=NET_ENV)
+    assert "rc=1 state=no_address" in r.stdout
+    assert "guest 172 has no global address" in r.stderr
+    assert "HAL0_MATRIX_BRIDGE" in r.stderr and "DHCP" in r.stderr
+    assert "HAL0_MATRIX_NAMESERVER" not in r.stderr
+    assert not any("getent" in c for c in fake.calls()), "no name is looked up without an address"
+
+
+def test_wait_network_with_an_address_but_no_resolver_names_the_variable(fake):
+    _net_rules(fake, getent_rc=2)
+    r = fake.run("ct_wait_network 172 1; echo rc=$? state=$CT_NET_STATE", env=NET_ENV)
+    assert "rc=1 state=no_resolver" in r.stdout
+    assert (
+        "guest 172 did not resolve hal0.dev within 1s; if the host's resolver does not "
+        "answer from a new container, set HAL0_MATRIX_NAMESERVER"
+    ) in r.stderr
+    assert "no global address" not in r.stderr
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        "garbage\n",
+        "2: eth0 inet 192.0.2.7 scope global\n",  # no prefix length
+        "2: eth0 inet6 fe80::1/64 scope link\n$(id)\n",
+        "x" * 65536 + "\n",  # a guest that talks for 64 KB
+    ],
+)
+def test_wait_network_does_not_take_an_untrusted_answer_for_an_address(fake, answer):
+    _net_rules(fake, v4=answer, v6=answer)
+    r = fake.run("ct_wait_network 172 1; echo rc=$? state=$CT_NET_STATE", env=NET_ENV)
+    assert "rc=1 state=no_address" in r.stdout
+
+
+def test_wait_network_records_the_state_in_the_note_file_before_it_speaks(fake, tmp_path):
+    _net_rules(fake, getent_rc=2)
+    note = tmp_path / "run.txt"
+    r = fake.run(
+        f"PVE_NOTE_FILE={shlex.quote(str(note))}\nct_wait_network 172 1; echo rc=$?", env=NET_ENV
+    )
+    assert "rc=1" in r.stdout
+    assert note.read_text().splitlines() == ["net_state=no_resolver"]
+
+
+def test_wait_network_saves_what_the_guest_reports_without_evaluating_it(fake, tmp_path):
+    hostile = (
+        "2: eth0 inet6 fe80::1/64 scope link\n"
+        "nameserver 192.0.2.53\n"
+        f"$(touch {tmp_path}/pwned) `touch {tmp_path}/pwned2`\n"
+        "\x1b[31mred\x00\x07\n" + "y" * 20000 + "\n"
+    )
+    _net_rules(fake, getent_rc=2)
+    fake.rules.insert(0, ("resolv.conf", hostile, 0))  # the report's own read, before the rest
+    fake.write_handler()
+    out = tmp_path / "network.txt"
+    r = fake.run(
+        f"CT_NET_REPORT_FILE={shlex.quote(str(out))}\nct_wait_network 172 1; echo rc=$?",
+        env=NET_ENV,
+    )
+    assert "rc=1" in r.stdout
+    data = out.read_bytes()
+    assert b"nameserver 192.0.2.53" in data
+    assert 0 < len(data) <= 8192
+    assert b"\x1b" not in data and b"\x00" not in data and b"\x07" not in data
+    assert not (tmp_path / "pwned").exists() and not (tmp_path / "pwned2").exists()
+    reads = [c for c in fake.calls() if "resolv.conf" in c]
+    assert len(reads) == 1, "one guarded exec reads the addresses and the resolver file"
+    assert "ip" in reads[0] and "pct config 172" in reads[0], "carries the ownership test"
+
+
+def test_wait_network_saves_nothing_when_no_file_is_asked_for(fake):
+    _net_rules(fake, getent_rc=2)
+    fake.run("ct_wait_network 172 1", env=NET_ENV)
+    assert not any("resolv.conf" in c for c in fake.calls())
+
+
+def test_wait_network_does_not_save_anything_when_the_guest_is_reachable(fake, tmp_path):
+    _net_rules(fake)
+    out = tmp_path / "network.txt"
+    fake.run(f"CT_NET_REPORT_FILE={shlex.quote(str(out))}\nct_wait_network 172 5")
+    assert not out.exists()
+
+
+def test_a_failing_report_read_still_ends_the_wait_with_its_state(fake, tmp_path):
+    _net_rules(fake, getent_rc=2)
+    fake.rules.insert(0, ("resolv.conf", "", 255))
+    fake.write_handler()
+    out = tmp_path / "network.txt"
+    r = fake.run(
+        f"CT_NET_REPORT_FILE={shlex.quote(str(out))}\nct_wait_network 172 1; echo rc=$? $CT_NET_STATE",
+        env=NET_ENV,
+    )
+    assert "rc=1 no_resolver" in r.stdout
+
+
+def test_a_hanging_report_read_is_cut_at_its_own_short_deadline(fake, tmp_path):
+    import time
+
+    _net_rules(fake, getent_rc=2)
+    fake.rules.insert(0, ("resolv.conf", HANG, 0))
+    fake.write_handler()
+    out = tmp_path / "network.txt"
+    t0 = time.monotonic()
+    r = fake.run(
+        f"CT_NET_REPORT_FILE={shlex.quote(str(out))}\nct_wait_network 172 1; echo rc=$?",
+        env={**NET_ENV, "HAL0_MATRIX_TIMEOUT_NETREPORT": "1"},
+    )
+    assert "rc=1" in r.stdout
+    assert time.monotonic() - t0 < 8
+
+
+def test_the_wait_deadline_has_its_own_override(fake):
+    _net_rules(fake, v4="")
+    r = fake.run(
+        "ct_wait_network 172; echo rc=$?",
+        env={**NET_ENV, "HAL0_MATRIX_TIMEOUT_NETWORK": "1"},
+    )
+    assert "rc=1" in r.stdout and "after 1s" in r.stderr
 
 
 # --- host-devices.sh --------------------------------------------------------
@@ -1496,7 +1706,11 @@ def test_strict_create_success_continues(fake):
         ),
         (
             "ct_wait_network 172 5",
-            [("pct config 172", TAGGED_CONF.format(vmid=172)), ("pct exec", "")],
+            [
+                ("pct config 172", TAGGED_CONF.format(vmid=172)),
+                (IP4, ADDR4),
+                ("pct exec", ""),
+            ],
         ),
         (
             "ct_apply_device_rules 172 0 226",
@@ -1622,8 +1836,7 @@ def test_wait_network_shows_refusal_reason(fake):
 
 
 def test_wait_network_timeout_includes_last_error(fake):
-    _owned_rules(fake, 172)
-    fake.rule("pct exec 172", "", 1)
+    _net_rules(fake, getent_rc=1)
     r = fake.run("ct_wait_network 172 0")
     assert r.returncode == 1 and "did not resolve hal0.dev" in r.stderr
 
