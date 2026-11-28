@@ -523,3 +523,86 @@ def test_embed_with_missing_model_skips_trio(
     client.post("/v1/embeddings", json={"input": "no model field"})
 
     assert captures["calls"] == [], captures["calls"]
+
+
+# ── #4001: an NPU-addressed embed request never reaches another slot ─────────
+
+
+def _seed_trio_with_embed_off(home: str) -> None:
+    _seed_slot_toml(
+        home,
+        "flm",
+        [
+            'name = "flm"',
+            f"port = {_NPU_PORT}",
+            'device = "npu"',
+            'type = "llm"',
+            'runtime = "container"',
+            "[model]",
+            'default = "gemma3:1b"',
+            "[npu]",
+            "asr = true",
+            "embed = false",
+        ],
+    )
+    _seed_slot_toml(
+        home,
+        "flm-embed",
+        [
+            'name = "flm-embed"',
+            "port = 8085",
+            'device = "npu"',
+            'type = "embedding"',
+            "[model]",
+            'default = "embed-gemma"',
+        ],
+    )
+
+
+@pytest.mark.parametrize("spelling", ["embed-gemma", "flm-embed", "embed-npu"])
+def test_embed_naming_the_npu_slot_is_refused_when_the_role_is_off(
+    tmp_hal0_home: str, monkeypatch: pytest.MonkeyPatch, spelling: str
+) -> None:
+    """With the NPU embed role off, every spelling of the NPU embed slot gets
+    the no-route envelope and never reaches the dispatcher, which would hand
+    it to whatever other embed slot is loaded."""
+    from hal0.api.routes import v1
+
+    _seed_trio_with_embed_off(tmp_hal0_home)
+    reached: list[str] = []
+
+    async def _must_not_dispatch(request: Any, dispatcher: Any, **kwargs: Any) -> Any:
+        reached.append("dispatcher")
+        raise AssertionError("an NPU-addressed embed request reached the dispatcher")
+
+    monkeypatch.setattr(v1, "_dispatch_and_forward", _must_not_dispatch)
+    with TestClient(create_app()) as client:
+        r = client.post("/v1/embeddings", json={"model": spelling, "input": "hello"})
+    assert reached == []
+    assert r.status_code == 404, r.text
+    error = r.json()["error"]
+    assert error["code"] == "dispatch.no_route"
+    assert error["details"]["reason"] == "npu_embed_role_off"
+    assert error["details"]["model"] == spelling
+    assert "NPU embed role" in error["message"]
+
+
+def test_embed_for_another_model_still_reaches_the_dispatcher_when_the_role_is_off(
+    tmp_hal0_home: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from fastapi.responses import JSONResponse
+
+    from hal0.api.routes import v1
+
+    _seed_trio_with_embed_off(tmp_hal0_home)
+    reached: list[Any] = []
+
+    async def _fake_dispatch(request: Any, dispatcher: Any, **kwargs: Any) -> Any:
+        reached.append(kwargs.get("body"))
+        return JSONResponse({"ok": True})
+
+    monkeypatch.setattr(v1, "_dispatch_and_forward", _fake_dispatch)
+    with TestClient(create_app()) as client:
+        r = client.post("/v1/embeddings", json={"model": "qwen3-embedding", "input": "hello"})
+    assert r.status_code == 200, r.text
+    assert reached == [{"model": "qwen3-embedding", "input": "hello"}]
