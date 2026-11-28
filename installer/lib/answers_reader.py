@@ -204,18 +204,28 @@ def _scrub(msg: str) -> str:
 
 
 class _Problems:
+    """Errors and warnings in first-seen order, each shown once.
+
+    The ``_seen_*`` sets make the repeat check constant-time: a list search
+    made a document flooded with unknown keys quadratic.
+    """
+
     def __init__(self) -> None:
         self.errors: list[str] = []
         self.warnings: list[str] = []
+        self._seen_errors: set[str] = set()
+        self._seen_warnings: set[str] = set()
 
     def error(self, msg: str) -> None:
         msg = _scrub(msg)
-        if msg not in self.errors:
+        if msg not in self._seen_errors:
+            self._seen_errors.add(msg)
             self.errors.append(msg)
 
     def warn(self, msg: str) -> None:
         msg = _scrub(msg)
-        if msg not in self.warnings:
+        if msg not in self._seen_warnings:
+            self._seen_warnings.add(msg)
             self.warnings.append(msg)
 
 

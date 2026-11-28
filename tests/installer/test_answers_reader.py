@@ -1392,3 +1392,34 @@ def test_messages_are_capped_at_twenty_per_kind(tmp_path: Path, strict: bool, ki
     else:
         assert more == []
     assert len(err) <= 21 + (1 if strict else 0)
+
+
+@pytest.mark.parametrize("strict", [False, True])
+def test_a_flood_of_unknown_keys_is_read_quickly(tmp_path: Path, strict: bool) -> None:
+    # each message is de-duplicated against the ones already kept; a list made
+    # that quadratic (a 0.9 MB document took about 17 seconds)
+    import time
+
+    doc = {"version": 1, "strict": strict, **{f"unknown{i:05d}": 1 for i in range(50_000)}}
+    start = time.monotonic()
+    proc = run(doc, tmp_path)
+    elapsed = time.monotonic() - start
+    assert proc.returncode == (2 if strict else 0), proc.stderr
+    kind = "error" if strict else "warning"
+    assert f"{kind}: ... and {50_000 - 20} more" in proc.stderr.splitlines()
+    assert elapsed < 3.0, f"{elapsed:.1f}s"
+
+
+def test_repeated_messages_are_still_shown_once(tmp_path: Path) -> None:
+    from importlib import util
+
+    spec = util.spec_from_file_location("_answers_reader_dedupe", READER)
+    assert spec is not None and spec.loader is not None
+    mod = util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    problems = mod._Problems()
+    for _ in range(3):
+        problems.warn("same")
+        problems.error("same")
+    problems.warn("other")
+    assert problems.warnings == ["same", "other"] and problems.errors == ["same"]
