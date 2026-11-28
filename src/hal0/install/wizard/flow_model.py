@@ -168,14 +168,18 @@ def pick_model(s: State, doc: Document) -> Pick | None:
     return Pick(named.label, named.download_gb, False)
 
 
+def jobs_wanted(s: State, doc: Document) -> list[Component]:
+    """Jobs the answers turn on, whether or not this box can run them."""
+    return [c for c in s.catalog.components if get(doc, c.answer_key) == c.on]
+
+
+def failing_need(s: State, c: Component) -> str | None:
+    """The first need of a job that is known to fail on this box."""
+    return next((n for n in c.needs if satisfied(n, s.facts) is False), None)
+
+
 def jobs_on(s: State, doc: Document) -> list[Component]:
-    on = []
-    for c in s.catalog.components:
-        if get(doc, c.answer_key) == c.on and all(
-            satisfied(n, s.facts) is not False for n in c.needs
-        ):
-            on.append(c)
-    return on
+    return [c for c in jobs_wanted(s, doc) if failing_need(s, c) is None]
 
 
 def download_items(s: State, doc: Document) -> list[tuple[str, float | None]]:

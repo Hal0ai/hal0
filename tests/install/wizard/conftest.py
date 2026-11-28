@@ -80,3 +80,8 @@ def consent_facts() -> Facts:
 @pytest.fixture
 def stop_facts() -> Facts:
     return _facts(gpu_outcome="stop", gpu_reason="broken_group")
+
+
+@pytest.fixture
+def no_python_facts(usable_facts: Facts) -> Facts:
+    return replace(usable_facts, memory_python=False)

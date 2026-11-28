@@ -27,6 +27,7 @@ from .flow_basic import (
     gpu_rows,
     gpu_title,
     review_enter,
+    review_intro,
     review_rows,
     type_cursor,
     type_enter,
@@ -101,7 +102,7 @@ _SCREENS: dict[Screen, _Spec] = {
     ),
     Screen.REVIEW: _Spec(
         lambda s: "Ready to install",
-        lambda s: (),
+        review_intro,
         review_rows,
         _no_cursor,
         review_enter,

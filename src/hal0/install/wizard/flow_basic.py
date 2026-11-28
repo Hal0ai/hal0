@@ -18,11 +18,13 @@ from .flow_model import (
     download_items,
     download_total,
     effective_doc,
+    failing_need,
     fixed_override,
     fmt_gb,
     go_on,
     gpu_consent,
     jobs_on,
+    jobs_wanted,
     key_of,
     make_row,
     maybe_value,
@@ -33,6 +35,7 @@ from .flow_model import (
 _DOWNLOAD_MBIT = 100
 _DEFAULT_HOST = "hal0.local"
 _DEFAULT_PORT = 8080
+_NPU_JOB = "npu"
 _NO_DOWNLOADS = "nothing yet; models are added after install"
 _GPU_REASONS = {
     "no_device": "No graphics card was found on this box.",
@@ -240,7 +243,9 @@ def review_rows(s: State) -> tuple[Row, ...]:
     total = download_total(s)
     rows = [
         make_row(
-            "install", "Installing", ", ".join(c.label for c in jobs) or "only the model server"
+            "install",
+            "Installing",
+            ", ".join(c.label for c in jobs if c.id != _NPU_JOB) or "only the model server",
         ),
         make_row("downloads", "Downloads", ", ".join(t for t, _ in items) or _NO_DOWNLOADS),
     ]
@@ -256,10 +261,10 @@ def review_rows(s: State) -> tuple[Row, ...]:
     rows.append(make_row("folder", "Model folder", _folder_text(s, doc)))
     model = "none" if pick is None else pick.label + (" (picked for this box)" if pick.auto else "")
     rows.append(make_row("model", "Chat model", model))
-    if s.facts.npu_device is True and any(c.id == "npu" for c in jobs):
+    if s.facts.npu_device is True and any(c.id == _NPU_JOB for c in jobs):
         rows.append(make_row("npu", "NPU", "set up if it passes its check"))
     rows.extend(_access_rows(s, doc))
-    rows.extend(make_row("warning", "Warning", w) for w in _warnings(s, doc))
+    rows.extend(make_row("warning", "Warning", w) for w in _skipped(s, doc) + _warnings(s, doc))
     return tuple(rows)
 
 
@@ -293,6 +298,16 @@ def _access_rows(s: State, doc: Document) -> list[Row]:
     ]
 
 
+def _skipped(s: State, doc: Document) -> list[str]:
+    """Jobs that are on but cannot run here (the NPU one means "when found")."""
+    out = []
+    for c in jobs_wanted(s, doc):
+        need = failing_need(s, c)
+        if need is not None and c.id != _NPU_JOB:
+            out.append(f"{c.label}: {s.catalog.reasons[need]}")
+    return out
+
+
 def _warnings(s: State, doc: Document) -> list[str]:
     out = []
     if s.facts.gpu_outcome != "usable" and get(doc, key_of(s, "cpu_only")) is True:
@@ -303,6 +318,11 @@ def _warnings(s: State, doc: Document) -> list[str]:
     if disk is not None and total is not None and disk.free_gb < total:
         out.append(f"The model folder has less than the {fmt_gb(total)} GB this setup downloads.")
     return out
+
+
+def review_intro(s: State) -> tuple[str, ...]:
+    path = s.answers.get("_save_copy_to")
+    return () if path is None else (f"Saving a copy of these answers to {path}.",)
 
 
 def review_enter(s: State) -> State:

@@ -9,6 +9,7 @@ from hal0.install.wizard.document import Override, effective
 from hal0.install.wizard.facts import Facts, load_facts
 from hal0.install.wizard.flow import (
     Outcome,
+    Row,
     Screen,
     State,
     chosen,
@@ -257,3 +258,45 @@ def test_save_copy_path_is_exposed_but_never_reaches_the_document(
     assert chosen(s)["_save_copy_to"] == "/tmp/a.json"
     s = run(s, "s", *"rel", "ENTER")
     assert view(s).error is not None
+
+
+def _review(catalog: Catalog, facts: Facts) -> tuple[Row, ...]:
+    return view(run(start(catalog, facts), "ENTER", "ENTER")).rows
+
+
+def test_a_job_the_box_cannot_run_is_left_out_and_warned_about(
+    catalog: Catalog, no_python_facts: Facts
+) -> None:
+    rows = _review(catalog, no_python_facts)
+    install = next(r for r in rows if r.id == "install")
+    assert "Memory for your assistants" not in install.detail
+    warnings = [r.detail for r in rows if r.id == "warning"]
+    assert warnings == [
+        "Memory for your assistants (Hindsight): needs Python 3.11 to 3.14, which was not found"
+    ]
+
+
+def test_a_box_with_no_npu_says_nothing_about_the_npu(
+    catalog: Catalog, usable_facts: Facts
+) -> None:
+    rows = _review(catalog, usable_facts)
+    install = next(r for r in rows if r.id == "install")
+    assert "Use the NPU" not in install.detail
+    assert all(r.id != "npu" for r in rows)
+    assert all("NPU" not in r.detail for r in rows if r.id == "warning")
+
+
+def test_a_box_with_an_npu_lists_it_once(catalog: Catalog, usable_facts: Facts) -> None:
+    facts = Facts(**{**usable_facts.__dict__, "npu_device": True, "npu_flm_build": True})
+    rows = _review(catalog, facts)
+    install = next(r for r in rows if r.id == "install")
+    assert "Use the NPU" not in install.detail
+    assert [r.id for r in rows].count("npu") == 1
+
+
+def test_the_review_says_where_a_copy_will_be_saved(catalog: Catalog, usable_facts: Facts) -> None:
+    s = run(start(catalog, usable_facts), "ENTER", "ENTER")
+    assert view(s).intro == ()
+    s = run(s, "s", *"/tmp/a.json", "ENTER")
+    assert view(s).intro == ("Saving a copy of these answers to /tmp/a.json.",)
+    assert view(press(s, "b")).screen is Screen.FOLDER
