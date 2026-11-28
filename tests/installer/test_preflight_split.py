@@ -11,6 +11,7 @@ the technique ``test_install_component_flags.py`` uses.
 from __future__ import annotations
 
 import re
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -231,8 +232,11 @@ def _python_first_script(tmp_path: Path, *, usable: bool, py: str = "python3") -
     head = TEXT.index("# Detection only: is the default Python usable?")
     half = TEXT[head : TEXT.index(_SEAM, head)]
     log = tmp_path / "calls.log"
+    # PATH starts empty; the stubbed lookup "installs" python3.12 into it, because
+    # the installer uses a looked-up name only when it is a command that exists.
     bin_dir = tmp_path / "empty-bin"
     bin_dir.mkdir(exist_ok=True)
+    chmod = shutil.which("chmod") or "/bin/chmod"
     pre = "true" if usable else "false"
     return f"""
 set -uo pipefail
@@ -247,7 +251,10 @@ preflight_python() {{ {pre}; }}
 preflight_gpu() {{ echo gpu >> "$LOG"; return 0; }}
 hal0_facts_gather() {{ echo gather >> "$LOG"; }}
 hal0_facts_write() {{ echo write >> "$LOG"; }}
-resolve_main_python() {{ echo "resolve autoinstall=${{HAL0_PY_AUTOINSTALL:-}}" >> "$LOG"; echo python3.12; }}
+resolve_main_python() {{
+    echo "resolve autoinstall=${{HAL0_PY_AUTOINSTALL:-}}" >> "$LOG"
+    printf '#!/bin/sh\nexit 0\n' > "{bin_dir}/python3.12"; "{chmod}" 755 "{bin_dir}/python3.12"
+    echo python3.12; }}
 hal0_collect_answers() {{ echo seam >> "$LOG"; }}
 DEV_MODE=0
 PY={py}
