@@ -82,6 +82,8 @@ if "slot list --json" in cmd:
     rows = [{"name": n, "status": st} for n, st in slots.items()]
     if os.environ.get("STUB_FLM_SLOT_JSON"):
         flm = json.loads(os.environ["STUB_FLM_SLOT_JSON"])
+        if not os.environ.get("STUB_FLM_NO_PORT"):
+            flm.setdefault("port", 8088)
         rows = [r for r in rows if r["name"] != "flm"] + [flm]
     print(json.dumps(rows))
     sys.exit(0)
@@ -93,13 +95,20 @@ if "/dev/accel/accel0" in cmd:
 if "/api/slots/flm/models" in cmd:
     print(os.environ.get("STUB_FLM_MODELS_JSON", '{"models": [], "probe_ok": true}'))
     sys.exit(0)
+# The FLM slot's own port (the flm row talks to it directly, #4000).
+if "127.0.0.1:8088/v1/models" in cmd:
+    ids = os.environ.get("STUB_FLM_SERVED_IDS", "installed:1b,bound:1b,other:4b").split(",")
+    print(json.dumps({"data": [{"id": i} for i in ids if i]}))
+    sys.exit(0)
+if "127.0.0.1:8088/v1/chat/completions" in cmd:
+    mode = os.environ.get("STUB_FLM_CHAT", "ok")
+    if mode == "refuse":
+        sys.exit(22)  # what `curl -f` exits with on an HTTP error
+    print(json.dumps({"choices": [{"message": {"content": "pong"}}]} if mode == "ok" else {}))
+    sys.exit(0)
 if "/v1/models" in cmd:
     print("1")
     sys.exit(0)
-if "/v1/chat/completions" in cmd:
-    # `curl -f` exits 22 on an HTTP error such as 503 slot.loading.
-    refused = os.environ.get("STUB_CHAT_FAIL_MODEL")
-    sys.exit(22 if refused and '"model":"%s"' % refused in cmd else 0)
 words = cmd.split()
 is_slot_load = len(words) >= 4 and words[1:3] == ["slot", "load"]
 is_tts_enable = "capabilities set voice tts" in cmd and "--enabled" in cmd
@@ -248,33 +257,75 @@ _FLM_READY_ENV = {
     "HAL0_TEST_BIN": "/opt/test/hal0",
     "STUB_NPU_PRESENT": "1",
     "STUB_FLM_SLOT_JSON": json.dumps(
-        {"name": "flm", "status": "offline", "model_id": None, "model_default": "bound:1b"}
+        {"name": "flm", "status": "offline", "model_id": None, "model_default": "bound-1b-FLM"}
     ),
 }
 
 
-def test_flm_row_requires_a_completion_after_ready(tmp_path: Path) -> None:
-    """#4000: the row sends one chat completion to the slot by name, after the load."""
+def _flm_port_calls(cmds: list[str]) -> list[str]:
+    return [c for c in cmds if "127.0.0.1:8088/" in c]
+
+
+def test_flm_row_asks_the_slot_itself_for_a_completion(tmp_path: Path) -> None:
+    """#4000: after the load, one completion on the slot's own port, naming the loaded tag."""
     proc, cmds = _run(tmp_path, **_FLM_READY_ENV)
     assert proc.returncode == 0, proc.stdout + proc.stderr
     row = _rows_by_name(tmp_path)["flm"]
     assert row["status"] == "pass"
-    assert "chat/completions answered" in row["detail"]
-    load = cmds.index("/opt/test/hal0 slot load flm -m bound:1b")
-    chats = [i for i, c in enumerate(cmds) if "/v1/chat/completions" in c and '"model":"flm"' in c]
-    assert chats and chats[0] > load
+    assert "FastFlowLM answered a chat completion" in row["detail"]
+    assert "port 8088, model bound:1b" in row["detail"]
+    load = cmds.index("/opt/test/hal0 slot load flm -m bound-1b-FLM")
+    direct = _flm_port_calls(cmds)
+    assert [c for c in direct if "/v1/models" in c]
+    chat = [c for c in direct if "/v1/chat/completions" in c]
+    # The hal0 id is mapped to the tag FastFlowLM lists; no other tag is probed.
+    assert len(chat) == 1 and '"model":"bound:1b"' in chat[0]
+    assert cmds.index(chat[0]) > load
 
 
-def test_flm_row_fails_when_the_ready_slot_does_not_answer(tmp_path: Path) -> None:
-    """A slot that reports ready but cannot serve (the model failed to load) fails the row."""
-    proc, cmds = _run(tmp_path, **_FLM_READY_ENV, STUB_CHAT_FAIL_MODEL="flm")
+def test_flm_row_does_not_pass_on_an_answer_from_another_slot(tmp_path: Path) -> None:
+    """The gateway would answer `model: flm` from the agent slot when the flm
+    slot is not registered. The row never asks the gateway, so that 200 cannot
+    pass it: with FastFlowLM refusing on its own port the row fails, while the
+    vulkan row's gateway request still succeeds."""
+    proc, cmds = _run(tmp_path, **_FLM_READY_ENV, STUB_FLM_CHAT="refuse")
+    assert proc.returncode != 0
+    rows = _rows_by_name(tmp_path)
+    assert rows["flm"]["status"] == "fail"
+    assert "did not answer 200" in rows["flm"]["detail"]
+    assert rows["vulkan"]["status"] == "pass"
+    gateway_flm = [
+        c
+        for c in cmds
+        if "/v1/chat/completions" in c and "127.0.0.1:8088" not in c and '"model":"flm"' in c
+    ]
+    assert gateway_flm == []
+
+
+def test_flm_row_fails_on_a_200_with_no_completion(tmp_path: Path) -> None:
+    proc, _cmds = _run(tmp_path, **_FLM_READY_ENV, STUB_FLM_CHAT="empty")
     assert proc.returncode != 0
     row = _rows_by_name(tmp_path)["flm"]
     assert row["status"] == "fail"
-    assert "did not answer 200" in row["detail"]
-    assert "/opt/test/hal0 slot load flm -m bound:1b" in cmds
-    # The other lanes are unaffected by the flm refusal.
-    assert _rows_by_name(tmp_path)["vulkan"]["status"] == "pass"
+    assert "no completion in the body" in row["detail"]
+
+
+def test_flm_row_fails_when_the_slot_does_not_list_the_loaded_model(tmp_path: Path) -> None:
+    """It refuses to probe a different tag, as hal0's own load gate does."""
+    proc, cmds = _run(tmp_path, **_FLM_READY_ENV, STUB_FLM_SERVED_IDS="other:4b")
+    assert proc.returncode != 0
+    row = _rows_by_name(tmp_path)["flm"]
+    assert row["status"] == "fail"
+    assert "does not list bound-1b-FLM" in row["detail"]
+    assert not [c for c in _flm_port_calls(cmds) if "/v1/chat/completions" in c]
+
+
+def test_flm_row_fails_when_the_slot_reports_no_port(tmp_path: Path) -> None:
+    proc, _cmds = _run(tmp_path, **_FLM_READY_ENV, STUB_FLM_NO_PORT="1")
+    assert proc.returncode != 0
+    row = _rows_by_name(tmp_path)["flm"]
+    assert row["status"] == "fail"
+    assert "reports no port" in row["detail"]
 
 
 def test_flm_without_installed_model_warns_that_npu_was_not_tested(tmp_path: Path) -> None:

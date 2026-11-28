@@ -223,8 +223,11 @@ Three things to know before citing γ as validation:
   the `flm` row uses the slot's configured model or an installed chat model from
   `/api/slots/flm/models`; if neither exists, it warns `NPU lane NOT TESTED`.
   A missing seeded slot or unreadable catalog fails the row. Once the slot
-  reports ready the row sends one chat completion to it and fails unless that
-  answers 200, because a slot can report ready while its model did not load.
+  reports ready the row sends one chat completion to the slot's own port,
+  naming the tag the slot lists for the loaded model, and fails unless the
+  reply carries a completion. It does not go through the gateway: a slot can
+  report ready while its model did not load, and the gateway would answer a
+  request for an unregistered `flm` slot from the `agent` slot.
 
 ```sh
 # Set HAL0_TEST_SSH_KEY to whatever key authorises you on your test host

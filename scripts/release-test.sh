@@ -246,6 +246,8 @@ remote_slot_create() {
 # Last non-blank line `hal0 slot load` printed when remote_slot_load failed,
 # so a failed row's detail says what the CLI said instead of a guess.
 LAST_LOAD_OUTPUT=""
+# Why the last direct FLM smoke failed, or where it succeeded (row detail).
+LAST_FLM_SMOKE=""
 remote_slot_load() {
     # remote_slot_load <slot> [load args…]  → exit status of `hal0 slot load`
     local out args
@@ -401,6 +403,68 @@ remote_chat_smoke() {
         >/dev/null"
 }
 
+# One chat completion sent to the FLM slot's OWN port, bypassing the gateway.
+# $1 is the model the row loaded (a hal0 `<tag>-FLM` id or a FastFlowLM tag).
+#
+# Why not through the gateway (#4000): a request that names the slot reaches
+# it only while the slot is registered with the dispatcher. When it is not,
+# the dispatcher's default rule hands the request to the `agent` slot, and a
+# loaded agent slot answers 200, so a gateway 200 does not prove FastFlowLM
+# answered. This is the check hal0's own load gate makes
+# (providers/flm.py::verify_inference): read the slot's /v1/models, require
+# the loaded model's tag to be listed, and send one completion naming exactly
+# that tag. It never probes another tag: FastFlowLM lists models it has not
+# loaded, and naming one makes it switch weights or pull.
+# Exit 0 only when the reply carries at least one choice.
+remote_flm_direct_smoke() {
+    local want="$1" slots port models tag reply
+    slots="$(ssh_exec "${REMOTE_HAL0_BIN} slot list --json 2>/dev/null")" || return 1
+    port="$(printf '%s\n' "${slots}" | python3 -c '
+import json, sys
+try:
+    rows = json.load(sys.stdin)
+except Exception:
+    raise SystemExit(1)
+for row in rows if isinstance(rows, list) else []:
+    if row.get("name") == "flm":
+        port = row.get("port")
+        if isinstance(port, int) and 0 < port < 65536:
+            print(port)
+            raise SystemExit(0)
+raise SystemExit(1)
+')" || { LAST_FLM_SMOKE="the flm slot reports no port"; return 1; }
+    models="$(ssh_exec "curl -fsS -m 30 http://127.0.0.1:${port}/v1/models")" \
+        || { LAST_FLM_SMOKE="the flm slot does not answer /v1/models on port ${port}"; return 1; }
+    tag="$(printf '%s\n' "${models}" | python3 -c '
+import json, re, sys
+want = sys.argv[1]
+try:
+    ids = [m.get("id") for m in json.load(sys.stdin).get("data", []) if isinstance(m, dict)]
+except Exception:
+    raise SystemExit(1)
+for tag in ids:
+    if not isinstance(tag, str) or not re.fullmatch(r"[A-Za-z0-9._:-]{1,128}", tag):
+        continue
+    if tag == want or tag.replace(":", "-") + "-FLM" == want:
+        print(tag)
+        raise SystemExit(0)
+raise SystemExit(1)
+' "${want}")" || { LAST_FLM_SMOKE="the flm slot does not list ${want} in /v1/models"; return 1; }
+    reply="$(ssh_exec "curl -fsS -m 120 http://127.0.0.1:${port}/v1/chat/completions \
+        -H 'content-type: application/json' \
+        -d '{\"model\":\"${tag}\",\"messages\":[{\"role\":\"user\",\"content\":\"ping\"}],\"max_tokens\":4}'")" \
+        || { LAST_FLM_SMOKE="chat/completions on the flm slot (port ${port}, model ${tag}) did not answer 200"; return 1; }
+    printf '%s\n' "${reply}" | python3 -c '
+import json, sys
+try:
+    choices = json.load(sys.stdin).get("choices")
+except Exception:
+    raise SystemExit(1)
+raise SystemExit(0 if isinstance(choices, list) and choices else 1)
+' || { LAST_FLM_SMOKE="the flm slot answered 200 with no completion in the body"; return 1; }
+    LAST_FLM_SMOKE="port ${port}, model ${tag}"
+}
+
 # ── ROW: Vulkan baseline ─────────────────────────────────────────────────────
 log_step "Row: vulkan baseline"
 start=$(date +%s%N)
@@ -465,14 +529,13 @@ else
         LOADED_SEEDED_SLOTS+=("flm")
         # Ready is not enough (#4000): the slot can report ready while
         # FastFlowLM failed to load the model (no NPU hardware context, for
-        # one). Require one completion, as the vulkan row does. The request
-        # names the slot, so it cannot be answered by another one.
+        # one). Require one completion from the slot itself.
         if ! remote_slot_load flm -m "${FLM_MODEL}"; then
             add_row "flm" "fail" "$(since_ms "${start}")" "FLM slot failed to load (${LAST_LOAD_OUTPUT:-no CLI output}); check /sys/class/accel and the xdna driver"
-        elif remote_chat_smoke flm; then
-            add_row "flm" "pass" "$(since_ms "${start}")" "chat/completions answered on the seeded flm slot (device=npu) serving ${FLM_MODEL}"
+        elif remote_flm_direct_smoke "${FLM_MODEL}"; then
+            add_row "flm" "pass" "$(since_ms "${start}")" "FastFlowLM answered a chat completion on the seeded flm slot (device=npu, ${LAST_FLM_SMOKE}) serving ${FLM_MODEL}"
         else
-            add_row "flm" "fail" "$(since_ms "${start}")" "flm slot reached ready serving ${FLM_MODEL} but chat/completions did not answer 200: the model may not have loaded (is the NPU held by another guest?); check journalctl -u hal0-slot@flm"
+            add_row "flm" "fail" "$(since_ms "${start}")" "flm slot reached ready serving ${FLM_MODEL} but FastFlowLM did not answer: ${LAST_FLM_SMOKE:-no detail}; the model may not have loaded (is the NPU held by another guest?); check journalctl -u hal0-slot@flm"
         fi
     fi
 fi
