@@ -14,7 +14,7 @@ not have. Every file under that tree is checked for these things:
 * no ``mcp__local_mcp`` namespace, which only one box ever had;
 * every ``mcp__<server>__<tool>`` name exists in the tools the matching hal0 MCP
   server registers, read in-process through its public listing;
-* no ``systemctl --user``: hal0's units are system units.
+* no ``--user`` on a ``systemctl`` or ``journalctl`` line: hal0's units are system units.
 """
 
 from __future__ import annotations
@@ -47,7 +47,7 @@ _HOME_PATH = re.compile(
 # Not preceded by a word character or a dot (so ``v1.8.2.1`` is a version) and not
 # followed by a word character or another ``.<digit>`` (so ``1.2.3.4.5`` is not an address).
 _IPV4 = re.compile(r"(?<![\w.])(?:\d{1,3}\.){3}\d{1,3}(?!\w|\.\d)")
-_SYSTEMCTL_USER = re.compile(r"systemctl\s+(?:-\S+\s+)*--user\b")
+_SYSTEMCTL_USER = re.compile(r"\b(?:systemctl|journalctl)\b[^\n]*?\s--user\b")
 _MCP_NAME = re.compile(r"mcp__([a-z0-9]+(?:[_-][a-z0-9]+)*)__([a-z][a-z0-9_]*)")
 
 
@@ -64,7 +64,7 @@ def local_paths(text: str) -> list[str]:
 
 def systemctl_user(text: str) -> list[str]:
     """``systemctl --user`` invocations: hal0 installs system units, never user units."""
-    return [match.group(0) for match in _SYSTEMCTL_USER.finditer(text)]
+    return [match.group(0) for match in _SYSTEMCTL_USER.finditer(text)]  # also journalctl
 
 
 def foreign_addresses(text: str) -> list[str]:
@@ -198,10 +198,16 @@ def test_path_check_catches_home_relative_and_other_local_roots() -> None:
 
 
 def test_systemctl_user_check() -> None:
-    assert systemctl_user("run systemctl --user restart x and systemctl -q --user status y") == [
-        "systemctl --user",
-        "systemctl -q --user",
+    assert systemctl_user("run systemctl --user restart x") == ["systemctl --user"]
+    assert systemctl_user("run systemctl -q --user status y") == ["systemctl -q --user"]
+    # `--user` after the verb, and the same for journalctl, in either order.
+    assert systemctl_user("run systemctl restart --user x") == ["systemctl restart --user"]
+    assert systemctl_user("systemctl status hal0-agent@hermes --user") == [
+        "systemctl status hal0-agent@hermes --user"
     ]
+    assert systemctl_user("journalctl --user -u x") == ["journalctl --user"]
+    assert systemctl_user("journalctl -u x -n 50 --user") == ["journalctl -u x -n 50 --user"]
+    assert systemctl_user("systemctl status x\njournalctl -u x") == []
     assert (
         systemctl_user("units are system units, so there is no `--user`; systemctl status x") == []
     )

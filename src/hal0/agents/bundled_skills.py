@@ -67,7 +67,9 @@ def prune_retired_skills(
     A name still in ``shipped`` (the set this build ships) is never removed,
     so re-adding a skill only needs it taken off the retired list. In the
     mirror only symlinks are removed (the provisioner creates nothing else
-    there); in the ship root only directories. ``ship_root=None`` leaves the
+    there); in the ship root only directories, plus the single files in
+    :data:`RETIRED_BUNDLED_FILES` (a regular file only, and only when its
+    resolved parent directory lies inside the resolved ship root). ``ship_root=None`` leaves the
     copies alone (they are root-owned; callers running as the hal0 user only
     unlink the mirror). A path that cannot be removed is logged and skipped.
     """
@@ -92,9 +94,17 @@ def prune_retired_skills(
             except OSError as exc:
                 log.warning("skills.retired_remove_failed path=%s error=%s", copy, exc)
     if ship_root is not None:
+        resolved_root = ship_root.resolve()
         for rel in sorted(RETIRED_BUNDLED_FILES):
             stale = ship_root / rel
             if stale.is_file() and not stale.is_symlink():
+                if not stale.parent.resolve().is_relative_to(resolved_root):
+                    log.warning(
+                        "skills.retired_file_outside_ship_root path=%s root=%s",
+                        stale,
+                        resolved_root,
+                    )
+                    continue
                 try:
                     stale.unlink()
                     removed.append(str(stale))
