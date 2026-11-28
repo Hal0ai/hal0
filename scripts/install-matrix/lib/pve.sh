@@ -1,0 +1,298 @@
+# shellcheck shell=bash
+# Proxmox host library for the install matrix. SOURCED by run-shape.sh.
+#
+# Every call to the Proxmox host goes through pve_run (one ssh, one command
+# string). The library never sets shell options or traps and never exits the
+# caller's shell: functions return non-zero instead.
+#
+# Ownership guard: ct_destroy, ct_apply_device_rules, ct_start, ct_exec,
+# ct_push and ct_pull act on a guest only after ct_owned passes (VMID inside
+# the harness range, tag hal0-matrix, hostname hal0-mx-*). Nothing else here
+# runs pct against a guest.
+#
+# Injection rule: pve_run hands ONE string to the remote shell. Every value
+# placed in that string is either checked against a strict pattern or passed
+# through printf %q first.
+
+# Same default as scripts/proxmox-ve/hal0.sh:132 (a test pins the equality).
+_PVE_FEATURES="nesting=1,keyctl=1,fuse=1,mknod=1"
+_PVE_TAG="hal0-matrix"
+_PVE_HOST_PREFIX="hal0-mx-"
+
+# Quote one value for the remote shell. Plain words stay as they are so the
+# recorded command reads naturally; anything else goes through printf %q.
+_pve_q() {
+  if [[ "$1" =~ ^[A-Za-z0-9_@%+=:,./-]+$ ]]; then
+    printf '%s' "$1"
+  else
+    printf '%q' "$1"
+  fi
+}
+
+_pve_err() { printf '%s\n' "$*" >&2; }
+
+_pve_vmid_min() { printf '%s' "${HAL0_MATRIX_VMID_MIN:-170}"; }
+_pve_vmid_max() { printf '%s' "${HAL0_MATRIX_VMID_MAX:-189}"; }
+
+# A VMID is digits only, no leading zero, at most 9 digits.
+_pve_vmid_ok() { [[ "${1:-}" =~ ^[1-9][0-9]{0,8}$ ]]; }
+_pve_uint_ok() { [[ "${1:-}" =~ ^[0-9]{1,9}$ ]]; }
+
+_pve_in_range() {
+  local lo hi
+  lo="$(_pve_vmid_min)"
+  hi="$(_pve_vmid_max)"
+  _pve_uint_ok "$lo" && _pve_uint_ok "$hi" || return 1
+  _pve_vmid_ok "$1" || return 1
+  ((10#$1 >= 10#$lo && 10#$1 <= 10#$hi))
+}
+
+# pve_run <command string>
+pve_run() {
+  ssh -o BatchMode=yes -o ConnectTimeout=10 "${HAL0_PVE:-pve}" "$1"
+}
+
+# pve_mem_available_gb: integer from the "available" column of `free -g`.
+pve_mem_available_gb() {
+  local out n
+  out="$(pve_run 'free -g')" || return 1
+  n="$(printf '%s\n' "$out" | awk '/^Mem:/ {print $7}')"
+  [[ "$n" =~ ^[0-9]+$ ]] || return 1
+  printf '%s\n' "$n"
+}
+
+# pve_require_headroom [floor_gb=12]
+pve_require_headroom() {
+  local floor="${1:-12}" have
+  _pve_uint_ok "$floor" || { _pve_err "bad headroom floor: $floor"; return 1; }
+  have="$(pve_mem_available_gb)" || { _pve_err "cannot read host memory"; return 1; }
+  if ((have < floor)); then
+    _pve_err "host has ${have} GB available, need ${floor}"
+    return 1
+  fi
+}
+
+# pve_template_volid <pattern>: the single local template whose id contains it.
+pve_template_volid() {
+  local pat="${1:-}" out all matches count
+  [[ "$pat" =~ ^[A-Za-z0-9._+-]+$ ]] || { _pve_err "bad template pattern: $pat"; return 1; }
+  out="$(pve_run 'pveam list local')" || { _pve_err "cannot list templates"; return 1; }
+  all="$(printf '%s\n' "$out" | awk 'NR > 1 && $1 != "" {print $1}')"
+  matches="$(printf '%s\n' "$all" | grep -F -- "$pat" || true)"
+  count="$(printf '%s' "$matches" | grep -c . || true)"
+  if [[ "$count" == "1" ]]; then
+    printf '%s\n' "$matches"
+    return 0
+  fi
+  if [[ "$count" == "0" ]]; then
+    _pve_err "no template matches '${pat}'; available:"
+  else
+    _pve_err "${count} templates match '${pat}':"
+    all="$matches"
+  fi
+  printf '%s\n' "$all" | sed 's/^/  /' >&2
+  return 1
+}
+
+# pve_storage: HAL0_MATRIX_STORAGE, else the first active rootdir storage.
+pve_storage() {
+  local name out
+  if [[ -n "${HAL0_MATRIX_STORAGE:-}" ]]; then
+    [[ "$HAL0_MATRIX_STORAGE" =~ ^[A-Za-z0-9._-]+$ ]] || { _pve_err "bad HAL0_MATRIX_STORAGE"; return 1; }
+    printf '%s\n' "$HAL0_MATRIX_STORAGE"
+    return 0
+  fi
+  out="$(pve_run 'pvesm status --content rootdir')" || { _pve_err "cannot list storage"; return 1; }
+  name="$(printf '%s\n' "$out" | awk 'NR > 1 && $3 == "active" {print $1; exit}')"
+  [[ "$name" =~ ^[A-Za-z0-9._-]+$ ]] || { _pve_err "no active storage accepts container disks"; return 1; }
+  printf '%s\n' "$name"
+}
+
+# pve_pick_vmid: first free VMID in range; refuses if a matrix guest exists.
+pve_pick_vmid() {
+  local lo hi out
+  lo="$(_pve_vmid_min)"
+  hi="$(_pve_vmid_max)"
+  if ! _pve_uint_ok "$lo" || ! _pve_uint_ok "$hi"; then
+    _pve_err "bad VMID range ${lo}-${hi}"
+    return 1
+  fi
+  out="$(pve_run 'pvesh get /cluster/resources --type vm --output-format json')" \
+    || { _pve_err "cannot list guests"; return 1; }
+  printf '%s' "$out" | python3 -I -c '
+import json, re, sys
+lo, hi, tag = int(sys.argv[1]), int(sys.argv[2]), sys.argv[3]
+rows = json.load(sys.stdin)
+taken = set()
+for r in rows:
+    if "vmid" in r:
+        taken.add(int(r["vmid"]))
+    if tag in re.split(r"[;,]", r.get("tags") or ""):
+        print("another matrix container is present: %s" % r.get("vmid"), file=sys.stderr)
+        sys.exit(3)
+for v in range(lo, hi + 1):
+    if v not in taken:
+        print(v)
+        sys.exit(0)
+print("no free VMID in %d-%d" % (lo, hi), file=sys.stderr)
+sys.exit(1)
+' "$lo" "$hi" "$_PVE_TAG" || return 1
+}
+
+# ct_owned <vmid>: 0 only for a guest this harness created.
+ct_owned() {
+  local vmid="${1:-}" conf line tags="" host="" t found=1
+  _pve_in_range "$vmid" || return 1
+  conf="$(pve_run "pct config ${vmid}")" || return 1
+  while IFS= read -r line; do
+    case "$line" in
+      tags:*) tags="${line#tags:}" ;;
+      hostname:*) host="${line#hostname:}" ;;
+    esac
+  done <<<"$conf"
+  host="${host// /}"
+  tags="${tags// /}"
+  [[ "$host" == "${_PVE_HOST_PREFIX}"* ]] || return 1
+  local IFS=';,'
+  for t in $tags; do
+    [[ "$t" == "$_PVE_TAG" ]] && found=0
+  done
+  return "$found"
+}
+
+_ct_require_owned() {
+  ct_owned "${1:-}" || { _pve_err "refusing: guest '${1:-}' is not a harness-owned container"; return 1; }
+}
+
+# ct_create <vmid> <volid> <unprivileged 0|1> <cores> <memory_mb> <disk_gb> [device...]
+ct_create() {
+  local vmid="${1:-}" volid="${2:-}" unpriv="${3:-}" cores="${4:-}" mem="${5:-}" disk="${6:-}"
+  shift 6 2>/dev/null || { _pve_err "ct_create: too few arguments"; return 1; }
+  local bridge="${HAL0_MATRIX_BRIDGE:-vmbr0}" storage dev i=0 cmd st
+  _pve_in_range "$vmid" || { _pve_err "refusing: VMID '${vmid}' is outside the harness range"; return 1; }
+  [[ "$volid" =~ ^[A-Za-z0-9._+-]+:[A-Za-z0-9._+/-]+$ ]] || { _pve_err "bad template volume id"; return 1; }
+  [[ "$unpriv" =~ ^[01]$ ]] || { _pve_err "unprivileged must be 0 or 1"; return 1; }
+  if ! _pve_uint_ok "$cores" || ! _pve_uint_ok "$mem" || ! _pve_uint_ok "$disk"; then
+    _pve_err "cores, memory and disk must be integers"
+    return 1
+  fi
+  [[ "$bridge" =~ ^[A-Za-z0-9_.-]+$ ]] || { _pve_err "bad HAL0_MATRIX_BRIDGE"; return 1; }
+  for dev in "$@"; do
+    [[ "$dev" =~ ^/dev/[A-Za-z0-9_-]+(/[A-Za-z0-9_-]+)*(,gid=[0-9]+)?$ ]] \
+      || { _pve_err "bad device argument: ${dev}"; return 1; }
+  done
+  # Never create over an existing guest.
+  if pve_run "pct status ${vmid}" >/dev/null 2>&1; then
+    _pve_err "refusing: guest ${vmid} already exists"
+    return 1
+  fi
+  storage="$(pve_storage)" || return 1
+  cmd="pct create $(_pve_q "$vmid") $(_pve_q "$volid")"
+  cmd+=" --hostname $(_pve_q "${_PVE_HOST_PREFIX}${vmid}")"
+  cmd+=" --tags $(_pve_q "$_PVE_TAG")"
+  cmd+=" --cores ${cores} --memory ${mem} --swap 1024"
+  cmd+=" --rootfs $(_pve_q "${storage}:${disk}")"
+  cmd+=" --net0 $(_pve_q "name=eth0,bridge=${bridge},ip=dhcp")"
+  cmd+=" --unprivileged ${unpriv}"
+  cmd+=" --features $(_pve_q "$_PVE_FEATURES")"
+  cmd+=" --onboot 0"
+  for dev in "$@"; do
+    cmd+=" --dev${i} $(_pve_q "$dev")"
+    i=$((i + 1))
+  done
+  pve_run "$cmd"
+  st=$?
+  return "$st"
+}
+
+# ct_apply_device_rules <vmid> <major...>
+ct_apply_device_rules() {
+  local vmid="${1:-}" maj line cmd="" conf seen=" "
+  shift || true
+  _ct_require_owned "$vmid" || return 1
+  [[ $# -gt 0 ]] || { _pve_err "ct_apply_device_rules: no device majors given"; return 1; }
+  for maj in "$@"; do
+    _pve_uint_ok "$maj" || { _pve_err "bad device major: ${maj}"; return 1; }
+  done
+  conf="/etc/pve/lxc/${vmid}.conf"
+  for maj in "$@"; do
+    [[ "$seen" == *" ${maj} "* ]] && continue
+    seen+="${maj} "
+    line="lxc.cgroup2.devices.allow: c ${maj}:* rwm"
+    cmd+="{ grep -qxF -- $(_pve_q "$line") ${conf} || printf '%s\\n' $(_pve_q "$line") >> ${conf}; } && "
+  done
+  line="lxc.prlimit.memlock: unlimited"
+  cmd+="{ grep -qxF -- $(_pve_q "$line") ${conf} || printf '%s\\n' $(_pve_q "$line") >> ${conf}; }"
+  pve_run "$cmd"
+}
+
+# ct_start <vmid>
+ct_start() {
+  _ct_require_owned "${1:-}" || return 1
+  pve_run "pct start $1"
+}
+
+# ct_exec <vmid> <command string>: root, no terminal.
+ct_exec() {
+  local vmid="${1:-}"
+  _ct_require_owned "$vmid" || return 1
+  [[ $# -ge 2 ]] || { _pve_err "ct_exec: no command given"; return 1; }
+  pve_run "pct exec ${vmid} -- bash -c $(_pve_q "$2")"
+}
+
+# ct_wait_network <vmid> [seconds=120]: the guest resolves hal0.dev.
+ct_wait_network() {
+  local vmid="${1:-}" limit="${2:-120}" start now
+  _pve_uint_ok "$limit" || { _pve_err "bad timeout"; return 1; }
+  start="$(date +%s)"
+  while :; do
+    if ct_exec "$vmid" 'getent hosts hal0.dev' >/dev/null 2>&1; then
+      return 0
+    fi
+    _ct_require_owned "$vmid" >/dev/null 2>&1 || return 1
+    now="$(date +%s)"
+    ((now - start >= limit)) && break
+    sleep "${HAL0_MATRIX_POLL_SLEEP:-2}"
+  done
+  _pve_err "guest ${vmid} did not resolve hal0.dev within ${limit}s"
+  return 1
+}
+
+# ct_push <vmid> <local> <remote>: stream a local file into the guest.
+ct_push() {
+  local vmid="${1:-}" src="${2:-}" dst="${3:-}"
+  _ct_require_owned "$vmid" || return 1
+  [[ -f "$src" ]] || { _pve_err "no such local file: ${src}"; return 1; }
+  [[ -n "$dst" ]] || { _pve_err "ct_push: no remote path"; return 1; }
+  pve_run "pct exec ${vmid} -- bash -c $(_pve_q "cat > $(_pve_q "$dst")")" <"$src"
+}
+
+# ct_pull <vmid> <remote> <local>: stream a guest file out.
+ct_pull() {
+  local vmid="${1:-}" src="${2:-}" dst="${3:-}"
+  _ct_require_owned "$vmid" || return 1
+  [[ -n "$src" && -n "$dst" ]] || { _pve_err "ct_pull: need a remote and a local path"; return 1; }
+  pve_run "pct exec ${vmid} -- bash -c $(_pve_q "cat $(_pve_q "$src")")" >"$dst"
+}
+
+# ct_destroy <vmid>: refuses unless ct_owned. Sequence from
+# scripts/fresh-test-ct.sh: SIGKILL the lxc-start monitor (a privileged guest
+# holding /dev/kfd hangs `lxc-stop --kill`), clear a stale lock, purge-destroy,
+# retry once, then VERIFY with `pct status`. The [l] in the pkill pattern keeps
+# the remote shell's own command line from matching it.
+ct_destroy() {
+  local vmid="${1:-}" attempt rc
+  _ct_require_owned "$vmid" || return 1
+  for attempt in 1 2; do
+    pve_run "pkill -9 -f '[l]xc-start -F -n ${vmid}( |\$)' 2>/dev/null; sleep 2; rm -f /run/lock/lxc/pve-config-${vmid}.lock; pct destroy ${vmid} --force --purge" >/dev/null 2>&1 || true
+    pve_run "pct status ${vmid}" >/dev/null 2>&1
+    rc=$?
+    # 255 is ssh itself failing: that proves nothing about the guest.
+    if [[ "$rc" -ne 0 && "$rc" -ne 255 ]]; then
+      return 0
+    fi
+    [[ "$attempt" == "1" ]] && sleep "${HAL0_MATRIX_DESTROY_SLEEP:-3}"
+  done
+  _pve_err "guest ${vmid} is still present after destroy (or the host is unreachable); destroy it by hand: pct destroy ${vmid} --force --purge"
+  return 1
+}
