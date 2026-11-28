@@ -128,7 +128,11 @@ reproduce here.
 Speed flags can hurt output — especially aggressive KV quant. Before recommending a config
 that touches `-ctk/-ctv` (or anything beyond ub/b), validate quality on the tuned settings with
 hal0's own agentic eval: `hal0 bench eval --models <id> [--task <id> ...]` (`--dry-run` prints the
-commands without running them). Report speed **and** quality; if quality drops, the config is not a win.
+commands without running them). Unlike `hal0 bench run`, eval does not take the GPU exclusively: it
+runs real tool-calling scenarios against the live hal0 API (`/v1`), so the model must already be
+serveable, and it competes with production traffic. It declines while live traffic is in flight
+(re-checked before each scenario); never add `--force` to push past that without the person's yes.
+Report speed **and** quality; if quality drops, the config is not a win.
 
 ## Applying a winning config to a slot
 
