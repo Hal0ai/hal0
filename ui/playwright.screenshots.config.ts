@@ -8,7 +8,7 @@
  *
  * The run renders the dashboard against the same in-bundle mock layer the e2e
  * suite uses (VITE_MOCK_HAL0=1) with the e2e apiMock fixture, plus a showcase
- * overlay (scripts/screenshots/showcase.ts) so every page looks like a busy,
+ * overlay (scripts/screenshots/showcase/) so every page looks like a busy,
  * healthy box. Images are written to ../docs/screenshots/.
  */
 import { defineConfig } from '@playwright/test'
