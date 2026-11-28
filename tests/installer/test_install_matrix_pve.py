@@ -27,7 +27,23 @@ FEATURES = "nesting=1,keyctl=1,fuse=1,mknod=1"
 TAGGED_CONF = "hostname: hal0-mx-{vmid}\ntags: hal0-matrix\ncores: 2\n"
 UNTAGGED_CONF = "hostname: hal0-mx-{vmid}\ncores: 2\n"
 WRONG_HOST_CONF = "hostname: hal0\ntags: hal0-matrix\ncores: 2\n"
+NONCE = "0123456789abcdef"
+NONCE_CONF = TAGGED_CONF + "description: hal0-matrix run " + NONCE + "\n"
 
+
+# An action now arrives as `{ pct config V | grep ... ; } && <action>`. The fake
+# runs the guard for real (real grep, a `pct` that prints the config the rules
+# give for `pct config V`) and answers the action only when the guard passes.
+GUARD_PREAMBLE = r"""
+if [[ "$cmd" == "{ pct config "* ]]; then
+  guard="${cmd%%; \} && *}; }"
+  action="${cmd#*; \} && }"
+  vm="${cmd#\{ pct config }"; vm="${vm%% *}"
+  conf="$(bash "$0" "pct config $vm")" || exit 1
+  GUARD="$guard" CONF="$conf" bash -c 'pct() { printf "%s\n" "$CONF"; }; export -f pct; exec bash -c "$GUARD"' || exit 1
+  cmd="$action"
+fi
+"""
 
 HANG = "__HANG__"  # a rule answering this never returns (until killed)
 
@@ -67,7 +83,7 @@ class Fake:
         self.write_handler()
 
     def write_handler(self):
-        lines = ["#!/usr/bin/env bash", 'cmd="$1"']
+        lines = ["#!/usr/bin/env bash", 'cmd="$1"', GUARD_PREAMBLE]
         for i, (needle, out, rc) in enumerate(self.rules):
             f = self.dir / f"out{i}"
             f.write_bytes(out if isinstance(out, bytes) else out.encode())
@@ -565,6 +581,106 @@ def test_pick_vmid_range_full(fake):
     assert r.returncode == 1 and r.stdout == ""
 
 
+# --- the ownership test travels with the action (one remote command) -------
+
+ACTIONS = [
+    ("ct_start 172", "pct start 172"),
+    ("ct_exec 172 'id'", "pct exec 172 -- bash -c"),
+    ("ct_push 172 /etc/hostname /root/x", "pct exec 172 -- bash -c"),
+    ("ct_pull 172 /root/x {tmp}", "pct exec 172 -- bash -c"),
+    ("ct_apply_device_rules 172 0 226", "lxc.cgroup2.devices.allow"),
+    ("ct_destroy 172", "pct destroy 172 --force --purge"),
+]
+GUARD_HOST = "pct config 172 | grep -q '^hostname: hal0-mx-172$'"
+GUARD_TAG = (
+    "pct config 172 | grep -Eq '^tags: ([^;,]*[;,])*hal0-matrix([;,].*)?$'"
+)
+
+
+@pytest.mark.parametrize("call,marker", ACTIONS)
+def test_every_state_changing_call_carries_the_ownership_test(fake, tmp_path, call, marker):
+    _owned_rules(fake, 172)
+    fake.rule("pct exec 172", "")
+    fake.rule("pct start 172", "")
+    fake.rule("/etc/pve/lxc/172.conf", "")
+    fake.rule("pct destroy 172", "")
+    fake.run(call.format(tmp=tmp_path / "out"))
+    acting = [c for c in fake.calls() if marker in c]
+    assert acting, fake.calls()
+    one = acting[0]
+    assert GUARD_HOST in one and GUARD_TAG in one
+    assert one.index(GUARD_HOST) < one.index(marker)
+    assert "; } && " in one[: one.index(marker)]
+
+
+def test_the_guard_comes_before_the_pkill_of_a_destroy(fake):
+    _owned_rules(fake, 172)
+    fake.rule("pct destroy 172", "")
+    fake.rule("test -e /etc/pve/lxc/172.conf", "absent\n")
+    fake.run("ct_destroy 172")
+    call = [c for c in fake.calls() if "pkill" in c][0]
+    assert call.index(GUARD_TAG) < call.index("pkill")
+    assert "{ pkill" in call  # the whole sequence sits behind the guard
+
+
+def test_the_guard_decides_in_the_same_command_when_the_config_changes_under_us(fake):
+    """The separate check passes, then the guest's config changes: the action
+    must not run, because the guard that travels with it sees the new config."""
+    log = fake.dir / "executed.log"
+    conf_ok = shlex.quote(TAGGED_CONF.format(vmid=172))
+    conf_bad = shlex.quote(WRONG_HOST_CONF)
+    (fake.dir / "handler.sh").write_text(
+        "#!/usr/bin/env bash\n"
+        'cmd="$1"\n'
+        f'if [[ "$cmd" == "pct config 172" ]]; then printf "%s" {conf_ok}; exit 0; fi\n'
+        + GUARD_PREAMBLE.replace(
+            'conf="$(bash "$0" "pct config $vm")" || exit 1', f"conf={conf_bad}"
+        )
+        + f'echo "ran: $cmd" >> {shlex.quote(str(log))}; exit 0\n'
+    )
+    for call in ("ct_start 172", "ct_exec 172 id", "ct_destroy 172"):
+        r = fake.run(call)
+        assert r.returncode != 0, call
+    ran = log.read_text() if log.exists() else ""
+    # only the harmless presence read may have run; no action did
+    assert not re.search(r"pct (start|exec|destroy)|pkill", ran), ran
+
+
+def _guard_verdict(fake, vmid, conf, nonce=""):
+    """Run the guard text itself, with a `pct` that prints `conf`."""
+    script = (
+        f'g="$(ct_guard {vmid} {nonce})"\n'
+        f"export CONF={shlex.quote(conf)}\n"
+        "pct() { printf '%s\\n' \"$CONF\"; }\n"
+        "export -f pct\n"
+        'bash -c "${g}true"; echo rc=$?\n'
+    )
+    return "rc=0" in fake.run(script).stdout
+
+
+@pytest.mark.parametrize(
+    "conf,vmid,nonce,expected",
+    [
+        (TAGGED_CONF.format(vmid=172), 172, "", True),
+        (UNTAGGED_CONF.format(vmid=172), 172, "", False),
+        (WRONG_HOST_CONF, 172, "", False),
+        ("hostname: hal0-mx-173\ntags: hal0-matrix\n", 172, "", False),
+        ("hostname: hal0-mx-172x\ntags: hal0-matrix\n", 172, "", False),
+        ("hostname: hal0-mx-172\ntags: a;hal0-matrix\n", 172, "", True),
+        ("hostname: hal0-mx-172\ntags: hal0-matrix,b\n", 172, "", True),
+        ("hostname: hal0-mx-172\ntags: hal0-matrix-old;x\n", 172, "", False),
+        ("hostname: hal0-mx-172\ntags: xhal0-matrix\n", 172, "", False),
+        (NONCE_CONF.format(vmid=172), 172, NONCE, True),
+        (TAGGED_CONF.format(vmid=172), 172, NONCE, False),
+        (TAGGED_CONF.format(vmid=172) + "description: hal0-matrix run ffffffffffffffff\n", 172, NONCE, False),
+        (TAGGED_CONF.format(vmid=172) + "description: hal0-matrix%20run%20" + NONCE + "\n", 172, NONCE, True),
+        (TAGGED_CONF.format(vmid=172) + "description: hal0-matrix run " + NONCE + "0\n", 172, NONCE, False),
+    ],
+)
+def test_the_guard_text_accepts_only_what_ct_owned_accepts(fake, conf, vmid, nonce, expected):
+    assert _guard_verdict(fake, vmid, conf, nonce) is expected
+
+
 # --- the range is sanity-checked ---------------------------------------------
 
 BAD_RANGES = [
@@ -814,8 +930,6 @@ def test_create_refuses_a_malformed_nonce(fake):
     assert fake.calls() == []
 
 
-NONCE = "0123456789abcdef"
-NONCE_CONF = TAGGED_CONF + "description: hal0-matrix run " + NONCE + "\n"
 
 
 def test_destroy_with_nonce_refuses_a_guest_with_another_description(fake):
@@ -1221,12 +1335,15 @@ def test_destroy_rechecks_ownership_on_second_attempt(fake, tmp_path):
     (fake.dir / "handler.sh").write_text(
         "#!/usr/bin/env bash\n"
         'cmd="$1"\n'
-        'if [[ "$cmd" == *"pct config 172"* ]]; then\n'
+        'if [[ "$cmd" == "pct config 172" ]]; then\n'
         f"  n=$(cat {c}); echo $((n+1)) > {c}\n"
         f'  if [[ "$n" -ge 1 ]]; then printf "%s" {conf_bad}; else printf "%s" {conf_ok}; fi\n'
         "  exit 0\n"
         "fi\n"
-        'if [[ "$cmd" == *"test -e /etc/pve/lxc/172.conf"* ]]; then echo present; exit 0; fi\n'
+        + GUARD_PREAMBLE.replace(
+            'conf="$(bash "$0" "pct config $vm")" || exit 1', f"conf={conf_ok}"
+        )
+        + 'if [[ "$cmd" == *"test -e /etc/pve/lxc/172.conf"* ]]; then echo present; exit 0; fi\n'
         'if [[ "$cmd" == *"pct destroy 172"* ]]; then exit 0; fi\n'
         'echo "unexpected: $cmd" >&2; exit 97\n'
     )

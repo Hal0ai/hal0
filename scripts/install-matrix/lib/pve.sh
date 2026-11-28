@@ -7,8 +7,9 @@
 #
 # Ownership guard: ct_destroy, ct_apply_device_rules, ct_start, ct_exec,
 # ct_push and ct_pull act on a guest only after ct_owned passes (VMID inside
-# the harness range, tag hal0-matrix, hostname hal0-mx-*). Nothing else here
-# runs pct against a guest.
+# the harness range, tag hal0-matrix, hostname hal0-mx-*), and the same test
+# (ct_guard) is the first part of the remote command that acts, so the check
+# and the action are one ssh call. Nothing else here runs pct against a guest.
 #
 # Injection rule: pve_run hands ONE string to the remote shell. Every value
 # placed in that string is either checked against a strict pattern or passed
@@ -317,6 +318,25 @@ ct_owned() {
   return "$found"
 }
 
+# ct_guard <vmid> [nonce]: remote shell text that ends in `&& ` and succeeds
+# only for a guest this harness created: hostname hal0-mx-<vmid>, tag
+# hal0-matrix, and with a nonce the description `hal0-matrix run <nonce>`.
+# Every state-changing remote command starts with it, so the check and the
+# action are one ssh call and one remote shell. Fixed text: only the VMID (a
+# checked number) and the nonce (checked hex) are placed in it. Prints nothing
+# and returns 1 for a VMID or nonce that fails its check.
+ct_guard() {
+  local vmid="${1:-}" nonce="${2:-}" g
+  _pve_in_range "$vmid" || return 1
+  [[ -z "$nonce" || "$nonce" =~ ^[0-9a-f]{16}$ ]] || return 1
+  g="{ pct config ${vmid} | grep -q '^hostname: ${_PVE_HOST_PREFIX}${vmid}\$'"
+  g+=" && pct config ${vmid} | grep -Eq '^tags: ([^;,]*[;,])*${_PVE_TAG}([;,].*)?\$'"
+  if [[ -n "$nonce" ]]; then
+    g+=" && pct config ${vmid} | grep -Eq '^description: ${_PVE_TAG}(%20| )run(%20| )${nonce}\$'"
+  fi
+  printf '%s; } && ' "$g"
+}
+
 _ct_require_owned() {
   ct_owned "${1:-}" "${2:-}" || { _pve_err "refusing: guest '${1:-}' is not a harness-owned container"; return 1; }
 }
@@ -431,7 +451,7 @@ ct_apply_device_rules() {
     line="lxc.apparmor.profile: unconfined"
     cmd+=" && { grep -qxF -- $(_pve_q "$line") ${conf} || printf '%s\\n' $(_pve_q "$line") >> ${conf}; }"
   fi
-  pve_run "$cmd"
+  pve_run "$(ct_guard "$vmid")${cmd}"
 }
 
 # ct_start <vmid>
@@ -439,7 +459,7 @@ ct_start() {
   local _PVE_DEADLINE
   _PVE_DEADLINE="$(_pve_t START 120)"
   _ct_require_owned "${1:-}" || return 1
-  pve_run "pct start $1"
+  pve_run "$(ct_guard "$1")pct start $1"
 }
 
 # ct_exec <vmid> <command string>: root, no terminal. 120 s unless the caller
@@ -449,7 +469,7 @@ ct_exec() {
   _PVE_DEADLINE="$(_pve_t EXEC 120 "${CT_EXEC_TIMEOUT:-}")"
   _ct_require_owned "$vmid" || return 1
   [[ $# -ge 2 ]] || { _pve_err "ct_exec: no command given"; return 1; }
-  pve_run "pct exec ${vmid} -- bash -c $(_pve_q "$2")"
+  pve_run "$(ct_guard "$vmid")pct exec ${vmid} -- bash -c $(_pve_q "$2")"
 }
 
 # ct_wait_network <vmid> [seconds=120]: the guest resolves hal0.dev.
@@ -480,7 +500,7 @@ ct_push() {
   _ct_require_owned "$vmid" || return 1
   [[ -f "$src" ]] || { _pve_err "no such local file: ${src}"; return 1; }
   [[ -n "$dst" ]] || { _pve_err "ct_push: no remote path"; return 1; }
-  _pve_ssh 1 "pct exec ${vmid} -- bash -c $(_pve_q "cat > $(_pve_q "$dst")")" <"$src"
+  _pve_ssh 1 "$(ct_guard "$vmid")pct exec ${vmid} -- bash -c $(_pve_q "cat > $(_pve_q "$dst")")" <"$src"
 }
 
 # ct_pull <vmid> <remote> <local>: stream a guest file out.
@@ -490,7 +510,7 @@ ct_pull() {
   _ct_require_owned "$vmid" || return 1
   [[ -n "$src" && -n "$dst" ]] || { _pve_err "ct_pull: need a remote and a local path"; return 1; }
   tmp="$(mktemp "${dst}.XXXXXX")" || { _pve_err "cannot create a temporary file beside ${dst}"; return 1; }
-  if pve_run "pct exec ${vmid} -- bash -c $(_pve_q "cat $(_pve_q "$src")")" >"$tmp"; then
+  if pve_run "$(ct_guard "$vmid")pct exec ${vmid} -- bash -c $(_pve_q "cat $(_pve_q "$src")")" >"$tmp"; then
     mv -f -- "$tmp" "$dst"
   else
     rc=$?
@@ -512,7 +532,7 @@ ct_destroy() {
   _PVE_DEADLINE="$(_pve_t DESTROY 300)"
   for attempt in 1 2; do
     _ct_require_owned "$vmid" "$nonce" || return 1
-    out="$(pve_run "pkill -9 -f '[l]xc-start -F -n ${vmid}( |\$)' 2>/dev/null; sleep 2; rm -f /run/lock/lxc/pve-config-${vmid}.lock; pct destroy ${vmid} --force --purge" 2>&1)" || true
+    out="$(pve_run "$(ct_guard "$vmid" "$nonce"){ pkill -9 -f '[l]xc-start -F -n ${vmid}( |\$)' 2>/dev/null; sleep 2; rm -f /run/lock/lxc/pve-config-${vmid}.lock; pct destroy ${vmid} --force --purge; }" 2>&1)" || true
     state="$(_ct_presence "$vmid")"
     [[ "$state" == "absent" ]] && return 0
     [[ "$attempt" == "1" ]] && sleep "${HAL0_MATRIX_DESTROY_SLEEP:-3}"

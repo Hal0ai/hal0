@@ -28,6 +28,19 @@ FAKE_SSH = r"""#!/usr/bin/env bash
 printf '%s\n' "$*" >> "$FAKE_STATE/ssh.log"
 cmd="${*: -1}"
 plain="${cmd//\\/}"
+# An action arrives as `{ pct config V | grep ... ; } && <action>`: run the
+# guard for real against the fake guest's config, then answer the action.
+if [[ "$cmd" == "{ pct config "* ]]; then
+  guard="${cmd%%; \} && *}; }"
+  vm="${cmd#\{ pct config }"; vm="${vm%% *}"
+  [[ -e "$FAKE_STATE/present" ]] || exit 1
+  conf="$(printf 'hostname: hal0-mx-%s\ntags: hal0-matrix\ncores: 8\n' "$vm"
+    [[ -z "${FAKE_LOCK:-}" ]] || echo 'lock: create'
+    [[ ! -s "$FAKE_STATE/description" ]] || printf 'description: %s\n' "$(cat "$FAKE_STATE/description")")"
+  GUARD="$guard" CONF="$conf" bash -c 'pct() { printf "%s\n" "$CONF"; }; export -f pct; exec bash -c "$GUARD"' || exit 1
+  cmd="${cmd#*; \} && }"
+  plain="${cmd//\\/}"
+fi
 [[ " $* " == *" -n "* || " $* " == *" -tt "* ]] || cat > "$FAKE_STATE/stdin.dump"
 case "$cmd" in
   "free -g"*)
