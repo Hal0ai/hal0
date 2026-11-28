@@ -232,6 +232,7 @@ for arg in "$@"; do
         --no-start) NO_START=1 ;;
         --models-dir=*) MODELS_DIR="${arg#--models-dir=}" ;;
         --summary-json=*) SUMMARY_JSON_PATH="${arg#--summary-json=}" ;;
+        --answers=*) HAL0_ANSWERS_FILE="${arg#--answers=}" ;;
         --no-owui) export HAL0_SKIP_OPENWEBUI=1; COMPONENT_FLAG_GIVEN=1 ;;
         --no-comfyui) export HAL0_IMAGE_MODELS=none; COMPONENT_FLAG_GIVEN=1 ;;
         --no-hermes) export HAL0_SKIP_HERMES=1; COMPONENT_FLAG_GIVEN=1 ;;
@@ -250,6 +251,7 @@ for arg in "$@"; do
         --help|-h)
             cat <<EOF
 Usage: install.sh [--dev] [--no-start] [--models-dir=PATH] [--summary-json=PATH]
+                  [--answers=PATH]
                   [--bare] [--no-owui] [--no-comfyui] [--no-hermes] [--no-pi]
                   [--no-agents] [--no-memory] [--no-brain-model]
   --dev               install under \$PWD/.hal0ai/, no systemd setup
@@ -263,6 +265,11 @@ Usage: install.sh [--dev] [--no-start] [--models-dir=PATH] [--summary-json=PATH]
                       ports, bind host, model pulled, per-step durations,
                       warning count) to PATH as JSON, atomically. See
                       docs/getting-started/install.mdx.
+  --answers=PATH      read the install choices from a JSON answers document
+                      instead of asking (HAL0_ANSWERS_FILE=PATH). The file is
+                      checked in full first; a bad one stops the install
+                      before anything changes. It never carries a key or a
+                      token, and cannot turn on the Hermes terminal tool.
 
 Components (each flag skips one optional piece; env twin in parentheses):
   --no-owui           skip Open WebUI (HAL0_SKIP_OPENWEBUI=1)
