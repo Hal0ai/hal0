@@ -41,6 +41,11 @@ describe('componentCell', () => {
   it('failure statuses render failed tone', () => {
     expect(componentCell(rows[3]).tone).toBe('failed')
   })
+  it('broken reads as a failure and counts as pending (#4065)', () => {
+    const row = { ...rows[0], installed: null, status: 'broken' }
+    expect(componentCell(row)).toEqual({ label: 'install missing', tone: 'failed' })
+    expect(pendingCount([row])).toBe(1)
+  })
   it('not-installed is muted', () => {
     expect(componentCell(rows[2]).tone).toBe('muted')
   })
