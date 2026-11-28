@@ -21,6 +21,13 @@ from collections.abc import Collection, Iterable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
+from hal0.dispatcher._capability_resolve import (
+    _EMBED_PATHS,
+    _IMAGE_PATHS,
+    _RERANK_PATHS,
+    _STT_PATHS,
+    _TTS_PATHS,
+)
 from hal0.errors import Hal0Error
 
 #: The wire code of the refusal. It is deliberately not namespaced: clients key on it.
@@ -83,15 +90,17 @@ JOBS: dict[str, OptionalJob] = {
     "npu": OptionalJob("npu", "NPU", "flm", frozenset(), None),
 }
 
-#: Request path fragment -> job. First match wins; mirrors the dispatcher's path pins
-#: (:mod:`hal0.dispatcher._capability_resolve`) plus the transcription path, which the
-#: dispatcher never pinned.
+#: Request path fragment -> job. First match wins. The fragments are the dispatcher's own
+#: path pins, imported so that :mod:`hal0.dispatcher._capability_resolve` is the one place
+#: that owns them; the transcription path is the one the dispatcher never pinned. The job
+#: -> slot type map (``slot_types`` above) cannot be derived from the resolver, so
+#: ``tests/api/test_jobs_drift.py`` fails when the two stop agreeing.
 _PATH_JOBS: tuple[tuple[tuple[str, ...], str], ...] = (
-    (("/embeddings",), "embed"),
-    (("/rerankings", "/rerank"), "rerank"),
-    (("/audio/speech",), "tts"),
-    (("/audio/transcriptions",), "stt"),
-    (("/images/generations", "/images/edits", "/images/variations"), "image"),
+    (_EMBED_PATHS, "embed"),
+    (_RERANK_PATHS, "rerank"),
+    (_TTS_PATHS, "tts"),
+    (_STT_PATHS, "stt"),
+    (_IMAGE_PATHS, "image"),
 )
 
 
