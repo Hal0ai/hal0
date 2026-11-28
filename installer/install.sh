@@ -347,95 +347,151 @@ nofollow() {
 }
 
 # doc-path-helpers: begin
-# Directories the installer creates at a place an answers document chose. The
-# document is data and the hal0 account may control part of the path, so root
-# creates only what is safe to create there.
+# Folders an answers document chose. The answers reader checked their TEXT only
+# (installer/lib/answers_reader.py never looks at the disk); every rule about
+# what is on disk there lives here, at the moment root creates or uses the
+# folder, and creation goes through `nofollow` (no link is followed below a
+# directory someone other than root could change).
 #
-# _hal0_root_uid: the uid that counts as root for the ancestor rule below. It is
-# 0. HAL0_ANSWERS_TEST_ROOT_UID is a test seam (tests cannot make root-owned
-# directories); the allow-list never carries it, so no document can set it.
-_hal0_root_uid() {
-    local uid="${HAL0_ANSWERS_TEST_ROOT_UID:-0}"
-    [[ "${uid}" =~ ^[0-9]+$ ]] || uid=0
-    printf '%s\n' "${uid}"
+# _hal0_trusted_owner UID: "root" for these rules: uid 0, or the uid running
+# the installer (a non-root --dev run), the set src/hal0/security/nofollow.py
+# (_trusted_uids) follows links through. On a real install both are 0.
+_hal0_trusted_owner() {
+    [[ "${1:-}" == 0 || "${1:-}" == "$(id -u)" ]]
 }
 
-# hal0_doc_dir_parent_ok PATH: succeeds when root may create PATH (a value that
-# came from a document): PATH lies inside ${VAR_DIR}/models, or the deepest
-# EXISTING ancestor of PATH is a real directory reached with no symlink
-# component, is owned by root and has no group-write and no other-write bit
-# (so neither the hal0 group nor another user can rename or replace anything
-# under it, and a directory made there cannot hand them somebody else's place).
-_HAL0_PARENT_WHY=""
-hal0_doc_dir_parent_ok() {
-    local path="${1:-}" walk="" part deepest="/" info owner mode
-    local -a parts=()
-    _HAL0_PARENT_WHY="it is not an absolute path"
+# hal0_doc_store_prepare PATH: make the model store PATH from a document safe
+# to use, or fail with the reason in _HAL0_STORE_WHY (nothing created then).
+# Walking from / down, every EXISTING ancestor must be a directory owned by
+# root with no group-write and no other-write bit; a component may be a
+# symlink, which then sits in such a root-only directory (root put it there),
+# and what it leads to must pass the same rule. An existing PATH must be a
+# directory owned by root or by the hal0 account. The missing components are
+# then made root:root 0755 in one `nofollow dir --create --expect root` call
+# (descriptor walk; it makes only the last component of each path, in order,
+# and refuses a link below an untrusted directory). Existing ones are never
+# re-moded.
+_HAL0_STORE_WHY=""
+hal0_doc_store_prepare() {
+    local path="${1:-}" walk="" cur part info owner mode hal0_uid i
+    local -a parts=() comps=() missing=()
+    _HAL0_STORE_WHY="it is not an absolute path"
     [[ "${path}" == /* ]] || return 1
-    if [[ -n "${VAR_DIR:-}" ]] \
-        && [[ "${path}" == "${VAR_DIR}/models" || "${path}" == "${VAR_DIR}/models/"* ]]; then
-        return 0
-    fi
+    hal0_uid="$(id -u hal0 2>/dev/null)" || hal0_uid=""
     IFS=/ read -r -a parts <<<"${path}"
     for part in "${parts[@]+"${parts[@]}"}"; do
         [[ -n "${part}" ]] || continue
         if [[ "${part}" == "." || "${part}" == ".." ]]; then
-            _HAL0_PARENT_WHY="it has a '.' or '..' part"
+            _HAL0_STORE_WHY="it has a '.' or '..' part"
             return 1
         fi
-        walk="${walk}/${part}"
-        if [[ -L "${walk}" ]]; then
-            _HAL0_PARENT_WHY="a symbolic link is on the way to it"
-            return 1
-        fi
-        [[ -e "${walk}" ]] || break
-        if [[ ! -d "${walk}" ]]; then
-            _HAL0_PARENT_WHY="a parent of it is not a folder"
-            return 1
-        fi
-        deepest="${walk}"
+        comps+=("${part}")
     done
-    _HAL0_PARENT_WHY="its parent folder cannot be inspected"
-    info="$(stat -c '%u %a' -- "${deepest}" 2>/dev/null)" || return 1
-    owner="${info%% *}"
-    mode="${info##* }"
-    _HAL0_PARENT_WHY="its closest existing parent folder is not owned by root"
-    [[ "${owner}" == "$(_hal0_root_uid)" ]] || return 1
-    _HAL0_PARENT_WHY="its closest existing parent folder is writable by a group or by others"
-    (( (8#${mode} & 8#022) == 0 )) || return 1
-    _HAL0_PARENT_WHY=""
-}
-# hal0_mkdir_walk_nofollow PATH: make PATH and any missing parents top-down,
-# each root:root 0755, one `nofollow` call per missing component (a descriptor
-# walk: nothing is created through a link swapped in later). Any symlink
-# component is refused and nothing more is made. Existing components are never
-# re-moded. Says nothing itself: on a refusal or failure it returns non-zero
-# with the reason in _HAL0_WALK_WHY (the caller decides how loud to be).
-_HAL0_WALK_WHY=""
-hal0_mkdir_walk_nofollow() {
-    local path="${1:-}" walk="" part
-    local -a parts=()
-    _HAL0_WALK_WHY=""
-    [[ "${path}" == /* ]] || { _HAL0_WALK_WHY="it is not an absolute path"; return 1; }
-    IFS=/ read -r -a parts <<<"${path}"
-    for part in "${parts[@]+"${parts[@]}"}"; do
-        [[ -n "${part}" ]] || continue
-        if [[ "${part}" == "." || "${part}" == ".." ]]; then
-            _HAL0_WALK_WHY="it has a '.' or '..' part"
+    _HAL0_STORE_WHY="it is the root folder"
+    (( ${#comps[@]} > 0 )) || return 1
+    # / itself is the first ancestor.
+    info="$(stat -L -c '%u %a' -- / 2>/dev/null)" || info=""
+    if [[ ! "${info}" =~ ^[0-9]+\ [0-7]+$ ]] || ! _hal0_trusted_owner "${info%% *}" \
+        || (( (8#${info##* } & 8#022) != 0 )); then
+        _HAL0_STORE_WHY="/ is not a folder only root can change"
+        return 1
+    fi
+    for i in "${!comps[@]}"; do
+        cur="${walk}/${comps[i]}"
+        walk="${cur}"
+        # Below a missing folder everything is missing too.
+        if (( ${#missing[@]} > 0 )); then
+            missing+=("${cur}")
+            continue
+        fi
+        if [[ -L "${cur}" && ! -e "${cur}" ]]; then
+            _HAL0_STORE_WHY="${cur} is a link that leads nowhere"
             return 1
         fi
-        walk="${walk}/${part}"
-        if [[ -L "${walk}" ]]; then
-            _HAL0_WALK_WHY="${walk} is a symbolic link; use the real folder, or create it by hand"
+        if [[ ! -e "${cur}" ]]; then
+            missing+=("${cur}")
+            continue
+        fi
+        if [[ ! -d "${cur}" ]]; then
+            _HAL0_STORE_WHY="${cur} is not a folder"
             return 1
         fi
-        if [[ ! -e "${walk}" ]]; then
-            if ! nofollow dir --create --owner root:root --mode 0755 --expect root "${walk}"; then
-                _HAL0_WALK_WHY="${walk} could not be made safely; create it by hand"
+        info="$(stat -L -c '%u %a' -- "${cur}" 2>/dev/null)" || info=""
+        if [[ ! "${info}" =~ ^[0-9]+\ [0-7]+$ ]]; then
+            _HAL0_STORE_WHY="${cur} cannot be inspected"
+            return 1
+        fi
+        owner="${info%% *}"
+        mode="${info##* }"
+        if (( i == ${#comps[@]} - 1 )); then
+            if ! _hal0_trusted_owner "${owner}" && [[ -z "${hal0_uid}" || "${owner}" != "${hal0_uid}" ]]; then
+                _HAL0_STORE_WHY="it already exists and belongs to an account other than root or hal0"
                 return 1
             fi
+        elif ! _hal0_trusted_owner "${owner}"; then
+            _HAL0_STORE_WHY="${cur} is not owned by root"
+            return 1
+        elif (( (8#${mode} & 8#022) != 0 )); then
+            _HAL0_STORE_WHY="${cur} can be changed by a group or by other users"
+            return 1
         fi
     done
+    if (( ${#missing[@]} > 0 )) \
+        && ! nofollow dir --create --owner root:root --mode 0755 --expect root "${missing[@]}"; then
+        _HAL0_STORE_WHY="${missing[0]} could not be created safely"
+        return 1
+    fi
+    _HAL0_STORE_WHY=""
+}
+
+# hal0_doc_flm_prepare FLM STORE: create the NPU model folder FLM from a document,
+# which must lie strictly inside the model store STORE (the reader required it;
+# checked again here by text). Missing folders between STORE and FLM are made
+# root:root 0755, FLM itself 1000:hal0 (else hal0:hal0) 2775, all through
+# `nofollow`. An existing FLM is left exactly as it is. The NPU is optional:
+# any refusal is one warning and the folder is skipped; never fails.
+hal0_doc_flm_prepare() {
+    local flm="${1:-}" store="${2:-}" walk part
+    local -a parts=() missing=()
+    while [[ "${store}" == */ && "${store}" != / ]]; do store="${store%/}"; done
+    if [[ "${store}" != /?* || "${flm}" != "${store}/"?* ]]; then
+        warn "FLM model directory ${flm} from the answers document is not inside the model store ${store}; it was not created. To use a folder elsewhere, set HAL0_FLM_MODELS_DIR when running the installer"
+        return 0
+    fi
+    if [[ -L "${flm}" ]]; then
+        warn "FLM model directory ${flm} is a symbolic link; it was left alone. Use the real folder, or set it up by hand"
+        return 0
+    fi
+    if [[ -e "${flm}" ]]; then
+        info "FLM model directory ${flm} already exists; leaving its owner and mode as they are"
+        return 0
+    fi
+    walk="${store}"
+    IFS=/ read -r -a parts <<<"${flm#"${store}/"}"
+    for part in "${parts[@]+"${parts[@]}"}"; do
+        if [[ -z "${part}" || "${part}" == "." || "${part}" == ".." ]]; then
+            warn "FLM model directory ${flm} was not created: it is not a plain folder path"
+            return 0
+        fi
+        walk="${walk}/${part}"
+        if (( ${#missing[@]} > 0 )) || [[ ! -e "${walk}" && ! -L "${walk}" ]]; then
+            missing+=("${walk}")
+        fi
+    done
+    # The last missing entry is FLM itself; the ones before it are its parents.
+    if (( ${#missing[@]} > 1 )) \
+        && ! nofollow dir --create --owner root:root --mode 0755 --expect root \
+            "${missing[@]:0:${#missing[@]}-1}"; then
+        warn "could not create ${flm} safely; 'hal0 doctor perms' reports why"
+        return 0
+    fi
+    if nofollow dir --create --owner 1000:hal0 --mode 2775 --expect adopt "${flm}" 2>/dev/null \
+        || nofollow dir --create --owner hal0:hal0 --mode 2775 --expect adopt "${flm}"; then
+        info "created FLM model directory ${flm}"
+    else
+        warn "could not create ${flm} safely; 'hal0 doctor perms' reports why"
+    fi
+    return 0
 }
 # doc-path-helpers: end
 if [[ "${DEV_MODE}" -eq 1 ]]; then
@@ -1289,22 +1345,21 @@ fi
 
 ui_step "Filesystem layout" "~2-5s"
 
-# A model store an answers document chose is made top-down through `nofollow`
-# (every component root:root 0755, any symlink refused with one warning): the
-# hal0 account may control part of that path and could swap a component for a
-# link after the reader checked it, which `mkdir -p` would follow. Any other
-# store (default, flag, environment) is made as before. A refusal for a
-# document's store is FATAL: later root code (model pulls, `hal0 setup
-# --storage-dir`) would otherwise create the store by name and follow the link.
-# Nothing is written before the check, one line says which path and why.
+# A model store an answers document chose: the reader checked its text only, so
+# the rules about the disk are applied here, before anything is written
+# (hal0_doc_store_prepare): outside the default store, every existing folder
+# above it must be root's alone, an existing store must belong to root or hal0,
+# and the missing folders are made root:root 0755 through `nofollow`. A refusal
+# is FATAL: later root code (model pulls, `hal0 setup --storage-dir`) would
+# otherwise use the store by name. A path inside the default store is made with
+# the default store's own folders below. A store from --models-dir, the
+# environment or the default is made as before.
 _models_mkdir=("${MODELS_DIR}")
-if [[ "${MODELS_DIR_FROM_DOC}" -eq 1 ]]; then
+if [[ "${MODELS_DIR_FROM_DOC}" -eq 1 \
+    && "${MODELS_DIR}" != "${VAR_DIR}/models" && "${MODELS_DIR}" != "${VAR_DIR}/models/"* ]]; then
     _models_mkdir=()
-    if [[ ! -e "${MODELS_DIR}" && ! -L "${MODELS_DIR}" ]] && ! hal0_doc_dir_parent_ok "${MODELS_DIR}"; then
-        die "model store ${MODELS_DIR} was not created: ${_HAL0_PARENT_WHY}; create the folder first, or choose one on a disk that root owns"
-    fi
-    hal0_mkdir_walk_nofollow "${MODELS_DIR}" \
-        || die "model store ${MODELS_DIR} was not created: ${_HAL0_WALK_WHY}"
+    hal0_doc_store_prepare "${MODELS_DIR}" \
+        || die "model store ${MODELS_DIR} from the answers document cannot be used: ${_HAL0_STORE_WHY}. Choose a folder whose parents only root can change, or pass --models-dir=PATH on the command line to use this one as your own choice"
 fi
 
 mkdir -p \
@@ -3864,36 +3919,21 @@ else
             # account may control part of the path. So nothing here names the
             # path to chown, chmod or mkdir: `nofollow` acts on a descriptor and
             # never follows a link at the last component (or below an untrusted
-            # directory). A directory that already exists and came from a
-            # document keeps its owner and mode; the document cannot re-own it.
-            # A directory a document names that does not exist is made only
-            # under the default store or a root-owned, non-writable parent
-            # (hal0_doc_dir_parent_ok); otherwise one warning says how to make it.
+            # directory). A document's folder must be inside the model store and
+            # is only ever created, never re-owned (hal0_doc_flm_prepare).
             _flm_from_doc=0
             for _answered in "${HAL0_ANSWERS_EXPORTED[@]+"${HAL0_ANSWERS_EXPORTED[@]}"}"; do
                 [[ "${_answered}" == "HAL0_FLM_MODELS_DIR" ]] && _flm_from_doc=1
             done
-            if [[ -e "${HAL0_FLM_MODELS_DIR}" || -L "${HAL0_FLM_MODELS_DIR}" ]]; then
-                if [[ "${_flm_from_doc}" -eq 1 && -L "${HAL0_FLM_MODELS_DIR}" ]]; then
-                    # The reader emits a path with no link in its existing part,
-                    # so a link here appeared after its check: use nothing.
-                    warn "FLM model directory ${HAL0_FLM_MODELS_DIR} is a symbolic link (it was not one when the answers were checked); it was left alone. Use the real folder, or set it up by hand"
-                elif [[ "${_flm_from_doc}" -eq 1 ]]; then
-                    info "FLM model directory ${HAL0_FLM_MODELS_DIR} already exists; leaving its owner and mode as they are"
-                else
-                    # `adopt`: only a directory hal0 already owns (or an empty
-                    # one root just made). `any` would re-own whatever was
-                    # renamed into this name by an account that owns its parent.
-                    nofollow dir --owner 1000:hal0 --mode 2775 --expect adopt "${HAL0_FLM_MODELS_DIR}" 2>/dev/null \
-                        || nofollow dir --owner hal0:hal0 --mode 2775 --expect adopt "${HAL0_FLM_MODELS_DIR}" \
-                        || warn "could not set the owner and mode of ${HAL0_FLM_MODELS_DIR}; 'hal0 doctor perms' reports why"
-                fi
-            elif [[ "${_flm_from_doc}" -eq 1 ]] && ! hal0_doc_dir_parent_ok "${HAL0_FLM_MODELS_DIR}"; then
-                # A document chose this place. Root makes a directory here only
-                # under the default store or a root-owned, non-writable parent;
-                # otherwise the hal0 group would get write access to a folder in
-                # somebody else's tree (a user's systemd or autostart folder).
-                warn "FLM model directory ${HAL0_FLM_MODELS_DIR} was not created: its parent folder is not owned by root alone. Create it yourself: mkdir -p $(printf '%q' "${HAL0_FLM_MODELS_DIR}") && chown 1000:hal0 $(printf '%q' "${HAL0_FLM_MODELS_DIR}") && chmod 2775 $(printf '%q' "${HAL0_FLM_MODELS_DIR}")"
+            if [[ "${_flm_from_doc}" -eq 1 ]]; then
+                hal0_doc_flm_prepare "${HAL0_FLM_MODELS_DIR}" "${MODELS_DIR}"
+            elif [[ -e "${HAL0_FLM_MODELS_DIR}" || -L "${HAL0_FLM_MODELS_DIR}" ]]; then
+                # `adopt`: only a directory hal0 already owns (or an empty
+                # one root just made). `any` would re-own whatever was
+                # renamed into this name by an account that owns its parent.
+                nofollow dir --owner 1000:hal0 --mode 2775 --expect adopt "${HAL0_FLM_MODELS_DIR}" 2>/dev/null \
+                    || nofollow dir --owner hal0:hal0 --mode 2775 --expect adopt "${HAL0_FLM_MODELS_DIR}" \
+                    || warn "could not set the owner and mode of ${HAL0_FLM_MODELS_DIR}; 'hal0 doctor perms' reports why"
             else
                 # Missing parents first, top-down, root-owned. `nofollow dir`
                 # makes only the last component, and re-modes what it opens, so

@@ -321,3 +321,60 @@ def test_a_real_document_carries_its_saved_form(tmp_path: Path) -> None:
     proc = _bash(f'hal0_apply_answers "{doc}" file; printf "%s" "$HAL0_ANSWERS_SAVED"', tmp_path)
     saved = json.loads(base64.b64decode(proc.stdout, validate=True))
     assert saved == {"version": 1, "network": {"port": 9000}}
+
+
+# ── shell-side backstops behind the reader ──────────────────────────────────
+
+
+@pytest.mark.parametrize("name", ["HAL0_PORT", "HAL0_MODELS_DIR", "HAL0_NONINTERACTIVE"])
+def test_a_name_printed_twice_fails_the_apply_and_exports_nothing(tmp_path: Path, name: str) -> None:
+    value = "/mnt/a" if name == "HAL0_MODELS_DIR" else "1"
+    fake = _fake(tmp_path, "HAL0_SKIP_PI=1", f"{name}={value}", f"{name}={value}", SAVED)
+    proc = _bash(_CHECK + '; echo "pi=${HAL0_SKIP_PI:-unset}"', tmp_path, reader=fake)
+    assert proc.stdout.splitlines()[:2] == ["rc=1", "port=unset n=0 saved=[]"], proc.stderr
+    assert proc.stdout.splitlines()[2] == "pi=unset"
+    assert f"printed {name} twice" in proc.stderr and proc.stderr.count("error:") == 1
+
+
+@pytest.mark.parametrize("name", ["HAL0_MODELS_DIR", "HAL0_FLM_MODELS_DIR"])
+@pytest.mark.parametrize("bad", ["relative/x", "", "/mnt/café", "/mnt/$(id)", "/mnt/a`b`",
+                                 "/mnt/a;b", "/mnt/a'b", '/mnt/a"b', "/mnt/a\\b", "/mnt/a*",
+                                 "/mnt/[ab]", "/mnt/a\tb", "/mnt/a\x1b[31m", "/mnt/a%b",
+                                 "/mnt/a#b", "/mnt/a!b", "/mnt/١"])
+def test_a_folder_path_outside_the_plain_ascii_set_fails_the_apply(tmp_path: Path, name: str,
+                                                                    bad: str) -> None:
+    marker = tmp_path / "pwned"
+    fake = _fake(tmp_path, "HAL0_PORT=1234", f"{name}={bad}", SAVED)
+    proc = _bash(_CHECK + f'; echo "dir=[${{{name}:-unset}}]"', tmp_path, reader=fake)
+    assert proc.stdout.splitlines() == ["rc=1", "port=unset n=0 saved=[]", "dir=[unset]"], proc.stderr
+    assert "not a plain absolute path" in proc.stderr
+    assert bad not in proc.stderr or bad == ""  # the value itself is not echoed
+    assert not marker.exists()
+
+
+def test_an_invalid_byte_in_a_folder_path_fails_the_apply(tmp_path: Path) -> None:
+    fake = tmp_path / "fake_reader.py"
+    fake.write_text(
+        "import sys\n"
+        "sys.stdout.buffer.write(b'HAL0_MODELS_DIR=/mnt/\\xff\\xfe\\n' + "
+        f"{(SAVED + chr(10)).encode()!r})\n",
+        encoding="utf-8",
+    )
+    for locale in ("C", "C.UTF-8"):
+        proc = _bash(f"LC_ALL={locale}; " + _CHECK, tmp_path, reader=fake)
+        assert proc.stdout.splitlines() == ["rc=1", "port=unset n=0 saved=[]"], (locale, proc.stderr)
+
+
+@pytest.mark.parametrize("good", ["/mnt/my models/a=b", "/a-b_c.d+e@f,g:h~i", "/var/lib/hal0/models"])
+def test_plain_folder_paths_pass_the_backstop(tmp_path: Path, good: str) -> None:
+    fake = _fake(tmp_path, f"HAL0_MODELS_DIR={good}", f"HAL0_FLM_MODELS_DIR={good}/flm", SAVED)
+    proc = _bash('hal0_apply_answers /x/doc.json file; echo "rc=$?"; '
+                 'printf "[%s][%s]\\n" "$HAL0_MODELS_DIR" "$HAL0_FLM_MODELS_DIR"', tmp_path, reader=fake)
+    assert proc.stdout.splitlines() == ["rc=0", f"[{good}][{good}/flm]"], proc.stderr
+
+
+def test_other_values_are_not_held_to_the_path_set(tmp_path: Path) -> None:
+    fake = _fake(tmp_path, "HAL0_ALLOWED_ORIGINS=https://a.example.com,http://b:8080", SAVED)
+    proc = _bash('hal0_apply_answers /x/doc.json file; echo "rc=$? $HAL0_ALLOWED_ORIGINS"', tmp_path,
+                 reader=fake)
+    assert proc.stdout.strip() == "rc=0 https://a.example.com,http://b:8080", proc.stderr

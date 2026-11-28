@@ -79,6 +79,18 @@ _hal0_default_store_arg() {
     fi
 }
 
+# _hal0_answers_path_ok VALUE: VALUE is an absolute path made only of the ASCII
+# characters the reader allows in a folder path (letters, digits, space and
+# _ . + @ , : ~ = / -). A backstop behind the reader's own check: a folder path
+# reaches root's mkdir and the install log, so nothing else may pass. The set
+# is spelled out (no ranges) and matched in the C locale, so no other byte or
+# letter can fall inside it.
+_hal0_answers_path_ok() {
+    local LC_ALL=C
+    [[ "${1:-}" == /* \
+        && "${1}" != *[!ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_.+@,:~=/\ -]* ]]
+}
+
 # Apply the answers document at PATH; ORIGIN is `file` or `wizard`.
 # Runs the reader ONCE (${PY} -I, standard library only), then exports what it
 # printed. All-or-nothing: every line is checked against the allow-list and
@@ -88,7 +100,8 @@ _hal0_default_store_arg() {
 # document from the same read; it is kept (not exported) in HAL0_ANSWERS_SAVED
 # for hal0_save_answers, so the copy kept can never differ from what was
 # applied. A missing, second or malformed `#saved` line, or any line after it,
-# fails the apply.
+# fails the apply; so does a name printed twice, or a folder path
+# (HAL0_MODELS_DIR, HAL0_FLM_MODELS_DIR) outside _hal0_answers_path_ok.
 # Returns 0 on success, the reader's status (2) with its messages on stderr
 # when it rejects the document, or 1 for anything the reader should not print.
 hal0_apply_answers() {
@@ -159,6 +172,17 @@ hal0_apply_answers() {
         fi
         if [[ "${name}" == "HAL0_HERMES_TERMINAL" && "${origin}" != "wizard" ]]; then
             echo "error: only the install wizard may turn the Hermes terminal tool on" >&2
+            return 1
+        fi
+        for allowed in "${names[@]+"${names[@]}"}"; do
+            if [[ "${name}" == "${allowed}" ]]; then
+                echo "error: the answers reader printed ${name} twice" >&2
+                return 1
+            fi
+        done
+        if [[ "${name}" == "HAL0_MODELS_DIR" || "${name}" == "HAL0_FLM_MODELS_DIR" ]] \
+            && ! _hal0_answers_path_ok "${value}"; then
+            echo "error: the answers reader printed a ${name} that is not a plain absolute path" >&2
             return 1
         fi
         names+=("${name}")

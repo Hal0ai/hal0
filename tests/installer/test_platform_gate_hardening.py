@@ -82,11 +82,18 @@ class TestEarlyHal0User:
     def test_user_creation_precedes_preflight_gpu_group_dependent_followups(
         self, install_sh_text: str
     ) -> None:
-        # The FLM cache dir is chowned to `1000:hal0` — it depends on the
-        # hal0 group existing. It must come after the early user/group block.
+        # The FLM cache dir is given `1000:hal0` (through `nofollow`) — it
+        # depends on the hal0 group existing. The NPU step that does it, for a
+        # folder from the environment and for one from an answers document
+        # (hal0_doc_flm_prepare, defined with the other helpers near the top
+        # but only called here), must come after the early user/group block.
         useradd_idx = install_sh_text.index("useradd --system --gid hal0")
-        flm_chown_idx = install_sh_text.index("chown 1000:hal0")
-        assert useradd_idx < flm_chown_idx
+        flm_env_idx = install_sh_text.index(
+            'nofollow dir --owner 1000:hal0 --mode 2775 --expect adopt "${HAL0_FLM_MODELS_DIR}"'
+        )
+        flm_doc_idx = install_sh_text.index('hal0_doc_flm_prepare "${HAL0_FLM_MODELS_DIR}"')
+        assert useradd_idx < flm_env_idx
+        assert useradd_idx < flm_doc_idx
 
     def test_dev_mode_still_skips_user_creation(self, install_sh_text: str) -> None:
         assert "dev mode — skipping hal0 system user creation" in install_sh_text
