@@ -259,3 +259,32 @@ async def test_a_unit_that_stops_by_itself_is_named_in_the_journal(
     assert "state=ready" in line
     assert "stopped_by=not_hal0" in line
     assert "exit_status=137" in line and "result=exit-code" in line
+
+
+async def test_a_stop_hal0_issued_is_never_logged_as_an_outside_exit(
+    slot_root: Path,
+    container_stub: FakeContainerProvider,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The exit line is written only when the watcher's verdict lands. While a
+    lifecycle call holds the slot lock and has stopped the unit itself, the
+    watcher may see the unit inactive, but its stamp is declined once the
+    lock is free (the slot is no longer live), so no line is written."""
+    import asyncio
+
+    monkeypatch.setattr(wd_mod, "_FAIL_WATCH_INTERVAL_S", 0.02)
+    sm = SlotManager(upstreams_registry=UpstreamRegistry())
+    await sm.load("chat")
+    assert sm._current_state("chat") is SlotState.READY
+
+    with caplog.at_level(logging.INFO, logger="hal0.slots"):
+        async with sm._lock("chat"):
+            # What load()'s in-place teardown does: stop the unit with the
+            # slot still READY, hold the lock, then mark it OFFLINE.
+            container_stub.active.discard("chat")
+            await asyncio.sleep(0.2)  # the watcher sees it and queues for the lock
+            await sm._transition("chat", SlotState.OFFLINE, force=True)
+        await asyncio.sleep(0.2)
+
+    assert not [r for r in caplog.records if r.getMessage().startswith("slot.unit_exited ")]
