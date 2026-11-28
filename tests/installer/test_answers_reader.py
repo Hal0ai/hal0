@@ -1329,7 +1329,7 @@ def test_the_normalised_path_is_checked_too(tmp_path: Path) -> None:
     assert "system location" in proc.stderr
 
 
-@pytest.mark.parametrize("blank", ["", " ", "  ", "\t", "\u00a0", "\u2003\u2003"])
+@pytest.mark.parametrize("blank", ["", " ", "  ", "\t", "\u00a0", "\u2003 "])
 def test_a_blank_public_url_is_an_error(tmp_path: Path, blank: str) -> None:
     proc = run({"version": 1, "network": {"public_url": blank}}, tmp_path)
     # \t and the Unicode spaces are control/format text as well; any error will do
