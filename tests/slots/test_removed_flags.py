@@ -80,6 +80,50 @@ def test_every_llama_server_runner_gets_the_refusal(runner: str) -> None:
         screen_profile_flags("--no-mmap", runtime_family=family)
 
 
+def test_a_profile_with_no_runner_gets_the_refusal() -> None:
+    with pytest.raises(UnprocessableEntity):
+        screen_profile_flags("--no-mmap", runtime_family=None)
+
+
+@pytest.mark.parametrize("family", ["flm", "comfyui", "kokoro", "moonshine", "qwen3tts"])
+def test_other_engines_are_not_held_to_the_llama_server_map(
+    family: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The map was checked against the llama-server pins only, so the removed
+    check is not consulted for another engine's profile at all."""
+    from hal0.errors import Hal0Error
+
+    asked: list[list[str]] = []
+    monkeypatch.setattr(
+        "hal0.slots.argv.deny_removed_flags", lambda tokens, **_kw: asked.append(tokens)
+    )
+    for flag in sorted(REMOVED_FLAGS):
+        try:
+            screen_profile_flags(flag, runtime_family=family)
+        except Hal0Error as exc:  # another rule of the screen may still object
+            assert exc.code != "slot.removed_flag_denied"
+    assert asked == []
+    screen_profile_flags("--no-mmap", runtime_family="llama-server")
+    assert asked == [["--no-mmap"]]
+
+
+def test_every_runtime_family_is_accounted_for() -> None:
+    """A new family must be placed on one side or the other deliberately."""
+    from typing import get_args
+
+    from hal0.runners import RuntimeFamily
+
+    assert set(get_args(RuntimeFamily)) == {
+        "llama-server",
+        "flm",
+        "comfyui",
+        "kokoro",
+        "moonshine",
+        "qwen3tts",
+        "halogen",
+    }
+
+
 def test_halogen_profiles_keep_their_own_screen() -> None:
     """A halogen profile's flags are environment tokens; the llama-server map
     does not apply to them."""

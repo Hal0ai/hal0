@@ -164,7 +164,7 @@ check refuses, in every spelling llama.cpp accepts:
   listener, auth and TLS settings (`slot.host_owned_flag_denied`);
 - bare positional arguments (`slot.positional_arg_denied`).
 
-A flag llama-server has removed is refused on save with a 422
+On a llama-server profile, a flag llama-server has removed is refused on save with a 422
 (`slot.removed_flag_denied`) that names its replacement. Today that is the old
 memory-mapping and locking switches: `--no-mmap` is now `-lm none`, `--mmap` is
 `-lm mmap`, `--mlock` is `-lm mmap+mlock` and `--direct-io` is `-lm dio`. A
