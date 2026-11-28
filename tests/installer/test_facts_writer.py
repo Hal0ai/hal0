@@ -313,3 +313,19 @@ def test_write_creates_a_new_directory_0755(tmp_path: Path) -> None:
     proc = subprocess.run(["bash", "-c", script], capture_output=True, text=True, check=False)
     assert "rc=0" in proc.stdout
     assert stat.S_IMODE(out.parent.stat().st_mode) == 0o755
+
+
+def test_write_replaces_a_symlink_to_a_directory_at_the_target_name(tmp_path: Path) -> None:
+    # `mv -f TMP LINK-TO-DIR` would move the temp file INTO the directory the
+    # link points at; -T makes the rename replace the link itself.
+    victim = tmp_path / "victim"
+    victim.mkdir()
+    target_dir = tmp_path / "run"
+    target_dir.mkdir()
+    (target_dir / "facts.json").symlink_to(victim)
+    proc, out = _run(tmp_path)
+    assert "write_rc=0" in proc.stdout, proc.stderr
+    assert not out.is_symlink() and out.is_file()
+    assert json.loads(out.read_text())["version"] == 1
+    assert list(victim.iterdir()) == []
+    assert not any(p.name.startswith(".facts.") for p in target_dir.iterdir())

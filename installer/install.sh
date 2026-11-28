@@ -1054,11 +1054,10 @@ IS_UPGRADE=0
 # ${VAR_DIR} is hal0-owned and not sticky on an upgrade or re-run, so the hal0
 # account can plant a symlink at the marker path. The root write therefore goes
 # through `nofollow` (#2975): it replaces whatever sits there as a link, never
-# writing through it. If no usable Python exists yet (a fresh box), fall back
-# to pure shell that cannot follow a link either: `rm -f` removes a link rather
-# than its target, and a noclobber create is O_EXCL, which fails on any
-# existing entry, a link included. The marker is advisory: failure warns and
-# the install goes on.
+# writing through it. There is no pure-shell fallback: no shell test can tell a
+# link to a non-regular file from a free name, and a usable Python is already
+# required by this point. When `nofollow` cannot run, warn and go on without a
+# marker. The marker is advisory: failure warns and the install goes on.
 INSTALL_MARKER="${VAR_DIR}/.install-in-progress"
 if [[ "${DEV_MODE}" -eq 0 ]]; then
     _marker_ok=0
@@ -1068,10 +1067,6 @@ if [[ "${DEV_MODE}" -eq 0 ]]; then
             && nofollow write --owner root:root --mode 0644 "${INSTALL_MARKER}" </dev/null; then
             _marker_ok=1
         fi
-    elif { [[ -d "${VAR_DIR}" ]] || install -d -m 0755 -o root -g root "${VAR_DIR}"; } \
-        && rm -f "${INSTALL_MARKER}" \
-        && ( set -o noclobber; : > "${INSTALL_MARKER}" ); then
-        _marker_ok=1
     fi
     [[ "${_marker_ok}" -eq 1 ]] \
         || warn "could not write ${INSTALL_MARKER}; a re-run will not know this install was interrupted"
@@ -4961,7 +4956,10 @@ ui_box "hal0 is ready" "${SUMMARY_LINES[@]}"
 ui_step_finalize
 # ── install-in-progress marker: remove ──────────────────────────────────────
 # Every step has finished; the install is complete.
-rm -f "${INSTALL_MARKER}"
+# The hal0 account owns ${VAR_DIR} and may have swapped the marker for a
+# directory: a failed removal is a warning, never a failed install.
+rm -f -- "${INSTALL_MARKER}" 2>/dev/null \
+    || warn "could not remove ${INSTALL_MARKER}; a re-run may report this finished install as unfinished"
 info "Total install time: $((SECONDS / 60))m $((SECONDS % 60))s"
 [[ -n "${HAL0_INSTALL_LOG:-}" ]] && info "Install log: ${HAL0_INSTALL_LOG}"
 # Keep the applied answers document (no token, no terminal grant); never fails the install.

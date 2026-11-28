@@ -709,3 +709,102 @@ def test_existing_directory_and_missing_path_are_accepted(tmp_path: Path) -> Non
     (tmp_path / "d").mkdir()
     for value in (str(tmp_path / "d"), str(tmp_path / "not" / "yet")):
         assert run({"version": 1, "model_store": {"path": value}}, tmp_path).returncode == 0
+
+
+# ── credentials and secrets never reach the (world-readable) install log ────
+
+_SECRET = "hunter2-S3CRET"
+
+
+@pytest.mark.parametrize(
+    "net",
+    [
+        {"public_url": f"https://admin:{_SECRET}@x.example.com"},
+        {"public_url": f"admin:{_SECRET}@x.example.com"},
+        {"public_url": f"https://admin:{_SECRET}@x.example.com:99999/"},  # also a bad port
+        {"public_url": f"https://admin:{_SECRET}@[bad/"},  # also unparsable
+        {"public_url": f"https://x.example.com/p?token={_SECRET}"},
+        {"public_url": f"ftp://x.example.com/{_SECRET}"},
+        {"public_url": f"https://x.example.com/{_SECRET} z"},
+        {"allowed_origins": [f"https://admin:{_SECRET}@x.example.com"]},
+        {"allowed_origins": ["https://ok.example.com", f"https://:{_SECRET}@x.example.com"]},
+        {"allowed_origins": [f"https://x.example.com/{_SECRET}"]},
+    ],
+)
+def test_url_messages_never_echo_a_secret(tmp_path: Path, net: dict) -> None:
+    proc = run({"version": 1, "network": net}, tmp_path)
+    assert proc.returncode == 2 and proc.stdout == ""
+    assert _SECRET not in proc.stderr
+    assert _SECRET not in proc.stdout
+
+
+@pytest.mark.parametrize("key", ["public_url", "allowed_origins"])
+def test_credentials_message_names_the_key_only(tmp_path: Path, key: str) -> None:
+    url = f"https://admin:{_SECRET}@x.example.com"
+    value = url if key == "public_url" else [url]
+    proc = run({"version": 1, "network": {key: value}}, tmp_path)
+    assert proc.returncode == 2
+    where = "network.public_url" if key == "public_url" else "network.allowed_origins[0]"
+    assert f"error: {where}: must not contain a user name or password" in proc.stderr
+    assert "x.example.com" not in proc.stderr and "admin" not in proc.stderr
+
+
+def test_other_url_messages_echo_scheme_and_host_only(tmp_path: Path) -> None:
+    proc = run({"version": 1, "network": {"public_url": "ftp://x.example.com:21/a/b?c=d"}}, tmp_path)
+    assert "ftp://x.example.com:21" in proc.stderr
+    assert "/a/b" not in proc.stderr and "c=d" not in proc.stderr
+
+
+# ── a hostile shape cannot crash the reader ─────────────────────────────────
+
+
+@pytest.mark.parametrize("depth", [5_000, 100_000])
+@pytest.mark.parametrize("shape", ["list", "dict"])
+def test_deep_nesting_exits_2_with_a_message(tmp_path: Path, depth: int, shape: str) -> None:
+    if shape == "list":
+        raw = b'{"version": 1, "x": ' + b"[" * depth + b"]" * depth + b"}"
+    else:
+        raw = b'{"version": 1, "x": ' + b'{"a": ' * depth + b"1" + b"}" * depth + b"}"
+    proc = run(None, tmp_path, raw=raw)
+    assert proc.returncode == 2 and proc.stdout == ""
+    assert "nested too deeply" in proc.stderr
+    assert "Traceback" not in proc.stderr
+
+
+def test_deep_nesting_in_a_known_section_exits_2(tmp_path: Path) -> None:
+    raw = b'{"version": 1, "slots": ' + b"[" * 5000 + b"]" * 5000 + b"}"
+    proc = run(None, tmp_path, raw=raw)
+    assert proc.returncode == 2 and "Traceback" not in proc.stderr
+
+
+def test_deep_nesting_in_the_saved_form_run_exits_2(tmp_path: Path) -> None:
+    path = tmp_path / "deep.json"
+    path.write_bytes(b'{"version": 1, "x": ' + b"[" * 5000 + b"]" * 5000 + b"}")
+    proc = subprocess.run([sys.executable, "-I", str(READER), "--emit-saved", str(path)],
+                          capture_output=True, text=True, check=False)
+    assert proc.returncode == 2 and "Traceback" not in proc.stderr
+
+
+# ── a pipe where a file should be returns promptly ──────────────────────────
+
+
+def test_fifo_document_does_not_hang(tmp_path: Path) -> None:
+    import os
+    import time
+
+    fifo = tmp_path / "doc.fifo"
+    os.mkfifo(fifo)
+    start = time.monotonic()
+    proc = subprocess.run(
+        [sys.executable, "-I", str(READER), "--origin", "file", "--", str(fifo)],
+        capture_output=True, text=True, check=False, timeout=10,
+    )
+    assert time.monotonic() - start < 2
+    assert proc.returncode == 2 and "not a regular file" in proc.stderr
+
+
+def test_the_document_is_read_through_one_nonblocking_descriptor() -> None:
+    text = READER.read_text(encoding="utf-8")
+    assert "os.O_NONBLOCK" in text and "os.fstat(fd)" in text
+    assert text.count("_read_capped(path)") == 2  # the document and the model list
+    assert "with open(" not in text and "os.stat(" not in text  # no second look by name

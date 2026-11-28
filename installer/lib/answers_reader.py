@@ -14,6 +14,7 @@ on standard error. Validation finishes before the first byte is printed.
 
 from __future__ import annotations
 
+import errno
 import ipaddress
 import json
 import os
@@ -235,14 +236,44 @@ def _walk_strings(node: Any, where: str, problems: _Problems) -> None:
             _walk_strings(value, f"{where}[{index}]", problems)
 
 
+class _NotRegular(OSError):
+    pass
+
+
+def _read_capped(path: str) -> bytes:
+    """Read a regular file through ONE descriptor, never blocking on a pipe.
+
+    The descriptor is opened O_NONBLOCK (a FIFO swapped in after any earlier
+    look opens at once instead of hanging the root installer) and O_NOCTTY,
+    then fstat-ed: what is checked is what is read. At most MAX_BYTES + 1 bytes
+    come back, so the caller can tell "too large" from "exactly the cap".
+    """
+    fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOCTTY | os.O_CLOEXEC)
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode):
+            raise _NotRegular(errno.EINVAL, "not a regular file")
+        if info.st_size > MAX_BYTES:
+            return b"x" * (MAX_BYTES + 1)
+        chunks: list[bytes] = []
+        total = 0
+        while total <= MAX_BYTES:
+            chunk = os.read(fd, MAX_BYTES + 1 - total)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            total += len(chunk)
+        return b"".join(chunks)
+    finally:
+        os.close(fd)
+
+
 def _load(path: str, problems: _Problems) -> dict[str, Any] | None:
     try:
-        info = os.stat(path)
-        if not stat.S_ISREG(info.st_mode):
-            problems.error(f"{_q(path)}: not a regular file")
-            return None
-        with open(path, "rb") as handle:
-            raw = handle.read(MAX_BYTES + 1)
+        raw = _read_capped(path)
+    except _NotRegular:
+        problems.error(f"{_q(path)}: not a regular file")
+        return None
     except OSError as exc:
         problems.error(f"cannot read the answers document: {exc.strerror or exc}")
         return None
@@ -406,6 +437,24 @@ def _host_part(host: str) -> str | None:
     return None
 
 
+def _authority(text: str) -> str:
+    """The part of a URL between '://' (if any) and the first '/', '?' or '#'."""
+    rest = text.split("://", 1)[1] if "://" in text else text
+    return re.split(r"[/?#]", rest, maxsplit=1)[0]
+
+
+def _shown(raw: str) -> str:
+    """What a URL message may echo: scheme and host[:port], never more.
+
+    Messages end up in a log other users can read, so a user name, a password,
+    a path or a query that was pasted into a URL must never be printed. The
+    caller has already refused any authority holding '@'.
+    """
+    text = raw.strip()
+    scheme = text.split("://", 1)[0] + "://" if "://" in text else ""
+    return _q(scheme + _authority(text))
+
+
 def _http_url(raw: str, full: str, problems: _Problems, *, allow_path: bool,
               bare_ok: bool) -> str | None:
     """Validate like hal0.config.schema NetworkConfig.public_url / extra_origins."""
@@ -413,49 +462,54 @@ def _http_url(raw: str, full: str, problems: _Problems, *, allow_path: bool,
     if not text:
         problems.error(f"{full}: must not be empty")
         return None
+    # First, before any message can echo the value: credentials in the URL.
+    if "@" in _authority(text):
+        problems.error(f"{full}: must not contain a user name or password")
+        return None
+    shown = _shown(text)
     if "://" not in text:
         if not bare_ok:
-            problems.error(f"{full}: {_q(text)} must start with http:// or https://")
+            problems.error(f"{full}: {shown} must start with http:// or https://")
             return None
         text = f"https://{text}"
     if any(c.isspace() for c in text) or not text.isascii():
-        problems.error(f"{full}: {_q(raw)} must be plain ASCII without whitespace")
+        problems.error(f"{full}: {shown} must be plain ASCII without whitespace")
         return None
     try:
         parts = urlsplit(text)
         port = parts.port
     except ValueError:
-        problems.error(f"{full}: {_q(raw)} is not a valid URL")
+        problems.error(f"{full}: {shown} is not a valid URL")
         return None
     scheme = parts.scheme.lower()
     if scheme not in ("http", "https"):
-        problems.error(f"{full}: {_q(raw)} must use http or https")
+        problems.error(f"{full}: {shown} must use http or https")
         return None
     if "@" in parts.netloc:
-        problems.error(f"{full}: {_q(raw)} must not contain a user name or password")
+        problems.error(f"{full}: must not contain a user name or password")
         return None
     if not parts.hostname:
-        problems.error(f"{full}: {_q(raw)} has no host")
+        problems.error(f"{full}: {shown} has no host")
         return None
     host = _host_part(f"[{parts.hostname}]" if ":" in parts.hostname else parts.hostname)
     if host is None:
         problems.error(
-            f"{full}: {_q(raw)} is not a valid host: use a DNS name, an IPv4 address "
+            f"{full}: {shown} is not a valid host: use a DNS name, an IPv4 address "
             "or a bracketed IPv6 address"
         )
         return None
     if port == 0:
-        problems.error(f"{full}: {_q(raw)} has an invalid port")
+        problems.error(f"{full}: {shown} has an invalid port")
         return None
     if parts.query or parts.fragment or "?" in text or "#" in text:
-        problems.error(f"{full}: {_q(raw)} must not carry a query or fragment")
+        problems.error(f"{full}: {shown} must not carry a query or fragment")
         return None
     path = parts.path.rstrip("/")
     if path and not allow_path:
-        problems.error(f"{full}: {_q(raw)} must be an origin (scheme://host[:port]) with no path")
+        problems.error(f"{full}: {shown} must be an origin (scheme://host[:port]) with no path")
         return None
     if not _URL_PATH.match(path):
-        problems.error(f"{full}: {_q(raw)} has a path with characters other than A-Za-z0-9._~/%-")
+        problems.error(f"{full}: {shown} has a path with characters other than A-Za-z0-9._~/%-")
         return None
     default = 80 if scheme == "http" else 443
     netloc = host if port is None or port == default else f"{host}:{port}"
@@ -470,10 +524,7 @@ def _load_manifest(path: str, problems: _Problems) -> dict[str, set[str]] | None
     model_ladder, counts as unreadable.
     """
     try:
-        if not stat.S_ISREG(os.stat(path).st_mode):
-            raise OSError("not a regular file")
-        with open(path, "rb") as handle:
-            raw = handle.read(MAX_BYTES + 1)
+        raw = _read_capped(path)
         if len(raw) > MAX_BYTES:
             raise ValueError("too large")
         data = json.loads(raw.decode("utf-8"))
@@ -804,15 +855,20 @@ def _emit_saved(argv: list[str]) -> int:
         return 2
     problems = _Problems()
     doc = _load(path, problems)
+    text = ""
     if doc is not None:
-        _walk_strings(doc, "", problems)
-        _build(doc, "file", problems, manifest)
+        try:
+            _walk_strings(doc, "", problems)
+            _build(doc, "file", problems, manifest)
+            if not problems.errors:
+                text = json.dumps(_saved_document(doc), indent=2, ensure_ascii=False) + "\n"
+        except RecursionError:
+            problems.error("the answers document is nested too deeply")
     # Warnings are not repeated here: the apply run already printed them.
     if problems.errors or doc is None:
         for error in problems.errors:
             sys.stderr.write(f"error: {error}\n")
         return 2
-    text = json.dumps(_saved_document(doc), indent=2, ensure_ascii=False) + "\n"
     sys.stdout.buffer.write(text.encode("utf-8"))
     sys.stdout.buffer.flush()
     return 0
@@ -830,8 +886,12 @@ def main(argv: list[str]) -> int:
     doc = _load(path, problems)
     lines: list[str] = []
     if doc is not None:
-        _walk_strings(doc, "", problems)
-        values = _build(doc, origin, problems, manifest_path)
+        try:
+            _walk_strings(doc, "", problems)
+            values = _build(doc, origin, problems, manifest_path)
+        except RecursionError:
+            problems.error("the answers document is nested too deeply")
+            values = {}
         for name in ALLOWED_NAMES:
             if name in values:
                 lines.append(f"{name}={values[name]}")

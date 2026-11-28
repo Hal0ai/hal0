@@ -93,44 +93,37 @@ def test_directory_made_root_0755_through_nofollow(tmp_path):
     ), calls
 
 
-def test_shell_fallback_creates_dir_root_0755(tmp_path):
-    # No usable Python: the pure-shell path runs `install -d -m 0755 -o root -g root`.
-    bin_dir = tmp_path / "bin"
-    bin_dir.mkdir()
-    log = tmp_path / "install-args"
-    (bin_dir / "install").write_text(
-        f'#!/bin/bash\necho "$*" > "{log}"\nmkdir -p "${{@: -1}}"\n'
-    )
-    (bin_dir / "install").chmod(0o755)
+def test_no_usable_python_warns_and_writes_no_marker(tmp_path):
+    # No pure-shell fallback: a link to a non-regular file defeats a noclobber
+    # create, so without a usable Python the marker is simply not written.
     var_dir = tmp_path / "absent"
-    proc = _run(_create(), var_dir, 0, py="/nonexistent/python", bin_dir=bin_dir)
+    proc = _run(_create(), var_dir, 0, py="/nonexistent/python")
     assert proc.returncode == 0, proc.stderr
-    assert log.read_text().split() == ["-d", "-m", "0755", "-o", "root", "-g", "root", str(var_dir)]
-    assert (var_dir / MARKER).is_file()
+    assert "WARN: could not write" in proc.stdout and "REACHED_NEXT_LINE" in proc.stdout
+    assert not var_dir.exists()
+    assert "noclobber" not in _create() and "install -d" not in _create()
 
 
 def test_planted_symlink_is_not_followed(tmp_path):
-    for py in (sys.executable, "/nonexistent/python"):
-        var_dir = tmp_path / ("a" if py == sys.executable else "b")
-        var_dir.mkdir()
-        victim = tmp_path / f"victim-{var_dir.name}"
-        victim.write_text("precious")
-        (var_dir / MARKER).symlink_to(victim)
-        proc = _run(_create(), var_dir, 0, py=py)
-        assert proc.returncode == 0, proc.stderr
-        assert victim.read_text() == "precious"
-        assert (var_dir / MARKER).is_file() and not (var_dir / MARKER).is_symlink()
+    var_dir = tmp_path / "a"
+    var_dir.mkdir()
+    victim = tmp_path / "victim-a"
+    victim.write_text("precious")
+    (var_dir / MARKER).symlink_to(victim)
+    proc = _run(_create(), var_dir, 0)
+    assert proc.returncode == 0, proc.stderr
+    assert victim.read_text() == "precious"
+    assert (var_dir / MARKER).is_file() and not (var_dir / MARKER).is_symlink()
 
 
 def test_failure_to_create_warns_and_continues(tmp_path):
-    for py in (sys.executable, "/nonexistent/python"):
-        blocker = tmp_path / f"file-{Path(py).name}"
-        blocker.write_text("not a directory")
-        proc = _run(_create(), blocker / "hal0", 0, py=py)
-        assert proc.returncode == 0, proc.stderr
-        assert "WARN: could not write" in proc.stdout
-        assert MARKER in proc.stdout
-        assert "REACHED_NEXT_LINE" in proc.stdout
+    blocker = tmp_path / "file-python"
+    blocker.write_text("not a directory")
+    proc = _run(_create(), blocker / "hal0", 0)
+    assert proc.returncode == 0, proc.stderr
+    assert "WARN: could not write" in proc.stdout
+    assert MARKER in proc.stdout
+    assert "REACHED_NEXT_LINE" in proc.stdout
 
 
 def test_marker_not_created_in_dev_mode(tmp_path):
@@ -150,7 +143,7 @@ def test_uninstall_default_path_clears_marker():
 def test_marker_removed_only_after_finalize(tmp_path):
     marker_name = MARKER
     tail = TEXT[TEXT.rindex(_REMOVE_START) :]
-    assert tail.index('rm -f "${INSTALL_MARKER}"') < tail.index(_REMOVE_END)
+    assert tail.index('rm -f -- "${INSTALL_MARKER}"') < tail.index(_REMOVE_END)
 
     # No path between creation and finalize touches the marker.
     between = TEXT[TEXT.index(_CREATE_END) : TEXT.rindex(_REMOVE_START)]
@@ -177,3 +170,27 @@ def test_marker_removed_only_after_finalize(tmp_path):
 def test_no_exit_between_create_and_finalize_removes_marker():
     body = TEXT[TEXT.index(_CREATE_END) : TEXT.rindex(_REMOVE_START)]
     assert not re.search(r"\.install-in-progress|INSTALL_MARKER", body)
+
+
+def _removal_fragment() -> str:
+    fragment = _slice(_REMOVE_START, _REMOVE_END).replace("ui_step_finalize\n", "")
+    return 'INSTALL_MARKER="${VAR_DIR}/.install-in-progress"\n' + fragment
+
+
+def test_marker_replaced_by_a_directory_does_not_fail_a_finished_install(tmp_path):
+    # The hal0 account owns the state directory and can swap the marker for a
+    # directory; `rm -f` then fails, and under set -e + the ERR trap that would
+    # report a completed install as failed.
+    (tmp_path / MARKER).mkdir()
+    (tmp_path / MARKER / "inside").write_text("x")
+    proc = _run(_removal_fragment(), tmp_path, 0, extra="trap 'echo ERR_TRAP' ERR\n")
+    assert proc.returncode == 0, proc.stderr
+    assert "REACHED_NEXT_LINE" in proc.stdout and "ERR_TRAP" not in proc.stdout
+    assert proc.stdout.count("WARN:") == 1 and str(tmp_path / MARKER) in proc.stdout
+
+
+def test_failing_removal_warns_once_and_continues(tmp_path):
+    (tmp_path / MARKER).write_text("")
+    proc = _run(_removal_fragment(), tmp_path, 0, extra="rm() { return 1; }\n")
+    assert proc.returncode == 0, proc.stderr
+    assert "REACHED_NEXT_LINE" in proc.stdout and proc.stdout.count("WARN:") == 1

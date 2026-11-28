@@ -203,6 +203,7 @@ hal0_facts_write() {
         printf '}\n'
     } > "${tmp}" || { rm -f "${tmp}"; return 1; }
     chmod 0644 "${tmp}" || { rm -f "${tmp}"; return 1; }
-    mv -f "${tmp}" "${path}" || { rm -f "${tmp}"; return 1; }
+    # -T: replace whatever is at the target name; never move into a directory a link points at.
+    mv -fT "${tmp}" "${path}" || { rm -f "${tmp}"; return 1; }
     return 0
 }
