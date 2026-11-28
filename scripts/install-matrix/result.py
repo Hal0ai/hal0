@@ -22,6 +22,7 @@ The file is written mode 0600. Standard library only.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import importlib.util
 import json
 import os
@@ -122,7 +123,7 @@ def shape_row(shape_id: str):
         for shape in module.load(module.DEFAULT_FILE):
             if shape["id"] == shape_id:
                 return shape["row"]
-    except Exception:  # noqa: BLE001 - a missing row must not stop the result
+    except Exception:
         return None
     return None
 
@@ -195,10 +196,8 @@ def write_private(path: str, payload: dict) -> None:
             fh.write(json.dumps(payload, indent=2) + "\n")
         os.replace(tmp, target)
     except BaseException:
-        try:
+        with contextlib.suppress(OSError):
             os.unlink(tmp)
-        except OSError:
-            pass
         raise
 
 

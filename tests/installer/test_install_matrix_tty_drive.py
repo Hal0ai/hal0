@@ -115,7 +115,7 @@ def test_total_timeout(tmp_path: Path) -> None:
 def test_timeout_kills_whole_process_group(tmp_path: Path) -> None:
     pidfile = tmp_path / "grandchild.pid"
     script = f"sleep 300 &\necho $! > {pidfile}\nwait\n"
-    proc, res, _ = drive(tmp_path, script, "", extra=["--timeout", "2"])
+    proc, _, _ = drive(tmp_path, script, "", extra=["--timeout", "2"])
     assert proc.returncode == 124
     pid = int(pidfile.read_text())
     # Reaped by init or by us; either way the signal-0 probe must fail.
@@ -251,7 +251,7 @@ def test_match_buffer_is_bounded(tmp_path: Path) -> None:
 
 
 def test_command_runs_with_default_signal_dispositions(tmp_path: Path) -> None:
-    proc, res, text = drive(tmp_path, "grep SigIgn /proc/self/status\n", "")
+    proc, _, text = drive(tmp_path, "grep SigIgn /proc/self/status\n", "")
     assert proc.returncode == 0
     mask = int(re.search(r"SigIgn:\s*([0-9a-f]+)", text).group(1), 16)  # type: ignore[union-attr]
     assert not mask & (1 << (signal.SIGPIPE - 1))

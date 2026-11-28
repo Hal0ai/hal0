@@ -85,7 +85,7 @@ def gb(value: object) -> str:
 def mss(value: object) -> str:
     if not is_num(value):
         return "-"
-    total = int(round(value))
+    total = round(value)
     return f"{total // 60}:{total % 60:02d}"
 
 

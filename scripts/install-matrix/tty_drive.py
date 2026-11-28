@@ -27,6 +27,7 @@ either timeout. Standard library only; Python 3.10+.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import errno
 import fcntl
 import json
@@ -75,10 +76,8 @@ def strip_ansi(data: bytes) -> str:
 
 
 def _killpg(pgid: int, sig: int) -> None:
-    try:
+    with contextlib.suppress(ProcessLookupError, PermissionError):
         os.killpg(pgid, sig)
-    except (ProcessLookupError, PermissionError):
-        pass
 
 
 def _reap(pid: int, block_for: float) -> int | None:
@@ -120,10 +119,8 @@ def _tail(path: str) -> str:
 
 def _create_private(path: str, mode: str) -> object:
     """Create a fresh 0600 file; an existing file (or symlink) is replaced."""
-    try:
+    with contextlib.suppress(FileNotFoundError):
         os.unlink(path)
-    except FileNotFoundError:
-        pass
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     return os.fdopen(fd, mode, buffering=0 if "b" in mode else -1)
 
@@ -140,10 +137,8 @@ def _child_exec(command: list[str]) -> None:
     # behave differently from one started in a real terminal.
     signal.signal(signal.SIGPIPE, signal.SIG_DFL)
     signal.signal(signal.SIGXFSZ, signal.SIG_DFL)
-    try:
+    with contextlib.suppress(OSError):
         fcntl.ioctl(0, termios.TIOCSWINSZ, struct.pack("HHHH", ROWS, COLS, 0, 0))
-    except OSError:
-        pass
     try:
         os.execvp(command[0], command)
     except OSError as exc:
@@ -210,10 +205,9 @@ def run(args: argparse.Namespace) -> int:
                 for i, (rx, reply) in enumerate(rules):
                     if not fired[i] and rx.search(text):
                         fired[i] = True
-                        try:
+                        # A failed write means the child is already gone; EOF follows.
+                        with contextlib.suppress(OSError):
                             os.write(master, reply)
-                        except OSError:
-                            pass  # child already gone; EOF follows
                         result["questions_answered"] += 1
                         pending = b""
                         break
@@ -241,10 +235,8 @@ def run(args: argparse.Namespace) -> int:
             if status is None:
                 status = _reap(pid, KILL_GRACE)
         if master >= 0:
-            try:
+            with contextlib.suppress(OSError):
                 os.close(master)
-            except OSError:
-                pass
         transcript.close()  # type: ignore[attr-defined]
         for sig, handler in old.items():
             signal.signal(sig, handler)

@@ -85,9 +85,26 @@ DOCTOR = (
     '{"id":"c","severity":"warn"},{"id":"d","severity":"critical"}]'
 )
 
-BARE_TOOLS = (
-    "bash cat tr date sleep od timeout ls head tail sort readlink dirname df mkdir kill env sed"
-).split()
+BARE_TOOLS = [
+    "bash",
+    "cat",
+    "tr",
+    "date",
+    "sleep",
+    "od",
+    "timeout",
+    "ls",
+    "head",
+    "tail",
+    "sort",
+    "readlink",
+    "dirname",
+    "df",
+    "mkdir",
+    "kill",
+    "env",
+    "sed",
+]
 
 
 class Guest:
@@ -404,7 +421,7 @@ def test_values_are_single_line(guest: Guest):
     for mode in ("pre", "post", "probe"):
         proc, _ = guest.run(mode)
         for line in proc.stdout.splitlines():
-            key, sep, value = line.partition("=")
+            key, sep, _ = line.partition("=")
             assert sep == "=" and key and " " not in key, line
         assert proc.stdout.endswith("\n")
 

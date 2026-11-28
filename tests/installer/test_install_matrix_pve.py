@@ -9,7 +9,6 @@ ever tried to run them locally.
 
 from __future__ import annotations
 
-import os
 import re
 import shlex
 import subprocess
@@ -612,7 +611,7 @@ def test_the_guard_comes_before_the_pkill_of_a_destroy(fake):
     fake.rule("pct destroy 172", "")
     fake.rule("test -e /etc/pve/lxc/172.conf", "absent\n")
     fake.run("ct_destroy 172")
-    call = [c for c in fake.calls() if "pkill" in c][0]
+    call = next(c for c in fake.calls() if "pkill" in c)
     assert call.index(GUARD_TAG) < call.index("pkill")
     assert "{ pkill" in call  # the whole sequence sits behind the guard
 
@@ -865,7 +864,7 @@ def _create(fake, tail="", env=None):
 def test_create_mirrors_proxmox_script_features(fake):
     r = _create(fake, "/dev/dri/renderD128,gid=44 /dev/kfd")
     assert r.returncode == 0, r.stderr
-    call = [c for c in fake.calls() if "pct create" in c][0]
+    call = next(c for c in fake.calls() if "pct create" in c)
     assert FEATURES in call
     assert "--tags hal0-matrix" in call
     assert "--hostname hal0-mx-172" in call
@@ -879,7 +878,7 @@ def test_create_mirrors_proxmox_script_features(fake):
 
 def test_create_uses_bridge_env(fake):
     _create(fake, env={"HAL0_MATRIX_BRIDGE": "vmbr9"})
-    call = [c for c in fake.calls() if "pct create" in c][0]
+    call = next(c for c in fake.calls() if "pct create" in c)
     assert "bridge=vmbr9" in call
 
 
@@ -990,7 +989,7 @@ def test_apply_device_rules_appends_idempotently(fake):
     fake.rule("/etc/pve/lxc/172.conf", "")
     r = fake.run("ct_apply_device_rules 172 0 226 238 226")
     assert r.returncode == 0, r.stderr
-    call = [c for c in fake.calls() if "/etc/pve/lxc/172.conf" in c][0]
+    call = next(c for c in fake.calls() if "/etc/pve/lxc/172.conf" in c)
     assert call.count("lxc.cgroup2.devices.allow:") >= 2
     assert "c\\ 226:\\*\\ rwm" in call and "c\\ 238:\\*\\ rwm" in call
     assert "lxc.prlimit.memlock:\\ unlimited" in call
@@ -1012,7 +1011,7 @@ def test_exec_quotes_command_as_one_argument(fake):
     fake.rule("pct exec 172", "")
     cmd = "echo hi; id && rm -rf '/tmp/x y'"
     fake.run(f"ct_exec 172 {shlex.quote(cmd)}")
-    call = [c for c in fake.calls() if "pct exec" in c][0]
+    call = next(c for c in fake.calls() if "pct exec" in c)
     tokens = shlex.split(call)
     assert tokens[-5:-2] == ["172", "--", "bash"]
     assert tokens[-2:] == ["-c", cmd]
@@ -1044,7 +1043,7 @@ def test_wait_network_succeeds_when_resolves(fake):
     fake.rule("pct exec 172", "")
     r = fake.run("ct_wait_network 172 5; echo rc=$?")
     assert "rc=0" in r.stdout
-    assert "hal0.dev" in [c for c in fake.calls() if "pct exec" in c][0]
+    assert "hal0.dev" in next(c for c in fake.calls() if "pct exec" in c)
 
 
 def test_wait_network_times_out(fake):
@@ -1143,7 +1142,7 @@ def _rules_call(fake, unpriv):
     fake.rule("/etc/pve/lxc/172.conf", "")
     r = fake.run(f"ct_apply_device_rules 172 {unpriv} 226 240")
     assert r.returncode == 0, r.stderr
-    return [c for c in fake.calls() if "/etc/pve/lxc/172.conf" in c][0]
+    return next(c for c in fake.calls() if "/etc/pve/lxc/172.conf" in c)
 
 
 def test_privileged_gpu_guest_gets_apparmor_unconfined(fake):

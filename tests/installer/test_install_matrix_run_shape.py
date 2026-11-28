@@ -301,7 +301,7 @@ def test_a_refused_create_never_destroys_the_guest_it_found(host):
 def test_the_guest_this_run_created_carries_its_nonce(host):
     r = host.run("u2404-cpu", "--vmid", "172", "--out", str(host.out))
     assert r.returncode == 0, r.stderr
-    create = [c for c in host.calls() if "pct create" in c][0]
+    create = next(c for c in host.calls() if "pct create" in c)
     m = re.search(r"--description hal0-matrix\\ run\\ ([0-9a-f]{16})(?: |$)", create)
     assert m, create
 
@@ -505,7 +505,7 @@ def test_cleanup_destroys_on_interrupt(host):
         assert time.monotonic() < deadline, "install never started"
         time.sleep(0.05)
     os.killpg(proc.pid, signal.SIGINT)
-    out, err = proc.communicate(timeout=120)
+    _, err = proc.communicate(timeout=120)
     assert proc.returncode == 130, err
     calls = host.calls()
     install_at = max(i for i, c in enumerate(calls) if "summary-json" in c)
@@ -557,7 +557,7 @@ def test_an_interrupt_during_pct_create_waits_for_it_and_then_cleans_up(host):
         assert proc.poll() is None and time.monotonic() < deadline
         time.sleep(0.02)
     os.killpg(proc.pid, signal.SIGINT)
-    out, err = proc.communicate(timeout=120)
+    _, err = proc.communicate(timeout=120)
     assert proc.returncode == 130, err
     calls = host.calls()
     created = [i for i, c in enumerate(calls) if "pct create" in c]
@@ -633,7 +633,7 @@ def test_a_second_interrupt_during_cleanup_still_reports_left_behind(host):
         time.sleep(0.05)
     os.killpg(proc.pid, signal.SIGINT)
     os.killpg(proc.pid, signal.SIGTERM)
-    out, err = proc.communicate(timeout=120)
+    _, err = proc.communicate(timeout=120)
     assert "LEFT BEHIND: 172" in err, err
     assert "left_behind=172" in (host.out / "run.txt").read_text()
 
@@ -680,7 +680,7 @@ def test_successful_terminal_run(host):
     assert "installing hal0" in (host.out / "transcript.txt").read_text()
     assert not (host.state / "present").exists()
     assert any("-tt" in c and "pct exec 172" in c for c in host.calls())
-    tty = [c for c in host.calls() if "-tt" in c][0]
+    tty = next(c for c in host.calls() if "-tt" in c)
     assert "-o ServerAliveInterval=15 -o ServerAliveCountMax=4" in tty
 
 
