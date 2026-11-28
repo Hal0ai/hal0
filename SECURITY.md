@@ -21,10 +21,14 @@ yourself, `sudo hal0 agent install hermes --terminal-tool`, or
 `HAL0_HERMES_TERMINAL=1` for an unattended install. On a fresh box it is off
 unless you do one of those. The answers saved by an earlier install and an
 answers file never turn it on. Once it has been turned on, the box remembers
-that in `/etc/hal0/agents/hermes-terminal-tool`, and running the installer again
-with the row unticked does not turn it off; use
-`sudo hal0 agent install hermes --no-terminal-tool`, or set
-`HAL0_HERMES_TERMINAL=0` on the next install run. `hal0 agent status hermes`
+that in `/etc/hal0/agents/hermes-terminal-tool`. When the installer's setup
+screens are shown and confirmed, the review screen's `Terminal tool` line is
+what the box gets: confirming it as `off` turns the tool off, so running the
+screens again (`--reconfigure`) turns it off unless the row is ticked again. An
+explicit `HAL0_HERMES_TERMINAL=0` or `=1` on an install run is applied to a box
+that already has the agent too. A run that shows no screens, with that variable
+unset, changes nothing. At any time,
+`sudo hal0 agent install hermes --no-terminal-tool` turns it off. `hal0 agent status hermes`
 prints the current posture.
 
 Turning it on makes the agent root-equivalent, and the rest of this section

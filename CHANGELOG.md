@@ -47,6 +47,10 @@ applying. Add those subsections to a version's section to surface them; see
 - **`--answers=FILE` (`HAL0_ANSWERS_FILE`)** reads the install choices from a JSON answers document instead of asking. The file is checked in full first, and a bad one stops the install before anything changes. It never carries a key or a token.
 - **`--reconfigure`** shows the setup screens again on a box that already has hal0, instead of reusing the saved answers.
 
+### Fixed
+
+- **Running the setup screens again now turns the assistant's terminal tool off unless it is ticked again.** The review screen shows a `Terminal tool` line, and confirming it as off used to leave the tool on for a box that already had it. An explicit `HAL0_HERMES_TERMINAL` value on an install run is also applied on a box that already has the assistant, which restarts it once. (#4093)
+
 ### Changed
 
 - **The separate image-model menu at the terminal is gone.** Image models are chosen on the Customize screens or by setting `HAL0_IMAGE_MODELS` (`recommended`, or a list of ids); unset downloads none, as it already did for an unattended run.

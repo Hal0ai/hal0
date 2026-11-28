@@ -121,20 +121,25 @@ sudo hal0 agent install hermes --terminal-tool     # opt in
 sudo hal0 agent install hermes --no-terminal-tool  # opt back out
 ```
 
-The installer's setup screens carry it as one row, "Let the assistant run
-commands on this machine?", on the "Assistant and memory" screen that
-Customize adds. On a fresh box it is off unless you tick that row or set
-`HAL0_HERMES_TERMINAL=1` (the unattended way to opt in). The Recommended and
-Minimal setups leave it off. The answers saved by an earlier install and an
-answers file given with `--answers=FILE` never turn it on.
+The setup screens carry it as one row, "Let the assistant run commands on
+this machine?", on the "Assistant and memory" screen that Customize adds. On a
+fresh box it is off unless you tick that row or set `HAL0_HERMES_TERMINAL=1`
+(the unattended way to opt in). Saved answers and an answers file never turn
+it on.
 
-Once it has been turned on, the box remembers that (the file below), and running
-the installer again with the row unticked does **not** turn it off. To turn it
-off, run `sudo hal0 agent install hermes --no-terminal-tool`, or set
-`HAL0_HERMES_TERMINAL=0` on the next install run.
+When you confirm the setup screens, the review decides. Its "Terminal tool" line
+is `off` or `ON: the assistant can run commands as a root-equivalent user`.
+Confirming it as off turns the tool off, even where it was on. Only Customize
+can tick the row, so Recommended and Minimal mean off, and `--reconfigure`
+turns it off unless you tick it again. An installed assistant restarts once.
+
+`HAL0_HERMES_TERMINAL=0` or `=1` on an install run is applied there too, by
+`hal0 agent reprovision hermes`. If that fails, the installer warns and names `sudo hal0 agent install hermes --no-terminal-tool`.
+A run with no screens (unattended, an answers file, saved answers) and the
+variable unset changes nothing.
 
 Your answer is recorded at `/etc/hal0/agents/hermes-terminal-tool`, so
-re-provisioning, `--repair` and updates all keep it. That file is root-owned on
+reprovisioning, `--repair` and updates keep it. That file is root-owned on
 purpose: it sits outside the agent's own writable home, so nothing the agent
 writes can present itself to a later provision as your decision.
 
