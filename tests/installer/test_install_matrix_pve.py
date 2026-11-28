@@ -49,6 +49,8 @@ fi
 HANG = "__HANG__"  # a rule answering this never returns (until killed)
 
 
+# Rule for every fake ssh in these tests: a test must stay harmless when the
+# code under test is wrong, so the fake cuts its own output and never reads an endless source.
 class Fake:
     """A fake ssh on PATH. ``rules`` is a list of (needle, stdout, rc); the first
     rule whose needle occurs in the command string answers. Unmatched commands

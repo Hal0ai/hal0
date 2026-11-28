@@ -145,6 +145,8 @@ exit 97
 """
 
 
+# Rule for every fake ssh in these tests: a test must stay harmless when the
+# code under test is wrong, so the fake cuts its own output and never reads an endless source.
 class Host:
     def __init__(self, tmp_path: Path):
         self.root = tmp_path / "host"
