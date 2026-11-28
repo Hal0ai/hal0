@@ -21,6 +21,7 @@ drift.
 
 from __future__ import annotations
 
+import enum
 import re
 import shutil
 from collections.abc import Collection, Iterable
@@ -427,46 +428,88 @@ def seed_static_slots(
     unknown = [n for n in wanted if n not in SEED_TEMPLATES]
     if unknown:
         raise ValueError(f"not a seed template: {', '.join(sorted(unknown))}")
+    seeded: list[str] = []
+    for name in wanted:
+        # clear_tombstone=False: boot and the default path never bring back a
+        # slot the operator deleted; only an explicit ensure_seed_slot() ask does.
+        try:
+            result = ensure_seed_slot(
+                name,
+                installer_root=installer_root,
+                slots_dir=slots_dir,
+                existing_names=existing_names,
+                hw=hw,
+                clear_tombstone=False,
+            )
+        except FileNotFoundError:
+            continue  # already logged as install.static_seed_missing
+        if result is SeedResult.CREATED:
+            seeded.append(name)
+    return seeded
+
+
+class SeedResult(enum.Enum):
+    """What :func:`ensure_seed_slot` did."""
+
+    CREATED = "created"
+    EXISTS = "exists"
+    #: Only when ``clear_tombstone=False``: the operator deleted this seed.
+    TOMBSTONED = "tombstoned"
+
+
+def ensure_seed_slot(
+    name: str,
+    *,
+    installer_root: Path | None = None,
+    slots_dir: Path | None = None,
+    existing_names: Collection[str] = (),
+    hw: HardwareInfo | None = None,
+    clear_tombstone: bool = True,
+) -> SeedResult:
+    """Create the one seed slot ``name`` if it is absent, with this box's device.
+
+    The single copy path: :func:`seed_static_slots` calls this per name. An
+    existing ``<name>.toml`` (or a name in ``existing_names``, an id-keyed slot)
+    is never rewritten and returns :attr:`SeedResult.EXISTS`. A tombstoned name
+    returns :attr:`SeedResult.TOMBSTONED` when ``clear_tombstone=False``; with
+    the default ``True`` this is an explicit ask, so the slot is created and the
+    tombstone cleared. A freshly copied llama.cpp seed gets the host-derived
+    device and context envelope exactly as the whole-list path applies them.
+
+    Raises :class:`ValueError` for a name outside :data:`SEED_TEMPLATES` and
+    :class:`FileNotFoundError` when the seed template file is missing.
+    """
+    if name not in SEED_TEMPLATES:
+        raise ValueError(f"not a seed template: {name}")
     if installer_root is None:
         from hal0.agents.hermes_provision import REPO_ROOT_FOR_INSTALLER
 
         installer_root = REPO_ROOT_FOR_INSTALLER
     dest_dir = slots_dir if slots_dir is not None else paths.slots_config_dir()
-    src_dir = installer_root / "installer" / "etc-hal0" / "slots"
-    known = set(existing_names)
-
-    tombstoned = read_seed_tombstones(slots_dir=dest_dir)
-    seeded: list[str] = []
-    for name in wanted:
-        dest = dest_dir / f"{name}.toml"
-        # "Already known" = the identity store tracks it (id-keyed, no
-        # <name>.toml) OR a name-keyed file still exists (pre-migration box).
-        # A tombstoned name is an operator DELETION — honour it instead of
-        # resurrecting the slot on every boot (the pre-tombstone behaviour
-        # that made seeded slots effectively undeletable).
-        if name in known or name in tombstoned or dest.exists():
-            continue
-        src = src_dir / f"{name}.toml"
-        if not src.is_file():
-            log.warning("install.static_seed_missing", slot=name, src=str(src))
-            continue
-        dest_dir.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(src, dest)
-        dest.chmod(0o644)
-        seeded.append(name)
-        log.info("install.static_seed_applied", slot=name, dest=str(dest))
-    if seeded:
-        # #2023: freshly copied llama.cpp seeds carry the reference platform's
-        # device = "gpu-rocm" verbatim — derive the device this host can
-        # actually load, exactly like `hal0 setup --auto` would have. Only the
-        # names copied THIS call are touched; existing/operator files above
-        # were skipped and stay untouched.
-        apply_derived_seed_devices(seeded, slots_dir=dest_dir, hw=hw)
-        # #1868: the same seeds name profiles whose window is sized for the
-        # reference platform — repoint them at a clamped clone when THIS box's
-        # memory envelope cannot afford it.
-        apply_context_size_envelope(seeded, slots_dir=dest_dir, hw=hw)
-    return seeded
+    dest = dest_dir / f"{name}.toml"
+    # "Already known" = the identity store tracks it (id-keyed, no <name>.toml)
+    # OR a name-keyed file still exists (pre-migration box).
+    if name in existing_names or dest.exists():
+        return SeedResult.EXISTS
+    tombstoned = name in read_seed_tombstones(slots_dir=dest_dir)
+    if tombstoned and not clear_tombstone:
+        return SeedResult.TOMBSTONED
+    src = installer_root / "installer" / "etc-hal0" / "slots" / f"{name}.toml"
+    if not src.is_file():
+        log.warning("install.static_seed_missing", slot=name, src=str(src))
+        raise FileNotFoundError(str(src))
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(src, dest)
+    dest.chmod(0o644)
+    log.info("install.static_seed_applied", slot=name, dest=str(dest))
+    if tombstoned:
+        clear_seed_tombstone(name, slots_dir=dest_dir)
+    # #2023: the copy carries the reference platform's device verbatim; derive
+    # the one this host can load. #1868: clamp the window to the memory envelope.
+    # Only this freshly copied file is touched.
+    apply_derived_seed_devices([name], slots_dir=dest_dir, hw=hw)
+    apply_context_size_envelope([name], slots_dir=dest_dir, hw=hw)
+    return SeedResult.CREATED
 
 
 # ── Seed tombstones — "the operator deleted this seed on purpose" ────────────
@@ -589,6 +632,7 @@ __all__ = [
     "FRESH_INSTALL_SEEDS",
     "LLAMA_SEED_CAPABILITIES",
     "SEED_TEMPLATES",
+    "SeedResult",
     "add_seed_tombstone",
     "apply_context_size_envelope",
     "apply_derived_seed_devices",
@@ -596,6 +640,7 @@ __all__ = [
     "clear_seed_tombstone",
     "derive_seed_device",
     "ensure_clamped_profile",
+    "ensure_seed_slot",
     "read_seed_tombstones",
     "seed_static_slots",
 ]
