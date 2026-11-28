@@ -54,6 +54,31 @@ live_config() { sed '/^\[/,$d' "${CONF}"; }
 
 changed=0
 
+# ── plan ──────────────────────────────────────────────────────────────────
+# Everything that can refuse the run is settled here, before the first write,
+# so a refusal never leaves the container half changed.
+npu_nodes=()
+for node in /dev/accel/accel*; do
+    [[ -c "${node}" && ! -L "${node}" ]] && npu_nodes+=("${node}")
+done
+
+gid=""
+if [[ ${#npu_nodes[@]} -gt 0 ]]; then
+    # The owning group must be the CONTAINER's render group: hal0 refuses a
+    # passthrough whose gid it cannot use, and the host's number is only right
+    # by coincidence.
+    if [[ "$(pct status "${CTID}" 2>/dev/null)" == "status: running" ]]; then
+        gid="$(pct exec "${CTID}" -- getent group render 2>/dev/null | cut -d: -f3 || true)"
+    fi
+    if [[ -z "${gid}" ]]; then
+        # Stopped, or no render group yet: reuse the gid an existing GPU
+        # entry was already aligned to.
+        gid="$(live_config | sed -n 's|^dev[0-9]*: /dev/dri/renderD[0-9]*,gid=\([0-9]*\).*|\1|p' | head -n1)"
+    fi
+    [[ -n "${gid}" ]] || die "cannot tell the container's render gid: start container ${CTID} and run this again (nothing was changed)"
+    [[ "${gid}" =~ ^[0-9]+$ ]] || die "the container's render gid is not a number (got '${gid}'); nothing was changed"
+fi
+
 # ── memlock ───────────────────────────────────────────────────────────────
 MEMLOCK_LINE="lxc.prlimit.memlock: unlimited"
 if live_config | grep -qxF "${MEMLOCK_LINE}"; then
@@ -77,28 +102,9 @@ else
 fi
 
 # ── NPU nodes ─────────────────────────────────────────────────────────────
-npu_nodes=()
-for node in /dev/accel/accel*; do
-    [[ -c "${node}" && ! -L "${node}" ]] && npu_nodes+=("${node}")
-done
-
 if [[ ${#npu_nodes[@]} -eq 0 ]]; then
     say "npu: this host has no /dev/accel node (is the amdxdna driver loaded?), nothing to forward"
 else
-    # The owning group must be the CONTAINER's render group: hal0 refuses a
-    # passthrough whose gid it cannot use, and the host's number is only right
-    # by coincidence.
-    gid=""
-    if [[ "$(pct status "${CTID}" 2>/dev/null)" == "status: running" ]]; then
-        gid="$(pct exec "${CTID}" -- getent group render 2>/dev/null | cut -d: -f3 || true)"
-    fi
-    if [[ -z "${gid}" ]]; then
-        # Stopped, or no render group yet: reuse the gid an existing GPU
-        # entry was already aligned to.
-        gid="$(live_config | sed -n 's|^dev[0-9]*: /dev/dri/renderD[0-9]*,gid=\([0-9]*\).*|\1|p' | head -n1)"
-    fi
-    [[ -n "${gid}" ]] || die "cannot tell the container's render gid: start container ${CTID} and run this again"
-
     for node in "${npu_nodes[@]}"; do
         if live_config | grep -qE "^dev[0-9]+: ${node}(,|$)"; then
             say "npu: ${node} already forwarded"

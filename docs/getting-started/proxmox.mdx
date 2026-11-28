@@ -46,7 +46,7 @@ confirm, and then runs the standard hal0 bootstrap inside it. The guest
 installs its own prerequisites (jq, Python + venv, podman, cosign) — there
 is nothing to pre-stage by hand.
 
-Three things worth knowing before you run it:
+Four things worth knowing before you run it:
 
 - **Unprivileged.** The container's root is an ordinary unprivileged user on
   the host, which is the wrapper [ADR-0050](https://github.com/Hal0ai/hal0/blob/main/docs/adr/0050-no-oci-appliance-unprivileged-lxc-is-the-wrapper.md)
@@ -76,6 +76,13 @@ Three things worth knowing before you run it:
   Then run the hal0 installer again inside the container. It keeps your
   configuration and records the NPU check, which the first install could not
   do because the NPU was not there yet.
+- **It runs the community-scripts engine.** The script loads that engine
+  from the `main` branch of `community-scripts/core` as root, on the host
+  and in the container, at install and at every `update`; nothing is
+  pinned. On a host's first run the engine asks whether to send diagnostics
+  (script name, result, CPU, RAM and disk size, OS and Proxmox version) to
+  the community-scripts API; answer no to send nothing. hal0 itself sends
+  nothing.
 
 <Aside type="tip">
 Container settings (`var_ctid`, `var_hostname`, `var_ram`, `var_disk`,
@@ -206,9 +213,14 @@ the slots and Open WebUI running, an unprivileged guest used about
 
 GPU/NPU passthrough on a **privileged** container needs an unconfined
 AppArmor profile (`lxc.apparmor.profile: unconfined` in the container's
-`.conf`) for the container runtime to launch slots inside the LXC — the
-quick-path script writes it for you, and the installer detects and repairs
-the in-guest half of the same failure (#1563). On an **unprivileged**
+`.conf`) for the container runtime to launch slots inside the LXC. The
+quick-path script does **not** write that line: for `var_unprivileged=0` the
+community-scripts engine instead allows the container every device
+(`lxc.cgroup2.devices.allow: a`) and clears its capability drop list
+(`lxc.cap.drop:`). Add the AppArmor line by hand and restart the container.
+A privileged container built by the script has not been tested with hal0.
+The installer detects and repairs the in-guest half of the same failure
+(#1563). On an **unprivileged**
 container leave the stock profile in place on the host: it is a narrower
 trust boundary and the runtime works without the override. The guest has its
 own AppArmor profiles, though — see the next subsection.

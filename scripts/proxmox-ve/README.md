@@ -74,7 +74,30 @@ container's `render` group id, from `getent group render` inside it) and
 restart the container.
 
 `var_unprivileged=0` builds a privileged container, where hal0 can repair
-the node itself. A privileged container's root is effectively host root.
+the node itself. A privileged container's root is effectively host root, and
+the engine goes further for this case: it allows the container every device
+on the host (`lxc.cgroup2.devices.allow: a`) and clears its capability drop
+list (`lxc.cap.drop:`). It writes no AppArmor line, so add
+`lxc.apparmor.profile: unconfined` by hand if slots fail to start (see the
+[Proxmox guide](../../docs/getting-started/proxmox.mdx)). A privileged build
+by this script has not been tested with hal0.
+
+## What the engine does besides building the container
+
+- **It runs code from a moving branch.** `ct/hal0.sh` loads the
+  community-scripts engine (about 35 files) from the `main` branch of
+  `community-scripts/core`, as root on the host and inside the container,
+  on the first run and again on every `update`. Nothing is pinned; this is
+  the form every script on that site has.
+- **It asks about diagnostics.** On a host's first run the engine asks
+  whether to send diagnostics to the community-scripts API: script name,
+  install method, success or failure, CPU core count, RAM and disk size, OS
+  type and version, and Proxmox version. The answer is kept in
+  `/usr/local/community-scripts/diagnostics`; answer no, or set
+  `DIAGNOSTICS=no` in that file, to send nothing. hal0 itself sends nothing.
+- **It prints two `curl: (22) ... 404` lines** before its banner. The engine
+  looks for an ASCII header for `hal0` in its own repository, where there is
+  none until the script is submitted there. The lines are harmless.
 
 ## NPU and memlock
 
