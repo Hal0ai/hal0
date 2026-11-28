@@ -543,6 +543,11 @@ fi
 # ── Data dirs ─────────────────────────────────────────────────────────────────
 step "Data directories"
 
+# After an uninstall no install is in progress: clear the marker an aborted
+# install left behind, so the next install does not look unfinished. rm -f
+# removes a planted link itself, never its target.
+rm -f "${VAR_DIR}/.install-in-progress"
+
 if [[ "${PURGE}" -eq 0 ]]; then
     # Conservative default — keep config + state so a re-install reuses them.
     warn "Keeping data dirs (conservative default — pass --purge to wipe):"
