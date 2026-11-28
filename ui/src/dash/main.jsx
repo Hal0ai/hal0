@@ -35,6 +35,7 @@ import { TabBar } from './mobile/TabBar.jsx'
 import { GpuStatusProvider } from './dock/GpuStatusContext.jsx'
 import { GpuGateBlockedBanner } from './dock/GpuGateBlockedBanner.jsx'
 import { slotsSub } from './slots-route'
+import { ROUTES } from './routes'
 
 const { useState: useStateA, useEffect: useEffectA } = React;
 
@@ -62,7 +63,6 @@ const TWEAK_DEFAULTS = /*EDITMODE-BEGIN*/{
 // We also accept "agents/mcp" as an alias so the canonical URL path stays
 // readable (`/agents/mcp` from the spec). Any unknown head falls back to
 // the dashboard.
-const ROUTES = ["dashboard", "slots", "models", "logs", "agent", "memory", "settings", "mcp", "board", "services", "benchmarks"];
 function parseRoute() {
   // Memory addresses from before the Memory area (#memory, #memory/bank, #agent/memory and the
   // deleted #memworkspace page) are rewritten in place to where they live now, so a saved link

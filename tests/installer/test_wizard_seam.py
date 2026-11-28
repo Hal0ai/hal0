@@ -799,10 +799,13 @@ def test_no_replacement_line_without_an_inherited_answer(
     assert "replaces the HAL0_HERMES_TERMINAL" not in proc.stdout, proc.stdout
 
 
-def test_hermes_terminal_has_two_readers_on_an_install() -> None:
-    # `hal0 agent install hermes` (box without Hermes) and, on a box that
-    # already has it, `hal0 agent reprovision hermes` after the apply block.
-    # Both stay behind the HAL0_SKIP_HERMES check.
+def test_hermes_terminal_has_two_readers_and_only_off_is_applied_under_skip() -> None:
+    # `hal0 agent install hermes` (box without Hermes) stays behind the
+    # HAL0_SKIP_HERMES check. `hal0 agent reprovision hermes` (box that already
+    # has it) runs after it, inside the provisioned-and-unit-present condition,
+    # and when the assistant is skipped only an off answer (0|false|no|off|n)
+    # survives: an on word is blanked, so turning the tool off is always
+    # honoured and turning it on is never applied on a skipped run.
     call = '"${HAL0_BIN}" agent install hermes "${_hermes_install_args'
     assert TEXT.count(call) == 1
     head = TEXT.rindex(
@@ -817,7 +820,14 @@ def test_hermes_terminal_has_two_readers_on_an_install() -> None:
     assert TEXT.count(apply_call) == 1
     apply_head = TEXT.rindex('"${_hermes_was_provisioned}" -eq 1', 0, TEXT.index(apply_call))
     assert TEXT.index(call) < apply_head
-    assert '"${HAL0_SKIP_HERMES:-0}" -ne 1' in TEXT[apply_head : TEXT.index(apply_call)]
+    between = TEXT[apply_head : TEXT.index(apply_call)]
+    assert between.startswith(
+        '"${_hermes_was_provisioned}" -eq 1 && -f "${AGENT_UNIT_DST}" ]]; then'
+    )
+    skip_test = between.index('if [[ "${HAL0_SKIP_HERMES:-0}" -eq 1 ]]; then')
+    off_words = between.index("0|false|no|off|n) ;;", skip_test)
+    blank = between.index('*) _ht_value="" ;;', off_words)
+    assert skip_test < off_words < blank < between.index("1|true|yes|on|y|0|false|no|off|n)")
 
 
 def test_usage_text_does_not_say_an_unattended_run_never_enables_the_terminal_tool() -> None:

@@ -159,6 +159,12 @@ def test_unknown_container_kind_maps_to_other(tmp_path: Path) -> None:
     )
 
 
+def test_container_platform_kind_maps_to_other(tmp_path: Path) -> None:
+    # main's hal0_lxc_kind can now answer "container"; the facts file keeps
+    # only its four old values and records anything else as "other".
+    assert _facts(tmp_path, stubs="hal0_lxc_kind() { echo container; }")["container"] == "other"
+
+
 def test_missing_os_release(tmp_path: Path) -> None:
     facts = _facts(tmp_path, stubs="distro_id() { return 1; }\n_os_release_field() { return 1; }")
     assert facts["distro"]["id"] == "unknown"

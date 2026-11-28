@@ -80,7 +80,7 @@ export function NpuEnginesPanel({ occ, hw, slots = [] }) {
       </section>
 
       <section className="npt-msec" data-testid="npu-profiles">
-        <div className="npt-lane-ttl"><span className="npt-sub">NPU profiles</span><a className="npt-hint" href="#profiles">All profiles</a></div>
+        <div className="npt-lane-ttl"><span className="npt-sub">NPU profiles</span><a className="npt-hint" href="#models/profiles">All profiles</a></div>
         {profQ.isLoading && <p className="npt-hint">—</p>}
         {!profQ.isLoading && profiles.length === 0 && <p className="npt-hint">No NPU profiles.</p>}
         {profiles.map((p) => (

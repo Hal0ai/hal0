@@ -3,6 +3,7 @@
 // it starts with `// @vitest-environment happy-dom`.
 import { act, type ReactNode } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
+import { vi } from 'vitest'
 
 ;(globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
@@ -56,5 +57,18 @@ export async function settle() {
   await act(async () => {
     await Promise.resolve()
     await Promise.resolve()
+  })
+}
+
+/**
+ * Advance vitest's fake clock by `ms` and commit what the fired timers rendered.
+ *
+ * A timer callback that sets state runs outside React's `act`, so React only schedules the
+ * render; whether it has committed after a couple of microtasks depends on the scheduler and
+ * on how busy the machine is (#4098). Advancing inside `act` makes the commit part of the call.
+ */
+export async function advance(ms: number) {
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(ms)
   })
 }

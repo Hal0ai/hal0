@@ -692,7 +692,7 @@ function BoardView() {
               <div className="board-unavailable" data-testid="board-unavailable" role="status">
                 <div className="bu-title">{unavailable.title}</div>
                 <div className="bu-body">{unavailable.body}</div>
-                <a className="bu-link" href="#agents">{unavailable.link}</a>
+                <a className="bu-link" href="#agent">{unavailable.link}</a>
               </div>
             </div>
           ) : (

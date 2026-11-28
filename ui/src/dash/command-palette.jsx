@@ -17,6 +17,7 @@ import { copyTextToClipboard } from '@/lib/clipboard'
 import { useSlots, useSlotRestart, useSlotLoad, useSlotUnload } from '@/api/hooks/useSlots'
 import { useModels, fmtBytes } from '@/api/hooks/useModels'
 import { useConfigUrls } from '@/api/hooks/useConfigUrls'
+import { cancelModelPull } from './palette-actions'
 
 const { useState: useStateCP, useEffect: useEffectCP, useRef: useRefCP, useMemo: useMemoCP } = React;
 
@@ -249,7 +250,7 @@ function buildCommandItems(slots, models, activePull, owuiUrl = "", memoryEnable
     { id: "r-profiles",  route: "models/profiles", label: "Profiles", icon: Icons.models, sub: "container-slot templates", keywords: "profiles templates igpu slot" },
     { id: "r-board",     route: "board",     label: "Operator Board", icon: Icons.board, sub: "kanban · tasks, agents, orchestration", keywords: "kanban tasks board lanes orchestrator dispatch" },
     { id: "r-benchmarks", route: "benchmarks", label: "Benchmarks", icon: Icons.bench, sub: "roster board · runs · evals · run queue", keywords: "perf speed throughput decode prefill bench" },
-    { id: "r-hardware",  route: "hardware",  label: "Hardware",   icon: Icons.hardware,  sub: "cpu, gpu, npu, memory" },
+    { id: "r-hardware",  route: "settings/hardware", label: "Hardware", icon: Icons.hardware, sub: "settings · cpu, gpu, npu, runtimes", keywords: "hardware runtimes gpu npu memory" },
     { id: "r-logs",      route: "logs",      label: "Logs",       icon: Icons.logs,      sub: "hal0 stream", keywords: "tail console output" },
     { id: "r-agent",     route: "agent",     label: "Agent",      icon: Icons.agent,     sub: "chat, personas, skills, plugins" },
     ...(memoryEnabled
@@ -331,11 +332,7 @@ function buildCommandItems(slots, models, activePull, owuiUrl = "", memoryEnable
   if (activePull) {
     const m = (models || []).find(x => x.id === activePull);
     action("a-cancel-pull", `Cancel download — ${m ? (m.longName || m.id) : activePull}`, "stops the active model pull",
-      () => {
-        fetch(`/api/models/${encodeURIComponent(activePull)}/pull/cancel`, { method: "POST" })
-          .then(() => window.__hal0Toast && window.__hal0Toast("Download cancelled", "warn"))
-          .catch(() => window.__hal0Toast && window.__hal0Toast("Cancel failed — see logs", "err"));
-      });
+      () => { void cancelModelPull(activePull, window.__hal0Toast); });
   }
 
   // Copy — clipboard utilities for hitting the API directly.

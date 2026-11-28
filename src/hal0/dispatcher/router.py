@@ -78,7 +78,7 @@ from hal0.errors import Hal0Error
 from hal0.forwarded_headers import forwardable_request_headers
 from hal0.http_client import async_client
 from hal0.services.models_service import is_alias
-from hal0.slots.state import SlotCrashLooping, SlotNpuConflict, SlotState
+from hal0.slots.state import SlotCrashLooping, SlotNotReady, SlotNpuConflict, SlotState
 from hal0.upstreams.catalog import NotEnabled, Resolved, participates, resolve_requested_model
 from hal0.upstreams.registry import Upstream, UpstreamRegistry
 
@@ -1373,6 +1373,12 @@ class Dispatcher:
             # An NPU refusal (#3666) is an operator decision, not a load that is
             # still running: surface the 409 rather than a retryable 503.
             raise
+        except SlotNotReady as exc:
+            # #4082: the slot is running and was left alone (adopted, /health
+            # not answering yet). Expected at request cadence until it is
+            # promoted or recovered, so not a warning; the ready check below
+            # answers the usual retryable "loading" 503.
+            log.debug("dispatch.backend_aware_load_not_ready", slot=slot_name, error=str(exc))
         except SlotCrashLooping:
             # Crash-loop breaker (issue i4): already a retryable 503 with
             # Retry-After — surface it as-is. Must NOT fall through to the

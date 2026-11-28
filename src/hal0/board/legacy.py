@@ -24,7 +24,7 @@ export file. Exported cards carry ``hermes_id`` when Hermes already holds a
 task for them, so a manual re-import can skip those.
 """
 
-# HAL0-SUNSET: v1.9.0  — one-shot converter for pre-1.8 board cards; delete the module and its tests once every supported box has run it.
+# HAL0-SUNSET: v2.0.0  — one-shot converter for pre-1.8 board cards; delete the module and its tests once every supported box has run it. Boxes on 1.5.x to 1.7.x can still update straight past 1.8 (#4029).
 
 from __future__ import annotations
 
@@ -102,7 +102,7 @@ def _mapped_ids(conn: sqlite3.Connection) -> dict[str, str]:
         return {}
 
 
-_EXPORT_PREFIX = "board-legacy-export-"  # scar-ok: one-shot pre-1.8 converter (HAL0-SUNSET v1.9.0)
+_EXPORT_PREFIX = "board-legacy-export-"  # scar-ok: one-shot pre-1.8 converter (HAL0-SUNSET v2.0.0)
 
 
 def _export(

@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import json
 import re
+import shlex
 import stat
 import subprocess
 from pathlib import Path
@@ -169,13 +170,113 @@ def test_memory_engine_probe_fails_on_stale_engine(tmp_path: Path) -> None:
     assert res.returncode != 0
 
 
-def test_memory_engine_probe_skips_when_engine_not_installed(tmp_path: Path) -> None:
-    """No unit file (fresh box with HAL0_SKIP_HINDSIGHT, or engine never
-    installed) — the probe must skip, not fail: curl faked dead proves it
-    never even probes."""
+def test_memory_engine_probe_returns_2_when_memory_is_turned_off(tmp_path: Path) -> None:
+    """HAL0_SKIP_HINDSIGHT=1 (--no-memory): skipped by choice, status 2 — not
+    the 0 a pass returns. Curl faked dead proves it never even probes."""
     _write_exec(tmp_path / "curl", "exit 7")
-    res = _drive(tmp_path, f'HINDSIGHT_UNIT_DST="{tmp_path}/missing"\nsmoke_memory_engine_version')
-    assert res.returncode == 0, res.stderr
+    res = _drive(tmp_path, "HAL0_SKIP_HINDSIGHT=1\nsmoke_memory_engine_version")
+    assert res.returncode == 2, res.stderr
+
+
+def test_memory_engine_probe_returns_3_when_the_unit_is_missing(tmp_path: Path) -> None:
+    """Memory wanted but no unit file: the engine install did not complete.
+    Status 3, distinct from both the pass (0) and the by-choice skip (2)."""
+    _write_exec(tmp_path / "curl", "exit 7")
+    missing = shlex.quote(f"{tmp_path}/missing")
+    res = _drive(tmp_path, f"HINDSIGHT_UNIT_DST={missing}\nsmoke_memory_engine_version")
+    assert res.returncode == 3, res.stderr
+
+
+# ── #4007: the closing check must not say "ok" for an engine never installed ─
+
+
+def _memory_run(
+    tmp_path: Path, setup: str, version: str | None = None
+) -> subprocess.CompletedProcess[str]:
+    """Run the whole smoke with the other probes passing; ``setup`` shapes the
+    memory-engine inputs, ``version`` is what a fake :9177/version answers."""
+    _write_exec(tmp_path / "hal0", "exit 0")
+    (tmp_path / "reply.json").write_text(_chat_completion('{"ok": true}'), encoding="utf-8")
+    (tmp_path / "slots.json").write_text(json.dumps(_LOADED), encoding="utf-8")
+    ver = f'echo \'{{"api_version": "{version}"}}\'; exit 0' if version else "exit 7"
+    _write_exec(
+        tmp_path / "curl",
+        'for a in "$@"; do\n'
+        f'  case "$a" in */api/slots) cat {shlex.quote(f"{tmp_path}/slots.json")}; exit 0 ;; esac\n'
+        f'  case "$a" in */version) {ver} ;; esac\n'
+        "done\n"
+        f"cat {shlex.quote(f'{tmp_path}/reply.json')}",
+    )
+    return _drive(tmp_path, f"{setup}\n{_SHOW}")
+
+
+def test_no_memory_run_says_skipped_not_ok(tmp_path: Path) -> None:
+    res = _memory_run(tmp_path, "HAL0_SKIP_HINDSIGHT=1")
+    assert "INFO: memory-engine check skipped — memory was turned off for this run" in res.stdout
+    assert "memory-engine version probe ok" not in res.stdout
+    assert "FAILED:memory-engine-version" not in res.stdout
+    assert "memory-engine" not in res.stderr
+
+
+def test_missing_unit_with_memory_wanted_warns_and_is_recorded(tmp_path: Path) -> None:
+    missing = shlex.quote(f"{tmp_path}/missing")
+    res = _memory_run(tmp_path, f"HINDSIGHT_UNIT_DST={missing}")
+    assert "memory-engine check FAILED — the memory engine is not installed" in res.stderr
+    assert "HAL0_HINDSIGHT_PYTHON" in res.stderr
+    assert "see the warnings above for the cause" in res.stderr
+    assert "memory-engine version probe ok" not in res.stdout
+    assert "FAILED:memory-engine-version" in res.stdout
+    assert res.returncode == 0, "recording a failed probe must not change the exit status"
+
+
+def test_no_usable_python_with_no_unit_is_a_failed_check(tmp_path: Path) -> None:
+    """Memory wanted, no Python found (install.sh sets SKIP + a reason): not
+    a choice, so the check fails and says why."""
+    missing = shlex.quote(f"{tmp_path}/missing")
+    setup = f"HAL0_SKIP_HINDSIGHT=1\nHINDSIGHT_UNAVAILABLE_REASON='no usable Python 3.11-3.14'\nHINDSIGHT_UNIT_DST={missing}"
+    res = _memory_run(tmp_path, setup)
+    assert "turned off" not in res.stdout
+    assert (
+        "memory-engine check FAILED — the memory engine is not installed (no usable Python 3.11-3.14)"
+        in res.stderr
+    )
+    assert "FAILED:memory-engine-version" in res.stdout
+
+
+def test_no_usable_python_but_a_healthy_engine_is_probed_normally(tmp_path: Path) -> None:
+    unit = tmp_path / "hindsight-api.service"
+    unit.write_text("[Service]\n", encoding="utf-8")
+    setup = (
+        "HAL0_SKIP_HINDSIGHT=1\nHINDSIGHT_UNAVAILABLE_REASON='no usable Python 3.11-3.14'\n"
+        f"HINDSIGHT_UNIT_DST={shlex.quote(str(unit))}"
+    )
+    res = _memory_run(tmp_path, setup, version="9.9.9")
+    assert "INFO: memory-engine version probe ok (hindsight-api 9.9.9 on :9177)" in res.stdout
+    assert "FAILED:memory-engine-version" not in res.stdout
+    assert "memory-engine" not in res.stderr
+
+
+def test_passing_engine_keeps_the_ok_line_exactly(tmp_path: Path) -> None:
+    unit = tmp_path / "hindsight-api.service"
+    unit.write_text("[Service]\n", encoding="utf-8")
+    res = _memory_run(tmp_path, f"HINDSIGHT_UNIT_DST={shlex.quote(str(unit))}", version="9.9.9")
+    assert "INFO: memory-engine version probe ok (hindsight-api 9.9.9 on :9177)" in res.stdout
+    assert "FAILED:memory-engine-version" not in res.stdout
+
+
+def test_stale_engine_keeps_the_failed_warning_exactly(tmp_path: Path) -> None:
+    unit = tmp_path / "hindsight-api.service"
+    unit.write_text("[Service]\n", encoding="utf-8")
+    res = _memory_run(tmp_path, f"HINDSIGHT_UNIT_DST={shlex.quote(str(unit))}", version="0.8.4")
+    assert (
+        "WARN: memory-engine version probe FAILED — :9177/version does not report the pinned 9.9.9"
+        in res.stderr
+    )
+    assert (
+        "the engine is unreachable or stale; check 'journalctl -u hindsight-api -n 40'"
+        in res.stderr
+    )
+    assert "FAILED:memory-engine-version" in res.stdout
 
 
 # ── #2131: a failed probe must name the unbound brain slot, not just fail ───
@@ -408,7 +509,7 @@ def test_probe_timeout_returns_3(tmp_path: Path) -> None:
 def test_probe_timeout_warns_without_recording_a_failure(tmp_path: Path) -> None:
     _gateway(tmp_path, _LOADED, post_fails=True, post_rc=28)
     _write_exec(tmp_path / "hal0", "exit 0")
-    res = _drive(tmp_path, _SHOW)
+    res = _drive(tmp_path, f"HAL0_SKIP_HINDSIGHT=1\n{_SHOW}")
     assert "structured-output probe timed out" in res.stderr
     assert "FAILED" not in res.stderr
     assert "FAILED:structured-output" not in res.stdout

@@ -46,7 +46,7 @@ test.describe('Operator Board — Hermes kanban unavailable', () => {
       await expect(state).toContainText(c.title)
       await expect(state).toContainText(c.body)
       const link = state.getByRole('link', { name: c.link })
-      await expect(link).toHaveAttribute('href', '#agents')
+      await expect(link).toHaveAttribute('href', '#agent')
       await expect(page.getByTestId('board-lane-backlog')).toHaveCount(0)
     })
   }
@@ -57,8 +57,11 @@ test.describe('Operator Board — Hermes kanban unavailable', () => {
     )
     await page.goto('/#board')
     await page.getByTestId('board-unavailable').getByRole('link', { name: 'Open Agents' }).click()
-    await expect(page).toHaveURL(/#agents/)
+    // #agent is the Agents page. The old #agents is no page at all and fell back to the
+    // Overview, which this test could not tell apart: it only saw the board go away (#4107).
+    await expect(page).toHaveURL(/#agent$/)
     await expect(page.getByTestId('board-unavailable')).toHaveCount(0)
+    await expect(page.getByTestId('agent-tab-nav')).toBeVisible()
   })
 
   test('a Hermes-side error is not mistaken for unavailability', async ({ page }) => {

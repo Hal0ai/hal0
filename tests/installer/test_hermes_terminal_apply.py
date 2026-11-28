@@ -123,10 +123,50 @@ def test_an_empty_or_unreadable_answer_runs_nothing(tmp_path: Path, answer: str)
     assert calls == []
 
 
-def test_hermes_skipped_runs_nothing(tmp_path: Path) -> None:
-    proc, calls = _run(tmp_path, answer="0", skip="1")
+def test_skip_with_an_on_answer_runs_nothing(tmp_path: Path) -> None:
+    # Turning the tool ON is not applied when the assistant is skipped.
+    proc, calls = _run(tmp_path, answer="1", skip="1")
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert calls == []
+
+
+def test_skip_with_an_off_answer_still_applies_it(tmp_path: Path) -> None:
+    # A setup-screens run with the assistant off exports both variables; an
+    # agent installed earlier must not keep a root-equivalent tool the person
+    # turned off.
+    proc, calls = _run(tmp_path, answer="0", skip="1")
+    assert proc.returncode == 0 and "REGION_DONE" in proc.stdout, proc.stdout + proc.stderr
+    assert calls == ["agent reprovision hermes|TERMINAL=0"]
+    assert "WARN" not in proc.stdout
+
+
+@pytest.mark.parametrize("answer", ["0", "false", "no", "off", "n", " OFF ", "No"])
+def test_every_off_word_is_honoured_under_skip(tmp_path: Path, answer: str) -> None:
+    proc, calls = _run(tmp_path, answer=answer, skip="1")
+    assert proc.returncode == 0 and "REGION_DONE" in proc.stdout, proc.stdout + proc.stderr
+    assert calls == [f"agent reprovision hermes|TERMINAL={answer}"]
+
+
+@pytest.mark.parametrize("answer", ["1", "true", "yes", "on", "y", "maybe", ""])
+def test_no_other_word_is_applied_under_skip(tmp_path: Path, answer: str) -> None:
+    proc, calls = _run(tmp_path, answer=answer, skip="1")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert calls == []
+
+
+@pytest.mark.parametrize("answer", ["0", "1"])
+def test_skip_unset_applies_both_answers_as_before(tmp_path: Path, answer: str) -> None:
+    _proc, calls = _run(tmp_path, answer=answer)
+    assert calls == [f"agent reprovision hermes|TERMINAL={answer}"]
+
+
+def test_skip_with_off_on_a_box_without_hermes_runs_nothing(tmp_path: Path) -> None:
+    for kwargs in ({"venv": False}, {"unit": False}):
+        sub = tmp_path / ("v" if "venv" in kwargs else "u")
+        sub.mkdir()
+        proc, calls = _run(sub, answer="0", skip="1", **kwargs)
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        assert calls == []
 
 
 def test_a_box_without_the_agent_unit_runs_nothing(tmp_path: Path) -> None:

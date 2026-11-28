@@ -34,7 +34,7 @@ from fastapi import APIRouter, Request, WebSocket
 from hal0.api._audit import record_action
 from hal0.board import BoardUnreachable
 from hal0.board.client import BoardClient, resolve_board_client
-from hal0.board.legacy import run_once  # scar-ok: HAL0-SUNSET v1.9.0 converter
+from hal0.board.legacy import run_once  # scar-ok: HAL0-SUNSET v2.0.0 converter
 from hal0.errors import BadRequest, Hal0Error
 
 log = structlog.get_logger(__name__)
