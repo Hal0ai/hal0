@@ -335,10 +335,21 @@ def test_storage_rejects_hostile_env(fake):
 # --- vmid choice ------------------------------------------------------------
 
 
-def test_pick_vmid_skips_taken(fake):
-    fake.rule("pvesh get /cluster/resources", _guests((170, ""), (171, "other"), (105, "")))
+def test_pick_vmid_ignores_guests_outside_the_range(fake):
+    fake.rule("pvesh get /cluster/resources", _guests((105, ""), (190, "other"), (169, "")))
     r = fake.run("pve_pick_vmid")
-    assert r.returncode == 0 and r.stdout.strip() == "172"
+    assert r.returncode == 0 and r.stdout.strip() == "170"
+
+
+@pytest.mark.parametrize("tags", ["", "other", "a;b"])
+def test_pick_vmid_refuses_any_guest_inside_the_range(fake, tags):
+    """Tagged or not: a guest in the range may be a run's container that has
+    no tag yet, or somebody else's. The message names it."""
+    fake.rule("pvesh get /cluster/resources", _guests((105, ""), (171, tags)))
+    r = fake.run("pve_pick_vmid")
+    assert r.returncode == 1
+    assert r.stdout == ""
+    assert "a guest already exists inside the harness range 170-189: 171" in r.stderr
 
 
 def test_pick_vmid_refuses_when_matrix_guest_present(fake):
@@ -855,7 +866,7 @@ def test_strict_create_success_continues(fake):
         ("pve_require_headroom", [("free -g", _free(20))]),
         ("pve_template_volid debian-12", [("pveam list local", TEMPLATES)]),
         ("pve_storage", [("pvesm status --content rootdir", STORAGE)]),
-        ("pve_pick_vmid", [("pvesh get /cluster/resources", _guests((170, "")))]),
+        ("pve_pick_vmid", [("pvesh get /cluster/resources", _guests((105, "")))]),
         ("ct_owned 172", [("pct config 172", TAGGED_CONF.format(vmid=172))]),
         (
             "ct_start 172",

@@ -176,7 +176,9 @@ pve_storage() {
   printf '%s\n' "$name"
 }
 
-# pve_pick_vmid: first free VMID in range; refuses if a matrix guest exists.
+# pve_pick_vmid: first free VMID in range. Refuses when ANY guest exists inside
+# the range, tagged or not (a run's container has no tag until pct create has
+# written its config), and when a tagged guest exists anywhere.
 pve_pick_vmid() {
   local lo hi out
   lo="$(_pve_vmid_min)"
@@ -198,19 +200,15 @@ try:
 except (ValueError, TypeError, AttributeError, KeyError):
     print("cannot parse the guest list from the host", file=sys.stderr)
     sys.exit(1)
-taken = set()
 for r in rows:
-    if "vmid" in r:
-        taken.add(int(r["vmid"]))
     if tag in re.split(r"[;,]", r.get("tags") or ""):
         print("another matrix container is present: %s" % r.get("vmid"), file=sys.stderr)
         sys.exit(3)
-for v in range(lo, hi + 1):
-    if v not in taken:
-        print(v)
-        sys.exit(0)
-print("no free VMID in %d-%d" % (lo, hi), file=sys.stderr)
-sys.exit(1)
+for r in rows:
+    if "vmid" in r and lo <= int(r["vmid"]) <= hi:
+        print("a guest already exists inside the harness range %d-%d: %s" % (lo, hi, int(r["vmid"])), file=sys.stderr)
+        sys.exit(3)
+print(lo)
 ' "$lo" "$hi" "$_PVE_TAG" || return 1
 }
 

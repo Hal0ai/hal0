@@ -41,7 +41,10 @@ case "$cmd" in
     printf 'Name Type Status\nlocal dir active\n'
     exit 0 ;;
   "pvesh get"*)
-    echo '[]'; exit 0 ;;
+    if [[ -e "$FAKE_STATE/range-guest" ]]; then
+      printf '[{"vmid": %s, "type": "lxc", "name": "other"}]\n' "$(cat "$FAKE_STATE/range-guest")"
+    else echo '[]'; fi
+    exit 0 ;;
   "if test -e /etc/pve/lxc/"*)
     # FAKE_PRESENT_AFTER=N: someone else's guest appears after N presence reads.
     if [[ -n "${FAKE_PRESENT_AFTER:-}" ]]; then
@@ -128,6 +131,7 @@ class Host:
             "HAL0_PVE": "testpve",
             "HAL0_MATRIX_DESTROY_SLEEP": "0",
             "FAKE_STATE": str(self.state),
+            "HAL0_MATRIX_REPORT_ROOT": str(self.root / "reports"),
             **extra,
         }
 
@@ -219,6 +223,30 @@ def test_the_guest_this_run_created_carries_its_nonce(host):
     create = [c for c in host.calls() if "pct create" in c][0]
     m = re.search(r"--description hal0-matrix\\ run\\ ([0-9a-f]{16})(?: |$)", create)
     assert m, create
+
+
+def test_a_second_run_exits_at_once_while_one_holds_the_lock(host):
+    import fcntl
+
+    root = host.root / "reports"
+    root.mkdir()
+    with open(root / ".lock", "w") as held:
+        fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        r = host.run("u2404-cpu", "--vmid", "172", "--out", str(host.out))
+    assert r.returncode == 2
+    assert "another install matrix run" in r.stderr
+    assert host.calls() == []
+    # Released: the same run goes through.
+    again = host.run("u2404-cpu", "--vmid", "172", "--out", str(host.out))
+    assert again.returncode == 0, again.stderr
+
+
+def test_refuses_when_any_guest_sits_in_the_range(host):
+    (host.state / "range-guest").write_text("171")
+    r = host.run("u2404-cpu", "--out", str(host.out))
+    assert r.returncode == 2
+    assert "171" in r.stderr
+    assert not any("pct create" in c for c in host.calls())
 
 
 def test_refuses_a_vmid_outside_the_range(host):

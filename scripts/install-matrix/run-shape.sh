@@ -124,6 +124,15 @@ NONCE="$(head -c 8 /dev/urandom | od -An -tx1 | tr -d ' \n')"
 [[ "$NONCE" =~ ^[0-9a-f]{16}$ ]] || die2 "could not generate a run nonce"
 CT_NONCE="$NONCE"
 
+# One run at a time: a local lock for the whole run, taken before any call to
+# the host. A dry run touches no host and creates no files, so it takes none.
+REPORT_ROOT="${HAL0_MATRIX_REPORT_ROOT:-${REPO}/tests/harness/reports/install-matrix}"
+if [[ "$DRY_RUN" != "1" ]]; then
+  mkdir -p "$REPORT_ROOT" || die2 "cannot create ${REPORT_ROOT}"
+  exec 8>"${REPORT_ROOT}/.lock" || die2 "cannot open the lock file in ${REPORT_ROOT}"
+  flock -n 8 || die2 "another install matrix run holds ${REPORT_ROOT}/.lock; only one harness container may exist at a time"
+fi
+
 # ── dry run: decided once, here ──────────────────────────────────────────────
 if [[ "$DRY_RUN" == "1" ]]; then
   exec 9>&1
@@ -353,7 +362,7 @@ if [[ "$DRY_RUN" == "1" ]]; then
   ART="$SCRATCH"
   plan "would write artifacts to ${OUT:-tests/harness/reports/install-matrix/<UTC timestamp>-${SHAPE_ID}}"
 else
-  [[ -n "$OUT" ]] || OUT="${REPO}/tests/harness/reports/install-matrix/$(date -u +%Y%m%dT%H%M%SZ)-${SHAPE_ID}"
+  [[ -n "$OUT" ]] || OUT="${REPORT_ROOT}/$(date -u +%Y%m%dT%H%M%SZ)-${SHAPE_ID}"
   mkdir -p "$OUT"
   chmod 700 "$OUT"
   ART="$OUT"
