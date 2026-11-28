@@ -96,6 +96,10 @@ if "/api/slots/flm/models" in cmd:
 if "/v1/models" in cmd:
     print("1")
     sys.exit(0)
+if "/v1/chat/completions" in cmd:
+    # `curl -f` exits 22 on an HTTP error such as 503 slot.loading.
+    refused = os.environ.get("STUB_CHAT_FAIL_MODEL")
+    sys.exit(22 if refused and '"model":"%s"' % refused in cmd else 0)
 words = cmd.split()
 is_slot_load = len(words) >= 4 and words[1:3] == ["slot", "load"]
 is_tts_enable = "capabilities set voice tts" in cmd and "--enabled" in cmd
@@ -238,6 +242,39 @@ def test_seeded_flm_slot_uses_installed_catalog_model(tmp_path: Path) -> None:
     catalog_call = next(c for c in cmds if "/api/slots/flm/models" in c)
     assert "/etc/hal0/api.env" in catalog_call
     assert "Authorization: Bearer $HAL0_ADMIN_KEY" in catalog_call
+
+
+_FLM_READY_ENV = {
+    "HAL0_TEST_BIN": "/opt/test/hal0",
+    "STUB_NPU_PRESENT": "1",
+    "STUB_FLM_SLOT_JSON": json.dumps(
+        {"name": "flm", "status": "offline", "model_id": None, "model_default": "bound:1b"}
+    ),
+}
+
+
+def test_flm_row_requires_a_completion_after_ready(tmp_path: Path) -> None:
+    """#4000: the row sends one chat completion to the slot by name, after the load."""
+    proc, cmds = _run(tmp_path, **_FLM_READY_ENV)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    row = _rows_by_name(tmp_path)["flm"]
+    assert row["status"] == "pass"
+    assert "chat/completions answered" in row["detail"]
+    load = cmds.index("/opt/test/hal0 slot load flm -m bound:1b")
+    chats = [i for i, c in enumerate(cmds) if "/v1/chat/completions" in c and '"model":"flm"' in c]
+    assert chats and chats[0] > load
+
+
+def test_flm_row_fails_when_the_ready_slot_does_not_answer(tmp_path: Path) -> None:
+    """A slot that reports ready but cannot serve (the model failed to load) fails the row."""
+    proc, cmds = _run(tmp_path, **_FLM_READY_ENV, STUB_CHAT_FAIL_MODEL="flm")
+    assert proc.returncode != 0
+    row = _rows_by_name(tmp_path)["flm"]
+    assert row["status"] == "fail"
+    assert "did not answer 200" in row["detail"]
+    assert "/opt/test/hal0 slot load flm -m bound:1b" in cmds
+    # The other lanes are unaffected by the flm refusal.
+    assert _rows_by_name(tmp_path)["vulkan"]["status"] == "pass"
 
 
 def test_flm_without_installed_model_warns_that_npu_was_not_tested(tmp_path: Path) -> None:

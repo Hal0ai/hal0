@@ -200,7 +200,7 @@ when Docker is unreachable.)
 ### γ — release-gate (`make release-test`)
 
 SSHes into the hal0-test LXC and walks a matrix of eight rows:
-**vulkan, rocm, flm (NPU slot ready), moonshine (STT), kokoro (TTS),
+**vulkan, rocm, flm (NPU slot answers a chat), moonshine (STT), kokoro (TTS),
 unload, updater, openwebui** (the `add_row` calls in
 `scripts/release-test.sh`). Each row produces a structured record; the
 full report lands in `tests/release-gate-report.json`.
@@ -222,7 +222,9 @@ Three things to know before citing γ as validation:
   `tests/release-gate-report.json`. On an NPU box with the FLM runner pinned,
   the `flm` row uses the slot's configured model or an installed chat model from
   `/api/slots/flm/models`; if neither exists, it warns `NPU lane NOT TESTED`.
-  A missing seeded slot or unreadable catalog fails the row.
+  A missing seeded slot or unreadable catalog fails the row. Once the slot
+  reports ready the row sends one chat completion to it and fails unless that
+  answers 200, because a slot can report ready while its model did not load.
 
 ```sh
 # Set HAL0_TEST_SSH_KEY to whatever key authorises you on your test host

@@ -385,6 +385,22 @@ for s in slots if isinstance(slots, list) else []:
 # skips the installed/type check) is obvious in the run log.
 log_info "llm model: $(remote_model_for_type llm || true)"
 
+# One short chat completion through the gateway; exit 0 only on HTTP 200.
+# $1 is the request's `model`: a registry id, or a slot name (every chat slot
+# is addressable by its name). A slot that reports ready without a working
+# model answers 503 here, which is what a readiness check alone cannot see.
+# Auth: any /v1 call needs the admin bearer when HAL0_ADMIN_KEY is set;
+# source it from api.env the same way the unit's EnvironmentFile does.
+remote_chat_smoke() {
+    local model="$1"
+    ssh_exec "[ -r /etc/hal0/api.env ] && . /etc/hal0/api.env; \
+        curl -fsS -m 60 ${REMOTE_HAL0_API}/v1/chat/completions \
+        \${HAL0_ADMIN_KEY:+-H \"Authorization: Bearer \${HAL0_ADMIN_KEY}\"} \
+        -H 'content-type: application/json' \
+        -d '{\"model\":\"${model}\",\"messages\":[{\"role\":\"user\",\"content\":\"ping\"}],\"max_tokens\":4}' \
+        >/dev/null"
+}
+
 # ── ROW: Vulkan baseline ─────────────────────────────────────────────────────
 log_step "Row: vulkan baseline"
 start=$(date +%s%N)
@@ -396,15 +412,7 @@ elif [[ -z "${MODEL}" ]]; then
     add_row "vulkan" "skip" "$(since_ms "${start}")" "no installed llm model in the registry — pull one (hal0 model pull) or register a staged gguf (hal0 model add)"
 else
     remote_slot_create vulkan llm vulkan "${MODEL}"
-    # Auth: any /v1 call needs the admin bearer when HAL0_ADMIN_KEY is set;
-    # source it from api.env the same way the unit's EnvironmentFile does.
-    if remote_slot_load "${SLOT}" \
-        && ssh_exec "[ -r /etc/hal0/api.env ] && . /etc/hal0/api.env; \
-            curl -fsS -m 60 ${REMOTE_HAL0_API}/v1/chat/completions \
-            \${HAL0_ADMIN_KEY:+-H \"Authorization: Bearer \${HAL0_ADMIN_KEY}\"} \
-            -H 'content-type: application/json' \
-            -d '{\"model\":\"${MODEL}\",\"messages\":[{\"role\":\"user\",\"content\":\"ping\"}],\"max_tokens\":4}' \
-            >/dev/null"; then
+    if remote_slot_load "${SLOT}" && remote_chat_smoke "${MODEL}"; then
         add_row "vulkan" "pass" "$(since_ms "${start}")" "chat/completions answered on a gpu-vulkan slot serving ${MODEL}"
     else
         add_row "vulkan" "fail" "$(since_ms "${start}")" "slot load or chat/completions smoke failed — check journalctl -u hal0-slot@${SLOT}"
@@ -455,10 +463,16 @@ else
         add_row "flm" "skip" "$(since_ms "${start}")" "NPU lane NOT TESTED: no installed chat-capable FLM model in /api/slots/flm/models; install one before release validation"
     else
         LOADED_SEEDED_SLOTS+=("flm")
-        if remote_slot_load flm -m "${FLM_MODEL}"; then
-            add_row "flm" "pass" "$(since_ms "${start}")" "seeded flm slot (device=npu) reached ready serving ${FLM_MODEL}"
-        else
+        # Ready is not enough (#4000): the slot can report ready while
+        # FastFlowLM failed to load the model (no NPU hardware context, for
+        # one). Require one completion, as the vulkan row does. The request
+        # names the slot, so it cannot be answered by another one.
+        if ! remote_slot_load flm -m "${FLM_MODEL}"; then
             add_row "flm" "fail" "$(since_ms "${start}")" "FLM slot failed to load (${LAST_LOAD_OUTPUT:-no CLI output}); check /sys/class/accel and the xdna driver"
+        elif remote_chat_smoke flm; then
+            add_row "flm" "pass" "$(since_ms "${start}")" "chat/completions answered on the seeded flm slot (device=npu) serving ${FLM_MODEL}"
+        else
+            add_row "flm" "fail" "$(since_ms "${start}")" "flm slot reached ready serving ${FLM_MODEL} but chat/completions did not answer 200: the model may not have loaded (is the NPU held by another guest?); check journalctl -u hal0-slot@flm"
         fi
     fi
 fi
