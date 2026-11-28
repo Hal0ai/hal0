@@ -985,32 +985,88 @@ def test_an_interrupt_before_the_wizard_handles_it_is_a_quiet_130(
         assert _records(tmp_path) == [], "the wizard must not start after an interrupt"
 
 
-DIES_ALONE = """
-import os, signal, sys
-# Ctrl-C reaches the whole group, but the kernel hands it out one process at a
-# time. Here the child gets it and dies while bash has not seen it yet, the
-# widest form of that window.
-signal.signal(signal.SIGINT, signal.SIG_DFL)
-os.kill(os.getpid(), signal.SIGINT)
-signal.pause()
+# A child of the seam that dies of the interrupt while bash has not yet seen it
+# (Ctrl-C reaches the group one process at a time). The reader stand-in counts
+# its calls and sends the signal to itself on the chosen one; any other call
+# runs the real reader. The wrapper stands in for ${PY}: it does the same for
+# the one python call that STUB_DIE names, and runs the real interpreter for
+# the rest.
+COUNTING_READER = """
+import os, runpy, signal, sys
+counter = os.environ["STUB_COUNTER"]
+n = int(open(counter).read()) + 1 if os.path.exists(counter) else 1
+open(counter, "w").write(str(n))
+if n == int(os.environ.get("STUB_DIE_CALL", "0")):
+    signal.signal(signal.SIGINT, signal.SIG_DFL)
+    os.kill(os.getpid(), signal.SIGINT)
+    signal.pause()
+sys.argv = [os.environ["STUB_REAL_READER"], *sys.argv[1:]]
+runpy.run_path(os.environ["STUB_REAL_READER"], run_name="__main__")
 """
 
+PY_WRAPPER = """#!/bin/sh
+case "$STUB_DIE:$3:$4" in
+    pylookup:*"(3, 10)"*) kill -INT $$ ;;
+    pyversion:*"(3, 12)"*) kill -INT $$ ;;
+    copy:*:given) kill -INT $$ ;;
+    savedcopy:*:saved) kill -INT $$ ;;
+esac
+exec "$STUB_REAL_PY" "$@"
+"""
 
-@pytest.mark.parametrize("stage", ["wizard", "reader"])
+# name -> (reader call that dies, python step that dies, shell hook, wizard present,
+#          given document, saved answers present, wizard starts before the interrupt)
+INTERRUPT_POINTS = {
+    "reader-first-check": (1, "", "", True, True, False, False),
+    "copy-step": (0, "copy", "", True, True, False, False),
+    "reader-second-check": (2, "", "", True, True, False, False),
+    "apply-after-wizard": (3, "", "", True, True, False, True),
+    "apply-without-wizard": (1, "", "", False, True, False, False),
+    "work-directory": (
+        0,
+        "",
+        "_hal0_wizard_lstat() { kill -INT $BASHPID; }",
+        True,
+        False,
+        False,
+        False,
+    ),
+    "saved-copy": (0, "savedcopy", "", True, False, True, False),
+    "saved-store": (1, "", "", True, False, True, False),
+    "python-lookup": (0, "pylookup", "", False, True, False, False),
+    "python-version-check": (0, "pyversion", "", True, False, False, False),
+}
+
+
+@pytest.mark.parametrize("point", sorted(INTERRUPT_POINTS))
 def test_a_child_that_dies_of_the_interrupt_before_bash_sees_it_is_a_quiet_130(
-    tmp_path: Path, stub: dict[str, str], stage: str
+    tmp_path: Path, stub: dict[str, str], point: str
 ) -> None:
-    dies = tmp_path / "dies_alone.py"
-    dies.write_text(DIES_ALONE, encoding="utf-8")
-    env = {"PATH": os.environ["PATH"], "HAL0_PLAIN": "1", **stub, "STUB_DOC": DOC}
-    pre = ""
-    if stage == "wizard":
-        env["HAL0_WIZARD_ENTRY"] = str(dies)
-    else:
+    die_call, die_py, hook, wizard, given_doc, saved, wizard_starts = INTERRUPT_POINTS[point]
+    reader = tmp_path / "counting_reader.py"
+    reader.write_text(COUNTING_READER, encoding="utf-8")
+    wrapper = tmp_path / "py-wrapper.sh"
+    wrapper.write_text(PY_WRAPPER, encoding="utf-8")
+    wrapper.chmod(0o700)
+    env = {
+        "PATH": os.environ["PATH"],
+        "HAL0_PLAIN": "1",
+        **stub,
+        **({} if wizard else _absent(tmp_path)),
+        "STUB_DOC": DOC,
+        "STUB_COUNTER": str(tmp_path / "reader-calls"),
+        "STUB_DIE_CALL": str(die_call),
+        "STUB_DIE": die_py,
+        "STUB_REAL_PY": sys.executable,
+        "STUB_REAL_READER": str(ROOT / "installer" / "lib" / "answers_reader.py"),
+    }
+    if given_doc:
         given = tmp_path / "given.json"
         given.write_text(DOC, encoding="utf-8")
         env["HAL0_ANSWERS_FILE"] = str(given)
-        pre = f'_HAL0_ANSWERS_READER="{dies}"'
+    if saved:
+        _saved(tmp_path, json.loads(DOC))
+    pre = f'PY="{wrapper}"\n_HAL0_ANSWERS_READER="{reader}"\n{hook}'
     proc = _run_group(
         ["bash", "-c", _seam_script(tmp_path, pre)],
         timeout=30,
@@ -1024,8 +1080,14 @@ def test_a_child_that_dies_of_the_interrupt_before_bash_sees_it_is_a_quiet_130(
     assert "PAST THE SEAM" not in proc.stdout
     log = (tmp_path / "report.log").read_text() if (tmp_path / "report.log").exists() else ""
     assert log == "", log
-    assert list((tmp_path / "prefix" / "run" / "hal0-install").iterdir()) == []
-    assert _records(tmp_path) == [], "the wizard must not start after an interrupt"
+    for text in ("not accepted", "could not make", "no Python", "not a file only root wrote"):
+        assert text not in proc.stderr, proc.stderr
+    assert "Failure report saved" not in proc.stdout + proc.stderr
+    run = tmp_path / "prefix" / "run" / "hal0-install"
+    assert not run.exists() or list(run.iterdir()) == []
+    assert (_records(tmp_path) != []) is wizard_starts, (
+        "the wizard must not start after an interrupt"
+    )
 
 
 BLOCKED_ON_FIFO = """

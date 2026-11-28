@@ -67,11 +67,15 @@ _HAL0_ANSWER_NAMES=(
 # (prints nothing) when there is none. The installer uses this, before anything
 # changes, to know whether a document can be checked without installing Python.
 hal0_answers_python() {
-    local candidate
+    local candidate rc
     for candidate in "${PY:-}" "$(command -v python3 2>/dev/null || true)"; do
         [[ -n "${candidate}" ]] || continue
-        if "${candidate}" -I -c 'import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)' \
-            >/dev/null 2>&1; then
+        rc=0
+        "${candidate}" -I -c 'import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)' \
+            >/dev/null 2>&1 || rc=$?
+        # Died of the interrupt: not "this one is too old", so no next candidate.
+        [[ "${rc}" -ne 130 ]] || return 130
+        if [[ "${rc}" -eq 0 ]]; then
             printf '%s\n' "${candidate}"
             return 0
         fi
@@ -137,7 +141,10 @@ hal0_apply_answers() {
             return 1
             ;;
     esac
-    _HAL0_ANSWERS_PY="$(hal0_answers_python)" || _HAL0_ANSWERS_PY=""
+    local py_rc=0
+    _HAL0_ANSWERS_PY="$(hal0_answers_python)" || py_rc=$?
+    [[ "${py_rc}" -ne 130 ]] || return 130
+    [[ "${py_rc}" -eq 0 ]] || _HAL0_ANSWERS_PY=""
     if [[ -z "${_HAL0_ANSWERS_PY}" ]]; then
         echo "error: no Python 3.10 or newer available to read the answers document" >&2
         return 1
@@ -163,6 +170,8 @@ hal0_apply_answers() {
     output="$("${_HAL0_ANSWERS_PY}" -I "${_HAL0_ANSWERS_READER}" --origin "${origin}" \
         "${screens_arg[@]+"${screens_arg[@]}"}" \
         "${store_arg[@]+"${store_arg[@]}"}" -- "${path}")" || rc=$?
+    # 130: the reader died of the interrupt; that is no refusal and says nothing.
+    [[ "${rc}" -ne 130 ]] || return 130
     if [[ "${rc}" -ne 0 ]]; then
         echo "Stopped: the answers document was not accepted." >&2
         return "${rc}"
@@ -299,7 +308,15 @@ hal0_collect_answers() {
     [[ "${HAL0_WIZARD_RAN:-0}" == "1" ]] && return 0
     local path="${HAL0_ANSWERS_FILE:-}"
     [[ -n "${path}" ]] || return 0
-    hal0_apply_answers "${path}" file || return $?
+    # The same interrupt rule as hal0_run_wizard: a child that dies of the
+    # signal before bash has seen it is still an interrupt, never a refusal.
+    local apply_rc=0
+    _HAL0_WIZARD_INT=0
+    trap '_HAL0_WIZARD_INT=1' INT
+    hal0_apply_answers "${path}" file || apply_rc=$?
+    trap - INT
+    if [[ "${_HAL0_WIZARD_INT}" == "1" ]]; then apply_rc=130; fi
+    [[ "${apply_rc}" -eq 0 ]] || return "${apply_rc}"
     # shellcheck disable=SC2034 # read by install.sh, which sources this file
     HAL0_ANSWERS_APPLIED=1
     # shellcheck disable=SC2034 # read by install.sh and the tests
@@ -397,7 +414,10 @@ _hal0_wizard_workdir() {
     _hal0_wizard_lstat "${base}" || return 1
     [[ "${_HAL0_WL_KIND}" == dir && "${_HAL0_WL_UID}" == "${EUID}" ]] || return 1
     (( (8#${_HAL0_WL_PERM} & 8#022) == 0 )) || return 1
-    dir="$(mktemp -d "${base}/wizard.XXXXXXXXXX" 2>/dev/null)" || return 1
+    local mk_rc=0
+    dir="$(mktemp -d "${base}/wizard.XXXXXXXXXX" 2>/dev/null)" || mk_rc=$?
+    [[ "${mk_rc}" -ne 130 ]] || return 130
+    [[ "${mk_rc}" -eq 0 ]] || return 1
     _hal0_wizard_lstat "${dir}" || { rm -rf -- "${dir}"; return 1; }
     if [[ "${_HAL0_WL_KIND}" != dir || "${_HAL0_WL_UID}" != "${EUID}" || "${_HAL0_WL_PERM}" != 700 ]]; then
         rm -rf -- "${dir}"
@@ -486,6 +506,10 @@ _hal0_saved_answers_copy() {
     case "${rc}" in
         0) return 0 ;;
         1) return 1 ;;
+        130)
+            rm -f -- "${dest}"
+            return 130
+            ;;
     esac
     rm -f -- "${dest}"
     _hal0_answers_warn "the saved answers ${file} are not a file only root wrote (root-owned, mode 0600, in a folder only root can change); the setup screens start without them"
@@ -600,6 +624,7 @@ _hal0_saved_store() {
     _hal0_default_store_arg
     output="$("${PY}" -I "${_HAL0_ANSWERS_READER}" --origin file \
         "${store_arg[@]+"${store_arg[@]}"}" -- "${copy}" 2>/dev/null)" || rc=$?
+    [[ "${rc}" -ne 130 ]] || return 130
     [[ "${rc}" -eq 0 && -n "${output}" ]] || return 0
     _hal0_answers_parse file "${output}" 2>/dev/null || return 0
     for i in "${!names[@]}"; do
@@ -677,11 +702,6 @@ hal0_run_wizard() {
     _HAL0_WIZARD_CALLED=0
     hal0_wizard_present || return 0
     _HAL0_WIZARD_CALLED=1
-    if ! "${PY:-python3}" -I -c 'import sys; sys.exit(0 if sys.version_info >= (3, 12) else 1)' \
-        </dev/null >/dev/null 2>&1; then
-        _hal0_answers_err "the setup screens need Python 3.12 or newer, and ${PY:-python3} is not one"
-        return 1
-    fi
     local dir="" rc=0
     # An interrupt of the installer itself (Ctrl-C reaches the whole process
     # group, also before the wizard has its own handler, and while the reader
@@ -691,9 +711,21 @@ hal0_run_wizard() {
     # install.sh sets no INT trap of its own, so `trap - INT` restores it.
     _HAL0_WIZARD_INT=0
     trap '_HAL0_WIZARD_INT=1' INT
-    if ! dir="$(_hal0_wizard_workdir)" || [[ -z "${dir}" ]]; then
+    local ver_rc=0
+    "${PY:-python3}" -I -c 'import sys; sys.exit(0 if sys.version_info >= (3, 12) else 1)' \
+        </dev/null >/dev/null 2>&1 || ver_rc=$?
+    if [[ "${ver_rc}" -ne 0 ]]; then
         trap - INT
-        if [[ "${_HAL0_WIZARD_INT}" == "1" ]]; then
+        [[ "${ver_rc}" -ne 130 && "${_HAL0_WIZARD_INT}" != "1" ]] || return 130
+        _hal0_answers_err "the setup screens need Python 3.12 or newer, and ${PY:-python3} is not one"
+        return 1
+    fi
+    local dir_rc=0
+    dir="$(_hal0_wizard_workdir)" || dir_rc=$?
+    if [[ "${dir_rc}" -ne 0 || -z "${dir}" ]]; then
+        trap - INT
+        # 130: the capture died of the interrupt, whether or not the trap ran yet
+        if [[ "${_HAL0_WIZARD_INT}" == "1" || "${dir_rc}" -eq 130 ]]; then
             [[ -z "${dir}" ]] || rm -rf -- "${dir}"
             return 130
         fi
@@ -738,9 +770,12 @@ _hal0_wizard_call() {
     fi
     # The saved answers: only root's own copy, handed over as a copy (above).
     # The box's existing store is read from the same copy.
-    if _hal0_saved_answers_copy "${saved_copy}"; then
+    local saved_rc=0
+    _hal0_saved_answers_copy "${saved_copy}" || saved_rc=$?
+    [[ "${saved_rc}" -ne 130 ]] || return 130
+    if [[ "${saved_rc}" -eq 0 ]]; then
         cmd+=(--saved "${saved_copy}")
-        _hal0_saved_store "${saved_copy}"
+        _hal0_saved_store "${saved_copy}" || return $?
     fi
     # A document the person gave is always merged headless: a document from
     # someone else must never be walked through with Enter on pre-filled
