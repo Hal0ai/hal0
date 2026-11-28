@@ -27,6 +27,7 @@ def _denied(*args: Any, **kwargs: Any) -> Any:
         (da.check_hermes_command_approvals, {}, "hermes_command_approvals"),
         (da.check_hermes_anchor_window, {}, "hermes_anchor_window"),
         (da.check_openwebui_mcp, {}, "openwebui_mcp"),
+        (da.check_openwebui_memory_filter, {}, "openwebui_memory_filter"),
         (da.check_hindsight_llm_auth, {"auth": None}, "hindsight_llm_auth"),
         (
             da.check_hal0_linger,

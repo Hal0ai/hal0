@@ -217,3 +217,8 @@ any gap between what hermes says about itself and what it does as `major`.
 * Compare /v1/toolsets browser toolset against the model_tools._rewrite_browser_exec gate and record the live per-turn tool roster.
 * `hal0 doctor` agent-uid warn on a fresh install is #3134 (open); record it.
 * get_model_context_length without config_context_length returning 256000 is by-design since #3867; judge gateway.log 'Model context warmed' and config.yaml model.context_length instead.
+
+## Added in kit 22
+
+* Compute the live tool roster with model_tools.get_tool_definitions under the config's disabled_toolsets rather than reading the /v1/toolsets catalog (it still lists browser enabled:true).
+* Record the startup errors.log line 'schema reconcile 503 Session store not initialized' on a fresh install (transient before the gateway is up).

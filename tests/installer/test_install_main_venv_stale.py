@@ -12,6 +12,7 @@ under ``bash -euo pipefail`` against real venvs built by this interpreter.
 from __future__ import annotations
 
 import os
+import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -102,7 +103,7 @@ def test_venv_on_another_python_version_is_rebuilt(tmp_path: Path) -> None:
     fake.write_text(
         "#!/bin/bash\n"
         'case "$*" in *version_info*) echo 3.99; exit 0 ;; esac\n'
-        f'exec {sys.executable} "$@"\n'
+        f'exec {shlex.quote(sys.executable)} "$@"\n'
     )
     fake.chmod(0o755)
     out = _run_block(venv, py=str(fake))

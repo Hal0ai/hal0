@@ -139,20 +139,93 @@ tracker honest, and they apply to agent sessions exactly as to people:
    for a user) or `P2` (nice to have), and a milestone.
 3. **Cosmetic findings are not filed** unless the same change fixes them.
 
+Issue, pull request and comment text is published, exactly as the tracked
+files are. Keep host names, LAN addresses and local paths out of it. For a
+security finding, write what is now enforced, never how to reach the
+weakness; [`SECURITY.md`](./SECURITY.md) says how to report one.
+
 Every open issue carries exactly one status label (`needs-triage`,
 `needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`) and, once
-triaged, exactly one priority label. `ready-for-agent` marks work an agent
-can finish on its own with tests. A weekly routine triages the inbox, fixes
-a few `ready-for-agent` issues, and posts a summary on the pinned "Weekly
+triaged, exactly one priority label. New issues also carry at least one
+`area:` label (`area:installer`, `area:updater`, `area:memory`,
+`area:slots`, `area:api`, `area:agents`, `area:ui`, `area:runners`,
+`area:security`, `area:ci`, `area:docs`), so that everything touching one
+part of hal0 can be listed. `ready-for-agent` marks work an agent
+can finish on its own with tests. A weekly routine triages the inbox, lists
+the `ready-for-agent` issues to take next, compares the pinned runner images
+with their upstream releases, and posts a summary on the pinned "Weekly
 triage digest" issue, which is the quickest way to see the state of the
-queue.
+queue. It opens no pull requests.
+
+## Planning a release
+
+The plan lives on GitHub, not in session notes. Four things carry it.
+
+**Milestones are releases.** Every open release milestone has a due date, or
+a `Date:` sentence in its description saying what sets the date. The
+description ends with a scope log: one dated line for each change of scope,
+saying who decided it. `Backlog` holds triaged work with no release.
+
+Priority and milestone are set separately. Priority says how bad a defect
+is; the milestone says when the fix ships. A `P1` can ride a patch release,
+and a `P2` can be planned into a minor when someone is already in that file.
+A `P0` has a default: it goes to the current patch milestone. Putting it on
+a later one is the operator's decision, recorded as a Decision comment on
+the issue.
+
+**Every open issue and pull request has a milestone.** The one exception is
+an issue still labelled `needs-triage`. A pull request takes the next tag
+that will contain it, docs and CI changes included. When a fix ships in a
+different release than its issue was planned for, move the issue: a closed
+issue's milestone records where it shipped.
+
+**Each release has one tracking issue**, titled `Release vX.Y.Z: tracking`.
+The milestone description names it on a line of its own, written
+`Tracking issue: #N`, which is the form `scripts/plan-lint.sh` looks for. It
+holds:
+
+- the scope, split into must and stretch when there is a stretch set;
+- the scope log;
+- the release candidates in order, once there are any;
+- owed proofs: checks that a merged change still owes on a real box;
+- the operator's decisions for that release, open and settled.
+
+Whoever coordinates the release keeps it current. A far-off release gets its
+tracking issue when work on it opens.
+
+**Landmarks are epics.** Work larger than one pull request, and any proposal
+waiting for approval, gets one parent issue labelled `epic` with the work as
+sub-issues. The epic carries the release milestone; each sub-issue keeps its
+own priority and status. A plan written somewhere else is summarised in its
+epic, because a reader of the tracker cannot open a private document. The
+organisation's roadmap project shows the epics for each release.
+
+Three habits keep those four honest:
+
+- **A decision is written on the issue it settles**, as a comment that
+  starts `Decision (YYYY-MM-DD, who):`, and the issue's labels, milestone and
+  body are brought in line with it. A decision heard second-hand is marked
+  "relayed". A relayed decision is a record, not an approval: for anything
+  that needs the operator's yes (a release merge or tag, a change to CI or
+  credentials, an operation on a host, a security disclosure), whoever will
+  act asks the operator directly.
+- **An issue is claimed by a draft pull request that links it.** A
+  `ready-for-agent` issue with no linked pull request and no claiming comment
+  is free to take.
+- **A release gate written in the source gets an issue.** A `HAL0-SUNSET`
+  marker, or a decision record that says a release does not ship without
+  something, has an open issue on the milestone it names.
+
+`scripts/plan-lint.sh` checks these rules against the live tracker. Run it
+before opening a release pull request and during triage.
 
 ## Test tiers
 
 Every PR runs the unit tier (α) and the UI checks in CI; the release-gate
 tier (γ) runs on a real box and is the last gate before a tagged release.
-The three checks GitHub requires before a PR to `main` can merge are the CI
-`python (3.12)` and `ui` jobs and the Playwright `γ-suite (chromium)` job
+The four checks GitHub requires before a PR to `main` can merge are the CI
+`python (3.12)`, `python (3.14)` and `ui` jobs and the Playwright
+`γ-suite (chromium)` job
 (see [E2E tests](#e2e-tests); despite the γ in its name, that suite runs
 against mocked backends and is not the release gate).
 
@@ -177,7 +250,7 @@ load work.
 ### α — unit (`make test`)
 
 ```sh
-make test            # runs `pytest tests/ -v`
+make test            # runs `pytest tests/ -n auto -q`
 ```
 
 Pytest with mocked systemd/HTTP/runtime clients; nearly every test
@@ -200,7 +273,7 @@ when Docker is unreachable.)
 ### γ — release-gate (`make release-test`)
 
 SSHes into the hal0-test LXC and walks a matrix of eight rows:
-**vulkan, rocm, flm (NPU slot ready), moonshine (STT), kokoro (TTS),
+**vulkan, rocm, flm (NPU slot answers a chat), moonshine (STT), kokoro (TTS),
 unload, updater, openwebui** (the `add_row` calls in
 `scripts/release-test.sh`). Each row produces a structured record; the
 full report lands in `tests/release-gate-report.json`.
@@ -222,7 +295,12 @@ Three things to know before citing γ as validation:
   `tests/release-gate-report.json`. On an NPU box with the FLM runner pinned,
   the `flm` row uses the slot's configured model or an installed chat model from
   `/api/slots/flm/models`; if neither exists, it warns `NPU lane NOT TESTED`.
-  A missing seeded slot or unreadable catalog fails the row.
+  A missing seeded slot or unreadable catalog fails the row. Once the slot
+  reports ready the row sends one chat completion to the slot's own port,
+  naming the tag the slot lists for the loaded model, and fails unless the
+  reply carries a completion. It does not go through the gateway: a slot can
+  report ready while its model did not load, and the gateway would answer a
+  request for an unregistered `flm` slot from the `agent` slot.
 
 ```sh
 # Set HAL0_TEST_SSH_KEY to whatever key authorises you on your test host

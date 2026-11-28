@@ -24,9 +24,12 @@ The split this module supports:
 
 from __future__ import annotations
 
+import contextlib
+import logging
 from collections.abc import Iterable, Mapping
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Final
 
+import anyio
 from mcp.server.fastmcp import Context, FastMCP
 from mcp.server.fastmcp.exceptions import ToolError
 from mcp.server.fastmcp.server import Settings as _FastMCPSettings
@@ -41,6 +44,80 @@ from mcp.server.fastmcp.tools import Tool
 # mount (#2907). pydantic-settings reads ``model_config["env_file"]`` at
 # instantiation, so clearing it here covers every FastMCP hal0 builds.
 _FastMCPSettings.model_config["env_file"] = None
+
+#: The logger name the MCP streamable-HTTP transport uses for standalone SSE streaming.
+STREAMABLE_HTTP_LOGGER_NAME: Final[str] = "mcp.server.streamable_http"
+
+
+def _is_closed_resource_error(exc: Any) -> bool:
+    """Return True if *exc* represents an anyio closed resource error."""
+    if exc is None:
+        return False
+    if (
+        isinstance(exc, anyio.ClosedResourceError)
+        or getattr(exc, "__name__", None) == "ClosedResourceError"
+        or exc.__class__.__name__ == "ClosedResourceError"
+    ):
+        return True
+    if isinstance(exc, type) and issubclass(exc, anyio.ClosedResourceError):
+        return True
+    if hasattr(exc, "exceptions"):
+        return bool(exc.exceptions) and all(
+            _is_closed_resource_error(sub) for sub in exc.exceptions
+        )
+    return False
+
+
+class ClosedStreamFilter(logging.Filter):
+    """Filter dropping spurious ``ClosedResourceError`` tracebacks on disconnect (#3654).
+
+    When a client disconnects while a standalone GET SSE stream is open,
+    ``terminate()`` in ``mcp.server.streamable_http`` closes the memory stream.
+    ``standalone_sse_writer`` catches the resulting ``anyio.ClosedResourceError``
+    and logs an ERROR with a 44-line Rich traceback. A client disconnect is a
+    routine end of session, not a server fault.
+
+    This filter drops those expected records while allowing genuine errors
+    (other exceptions or other log messages) to pass through.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        msg = str(record.msg)
+        if record.args:
+            with contextlib.suppress(Exception):
+                msg = record.getMessage()
+        if record.levelno >= logging.ERROR and "standalone SSE writer" in msg and record.exc_info:
+            exc = (
+                record.exc_info[1]
+                if (
+                    isinstance(record.exc_info, tuple)
+                    and len(record.exc_info) > 1
+                    and record.exc_info[1] is not None
+                )
+                else (
+                    record.exc_info[0]
+                    if isinstance(record.exc_info, tuple) and len(record.exc_info) > 0
+                    else record.exc_info
+                )
+            )
+            if _is_closed_resource_error(exc):
+                return False
+        return True
+
+
+def install_closed_stream_filter() -> None:
+    """Attach :class:`ClosedStreamFilter` to ``mcp.server.streamable_http``.
+
+    Idempotent: if an instance of :class:`ClosedStreamFilter` is already
+    attached to the logger, it is not attached again.
+    """
+    logger = logging.getLogger(STREAMABLE_HTTP_LOGGER_NAME)
+    if not any(isinstance(existing, ClosedStreamFilter) for existing in logger.filters):
+        logger.addFilter(ClosedStreamFilter())
+
+
+# Install the filter at import time so every FastMCP server process is covered.
+install_closed_stream_filter()
 
 # The annotation a shared tool gives its injected-context parameter. It must
 # stay the BARE class: FastMCP finds the context parameter with
@@ -84,6 +161,7 @@ class BoundFastMCP(FastMCP):
         from hal0 import __version__ as _hal0_version
 
         self._mcp_server.version = _hal0_version
+        install_closed_stream_filter()
 
 
 def bound_server(ctx: ToolContext | None) -> BoundFastMCP:
@@ -107,4 +185,11 @@ def bound_server(ctx: ToolContext | None) -> BoundFastMCP:
     return server
 
 
-__all__ = ["BoundFastMCP", "ToolContext", "bound_server"]
+__all__ = [
+    "STREAMABLE_HTTP_LOGGER_NAME",
+    "BoundFastMCP",
+    "ClosedStreamFilter",
+    "ToolContext",
+    "bound_server",
+    "install_closed_stream_filter",
+]

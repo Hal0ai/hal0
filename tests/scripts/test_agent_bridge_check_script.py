@@ -21,6 +21,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 import threading
@@ -40,8 +41,13 @@ _KEY_RE = re.compile(r"^Bearer (hal0bk_ci-probe-\d+-\d+\.[A-Za-z0-9_-]+)$")
 # The stub `hal0`: the three verbs the probe calls. `add` prints what the real
 # command prints (a panel that wraps the key, then one pasteable line per scope);
 # `scopes` and `revoke` tell the fake server, which is at $HAL0_API_URL.
-_HAL0_STUB = f"""#!{sys.executable}
-import json, os, sys, urllib.request
+# A "#!" line cannot name an interpreter whose path has a space in it: the kernel
+# splits the line there. So a Python stub starts under /bin/sh and re-executes
+# itself. To the shell the three lines after "#!/bin/sh" are a no-op and an exec;
+# to Python they are one string it throws away.
+_PYTHON_STUB_HEAD = f"#!/bin/sh\n''':'\nexec {shlex.quote(sys.executable)} \"$0\" \"$@\"\n'''\n"
+
+_HAL0_STUB = f"""{_PYTHON_STUB_HEAD}import json, os, sys, urllib.request
 
 args = sys.argv[1:]
 with open(os.environ["STUB_LOG"], "a", encoding="utf-8") as fh:

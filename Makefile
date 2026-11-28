@@ -23,7 +23,7 @@ help:
 	@echo "  Local"
 	@echo "    make install              Install python package in editable mode with dev extras"
 	@echo "    make dev                  Run hal0-api with --reload"
-	@echo "    make test                 Run unit tests (tier α, ~3s, every commit)"
+	@echo "    make test                 Run unit tests (tier α, in parallel, every commit)"
 	@echo "    make lint                 Ruff check"
 	@echo "    make fmt                  Ruff format"
 	@echo "    make typecheck            Mypy"
@@ -48,7 +48,8 @@ dev:
 	uvicorn hal0.api:app --reload --host 127.0.0.1 --port 8080
 
 # ── Test tiers (PLAN §10) ────────────────────────────────────────────────────
-# α — unit. Pure pytest. No systemd, no docker. ~3s.
+# α — unit. Pure pytest. No systemd, no docker. About 5 minutes on 6 workers
+#     (27 minutes serially), so `make test` runs it in parallel.
 # β — integration. Retired in v0.2 — runtime services are plain systemd
 #     units (hal0-api + per-slot hal0-slot@<name> podman units), exercised
 #     by the γ gate + tests/harness instead of a dedicated β tier.
@@ -57,7 +58,7 @@ dev:
 test: test-unit
 
 test-unit:
-	pytest tests/ -v
+	pytest tests/ -n auto -q
 
 harness:
 	bash scripts/harness.sh

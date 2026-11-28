@@ -16,9 +16,11 @@
 # Do not treat a review-due entry as automatically still valid.
 
 schema: 1
-updated: 2026-11-27
-updated_for: v1.8.0-nightly.20261127015252
+updated: 2026-11-28
+updated_for: v1.8.1-nightly.20261127231904
 
+# NOTE (kit 22): 20261127231904 adjudications appended at the bottom (hal0/<non-llm slot> anchor fallback, throughput backfill, empty profiles.toml, slot-edit comment stripping). Filed: #4051 retain cancel.
+#
 # NOTE (kit 21): 20261127015252 adjudications appended at the bottom (npu_util residency, FPX load guard, footer stopped pip, quarantine reaper delivery order, others). hermes-context-length-256k-fallback updated for #3867.
 #
 # NOTE (kit 19): five boxes' worth of by-design rulings added at the bottom; the Overview soft-degraded decision (#3808 option b) is now APPLIED, see dashboard-overview-agents-degraded-shown-ready.
@@ -3408,4 +3410,61 @@ known_issues:
       Filed 20261127015252: #3944 (auto-retry list limit 422), #3945 (memory status shared-bank only), #3946 (agent peers untagged observations); these are NOT known, they are tracked regressions.
     still_report_if: >-
       Any issue above is closed as fixed and still reproduces, or the symptom is materially wider than its issue text.
+    review_at: v1.9.0
+
+  - id: chat-hal0-prefix-non-llm-slot-anchor-fallback
+    status: by-design
+    adjudicated: v1.8.1-nightly.20261127231904
+    related_issue: 3807
+    summary: >-
+      model=hal0/<custom non-llm slot> (reranking, embedding, tts, img) on chat/completions does not get the typed 409; it lands on the agent anchor (200 when
+      loaded, 404 dispatch.no_route when the agent is offline and model-less). Bare name (model=<slot>) correctly gets 409 dispatch.capability_mismatch.
+    why: >-
+      hal0/<slot> only covers enabled LLM slots (ADR-0023 decision bullet 4; resolver.py _chain_for over hal0_llm_slot_views filters type == llm). A hal0/<non-llm> name is an
+      unknown model id and follows rule 9 to the agent anchor, identical to model=nosuchmodel; extends dispatcher-unknown-model-passthrough. A typed 409 there would be an enhancement.
+      A 60-100 s first call is anchor contention (memory traffic on the agent), not routing.
+    still_report_if: >-
+      Chat naming a custom non-llm slot by its BARE name returns anything other than 409 dispatch.capability_mismatch naming that slot; OR hal0/<non-llm slot> is forwarded to that slot
+      (raw 5xx, or 200 from a reranker/embedder); OR the substituted response `model` echoes hal0/<slot> instead of the anchor's real model id; OR it triggers a pull or a cold load of a slot other than the anchor;
+      OR /v1/models advertises hal0/<non-llm slot> ids while dispatch still sends them to the anchor.
+    review_at: v1.9.0
+
+  - id: throughput-history-nonstream-backfill
+    status: by-design
+    adjudicated: v1.8.1-nightly.20261127231904
+    related_issue: 3859
+    summary: >-
+      A non-streaming completion appears to "lump" into one bin of /api/stats/throughput/history, or its bins read 0 while it decodes and fill in after it finishes.
+    why: >-
+      #3869 spreads non-streaming tokens over the decode span (v1.py _append_spread_events, _NONSTREAM_SPREAD_STEP_S; span from timings.predicted_ms, falling back to wall since dispatch).
+      Events are backdated, so bins already reported read 0 until the completion lands (throughput.py docstring, #3859). A lump seen in total_tps is other slots' traffic: brain on Vulkan decodes ~50 tok/s and adds ~+44 to total_tps by itself.
+    still_report_if: >-
+      On a quiet box with exactly one non-streaming /v1/chat/completions in flight and timings.predicted_ms > 10000, per_slot.<that slot> (NOT total_tps) shows a single bin rising by more than 2x completion_tokens/(predicted_ms/1000)
+      once the response returns; OR the backfilled bins do not sum to completion_tokens/bucket_s within 5%.
+    review_at: v1.9.0
+
+  - id: profiles-toml-empty-table-after-last-delete
+    status: by-design
+    adjudicated: v1.8.1-nightly.20261127231904
+    summary: >-
+      After the last custom profile is deleted (API DELETE /api/profiles/<name>, 204; there is no `hal0 profile delete` verb), /etc/hal0/profiles.toml remains as exactly "[profile]\n" (10 bytes, hal0:hal0 0600).
+    why: >-
+      profiles.toml holds only the operator catalog; seeds are virtual and overlaid on every load (ADR-0029, save_profiles_config strips them). load_profiles_config treats an empty [profile] table like a missing file
+      (tests/config/test_loader_profiles_save.py::test_empty_profile_table_still_loads); GET /api/profiles is byte-identical and doctor profiles passes either way. The kit's old "absent or seed-identical" expectation was wrong.
+    still_report_if: >-
+      The file holds anything other than an empty [profile] table (a leftover entry for the deleted name, a seed body, keys the operator never wrote); OR GET /api/profiles, `hal0 profile list` or a slot's resolved profile differs between the residue and a missing file;
+      OR doctor perms/profiles, the updater tune strip or runner-system migration rewrites, backs up or errors on it; OR owner/mode differs from hal0:hal0 0600; OR load_profiles_config raises.
+    review_at: v1.9.0
+
+  - id: slot-write-strips-toml-comments
+    status: open
+    adjudicated: v1.8.1-nightly.20261127231904
+    summary: >-
+      Any write through hal0.slot_config.write_slot_toml (hal0 slot edit, PUT /api/slots/{name}/config, slot load -m, installer brain bind, dashboard) strips every comment from the slot TOML and keeps all values;
+      a no-op edit does it too. Seed comment headers (e.g. brain 82 lines, the ADR-0053 memory header, the hint to run `hal0 slot edit <slot> --hardware vulkan`) vanish on first write and are never re-seeded.
+    why: >-
+      Confirmed cosmetic (tomli_w has no comment support). Not filed: CLAUDE.md issue rule 3 forbids a cosmetic-only filing unless the same session fixes it (fix size S: tomlkit round-trip, not a dependency today).
+      Record as `known`; do not count it as a finding and do not assert seed comments survive in slots lanes.
+    still_report_if: >-
+      A write changes any VALUE, key order that matters, owner/mode (must stay hal0:hal0 0600), or drops a key; OR the file is not replaced atomically.
     review_at: v1.9.0

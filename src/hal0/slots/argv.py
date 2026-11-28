@@ -36,7 +36,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from hal0.errors import BadRequest
+from hal0.errors import BadRequest, UnprocessableEntity
 
 # Short/alternative → primary long canonicalisation. Used to compute the dedup
 # key and to match the deny sets; the emitted token keeps its original
@@ -62,6 +62,7 @@ FLAG_ALIASES: dict[str, str] = {
     "-mg": "--main-gpu",
     "-np": "--parallel",
     "-kvu": "--kv-unified",
+    "-lm": "--load-mode",
     "-ngld": "--n-gpu-layers-draft",
     # Managed flags (base layer).
     "-m": "--model",
@@ -114,6 +115,34 @@ APPEND_FLAGS: frozenset[str] = frozenset(
         "--override-kv",
     }
 )
+
+# Spellings llama-server no longer accepts, each with the text of its
+# replacement. Upstream folded the memory-mapping, locking and direct-I/O
+# switches into one option, ``-lm``/``--load-mode MODE`` (``auto``, ``none``,
+# ``mmap``, ``mlock``, ``mmap+mlock``, ``dio``): ``common/arg.cpp`` still has
+# every key below at tag b10874 and none of them at b12633 or b12816. A
+# server given one exits at argument parsing with ``invalid argument``, so a
+# profile save that carries one is refused (:func:`deny_removed_flags`).
+#
+# True of every pinned llama-server runner, checked against each one's option
+# table: ``standard`` and ``cpu`` (b12816), ``cuda`` (b12808) and the ``xdna``
+# fork (``tetherto/qvac-fabric-llm.cpp`` at 72f6dfa, which has the same
+# ``-lm`` option and modes). A runner pin that moves to a source still
+# carrying one of these needs the refusal narrowed to the runners that lack it.
+#
+# Hand-kept. On a llama.cpp bump, compare the old tag's option table with the
+# new one and add every spelling that disappeared. A key here must not also be
+# in :data:`FLAG_ALIASES` or :data:`VALUELESS_FLAGS`: those describe flags the
+# server has.
+REMOVED_FLAGS: dict[str, str] = {
+    "--mmap": "`-lm mmap`",
+    "--no-mmap": "`-lm none`",
+    "--mlock": "`-lm mmap+mlock` (or `-lm mlock` to lock without memory-mapping)",
+    "--direct-io": "`-lm dio`",
+    "-dio": "`-lm dio`",
+    "--no-direct-io": "nothing: direct I/O is off unless `-lm dio` asks for it",
+    "-ndio": "nothing: direct I/O is off unless `-lm dio` asks for it",
+}
 
 # ── Managed-args denylist (§21.7) ─────────────────────────────────────────────
 #
@@ -748,6 +777,33 @@ def deny_reasoning_format_none(
     )
 
 
+def deny_removed_flags(tokens: list[str], *, segment: str) -> None:
+    """Raise :class:`~hal0.errors.UnprocessableEntity` if ``tokens`` carry a
+    flag llama-server has removed (:data:`REMOVED_FLAGS`).
+
+    Write-side only. The message names each replacement so the operator can
+    correct the text; hal0 does not rewrite it for them.
+    """
+    offenders: list[str] = []
+    for pair in _split_pairs(tokens):
+        if pair.flag is not None and pair.canon in REMOVED_FLAGS and pair.flag not in offenders:
+            offenders.append(pair.flag)
+    if not offenders:
+        return
+    advice = "; ".join(f"replace {f!r} with {REMOVED_FLAGS[_canon(f)]}" for f in offenders)
+    raise UnprocessableEntity(
+        f"{segment} may not set {', '.join(map(repr, offenders))}: llama-server no "
+        "longer accepts it and would exit at start with 'invalid argument'. "
+        f"The load mode is now one option, `-lm`/`--load-mode`: {advice}.",
+        code="slot.removed_flag_denied",
+        details={
+            "segment": segment,
+            "flags": offenders,
+            "replacements": {f: REMOVED_FLAGS[_canon(f)] for f in offenders},
+        },
+    )
+
+
 def _deny_slot_hardware_flags(tokens: list[str], *, segment: str) -> None:
     """Raise :class:`~hal0.errors.BadRequest` if ``tokens`` set a slot-hardware flag.
 
@@ -979,6 +1035,7 @@ __all__ = [
     "LLAMA_PRESET_FLAGS",
     "MANAGED_ARGS_DENYLIST",
     "PROFILE_SEGMENT_LABELS",
+    "REMOVED_FLAGS",
     "SLOT_HARDWARE_FLAGS",
     "UNTRUSTED_SEGMENT_LABELS",
     "VALUELESS_FLAGS",
@@ -987,6 +1044,7 @@ __all__ = [
     "ResolvedArgv",
     "deny_llama_env",
     "deny_reasoning_format_none",
+    "deny_removed_flags",
     "llama_env_offenders",
     "normalize_argv",
     "resolve_argv",

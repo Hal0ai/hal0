@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json as jsonlib
 import os
+import shlex
 import socket
 import stat
 import subprocess
@@ -333,7 +334,7 @@ def test_preflight_ports_soft_mode_downgrades_to_warning() -> None:
         sock.bind(("127.0.0.1", 0))
         sock.listen(1)
         port = sock.getsockname()[1]
-        script = f"source {preflight_sh!s}\npreflight_ports {port}\n"
+        script = f"source {shlex.quote(str(preflight_sh))}\npreflight_ports {port}\n"
 
         hard = subprocess.run(["bash", "-c", script], capture_output=True, text=True)
         assert hard.returncode != 0, hard.stdout + hard.stderr

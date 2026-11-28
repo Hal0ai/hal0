@@ -240,7 +240,7 @@ def test_render_llama_shim_matches_equivalent_plan(monkeypatch) -> None:
     equivalent RuntimeLaunchPlan and rendering it — proving the legacy llama
     path is now just the spec path with a thin adapter."""
     monkeypatch.setenv("HAL0_MODEL_STORE", _MODEL_STORE_MOUNT)  # pin the default
-    profile = ProfileConfig(flags="-fa on --no-mmap", speculation="off")
+    profile = ProfileConfig(flags="-fa on -lm none", speculation="off")
     flags = profile.flags
 
     shim_unit = _render_llama(

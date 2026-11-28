@@ -207,7 +207,7 @@ function ComponentVersionLine({ component }) {
           style={{ marginLeft: 8 }}
         >{jobBusy ? 'Retrying…' : 'Retry'}</button>
       )}
-      {retryable && (component.error || component.remedy) && (
+      {(retryable || component.status === 'broken') && (component.error || component.remedy) && (
         <div className="mono" style={{ fontSize: 11, color: 'var(--fg-3)', marginTop: 2 }}>
           {component.error && <div style={{ color: 'var(--err)' }}>{component.error}</div>}
           {component.remedy && <div>{component.remedy}</div>}
@@ -439,7 +439,7 @@ function RunnerImagesCard({ component }) {
             {detail.map(d => <div key={d.key}>{d.key} — {d.image}</div>)}
           </div>
         )}
-        {retryable && (component.error || component.remedy) && (
+        {(retryable || component.status === 'broken') && (component.error || component.remedy) && (
           <div className="mono" style={{ fontSize: 11, marginTop: 4 }}>
             {component.error && <div style={{ color: 'var(--err)' }}>{component.error}</div>}
             {component.remedy && <div style={{ color: 'var(--fg-3)' }}>{component.remedy}</div>}

@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import os
 import re
+import shlex
 import stat
 import subprocess
 from pathlib import Path
@@ -93,7 +94,7 @@ def _ns_level_file(tmp_path: Path, value: str = "1", name: str = "ns_level") -> 
 def _run_gate(tmp_path: Path, env_overrides: dict[str, str]) -> tuple[int, str]:
     script = (
         "set -uo pipefail\n"
-        f"source {_PREFLIGHT!s}\n"
+        f"source {shlex.quote(str(_PREFLIGHT))}\n"
         "rc=0\n"
         "_container_runtime_gate podman || rc=$?\n"
         "exit $rc\n"
@@ -204,7 +205,9 @@ def test_remediation_honours_configured_smoke_image(tmp_path: Path) -> None:
 )
 def test_signature_matcher_recognizes_known_shapes(blob: str) -> None:
     script = (
-        f"set -uo pipefail\nsource {_PREFLIGHT!s}\n_is_apparmor_profile_load_failure {blob!r}\n"
+        "set -uo pipefail\n"
+        f"source {shlex.quote(str(_PREFLIGHT))}\n"
+        f"_is_apparmor_profile_load_failure {blob!r}\n"
     )
     proc = subprocess.run(["bash", "-c", script], capture_output=True, text=True)
     assert proc.returncode == 0, proc.stderr
@@ -234,7 +237,9 @@ def test_1563_predicates_agree_between_shell_and_python(blob: str, expected: boo
     from hal0.agents import containers_apparmor as ca
 
     script = (
-        f"set -uo pipefail\nsource {_PREFLIGHT!s}\n_is_apparmor_profile_load_failure {blob!r}\n"
+        "set -uo pipefail\n"
+        f"source {shlex.quote(str(_PREFLIGHT))}\n"
+        f"_is_apparmor_profile_load_failure {blob!r}\n"
     )
     shell = subprocess.run(["bash", "-c", script], capture_output=True, text=True).returncode == 0
     py = ca._is_apparmor_failure(
@@ -247,7 +252,7 @@ def test_1563_predicates_agree_between_shell_and_python(blob: str, expected: boo
 def test_signature_matcher_rejects_unrelated_output() -> None:
     script = (
         "set -uo pipefail\n"
-        f"source {_PREFLIGHT!s}\n"
+        f"source {shlex.quote(str(_PREFLIGHT))}\n"
         "_is_apparmor_profile_load_failure 'Error: unable to pull image: not found'\n"
     )
     proc = subprocess.run(["bash", "-c", script], capture_output=True, text=True)
@@ -667,7 +672,7 @@ def test_unparseable_ns_level_skips_the_3234_branch(tmp_path: Path, value: str) 
 
 def _matcher_rc(tmp_path: Path, blob: str, ns_value: str | None = "1", rt: str = "podman") -> int:
     script = (
-        f"set -uo pipefail\nsource {_PREFLIGHT!s}\n"
+        f"set -uo pipefail\nsource {shlex.quote(str(_PREFLIGHT))}\n"
         f"_is_unconfined_profile_network_denial {rt!r} {blob!r}\n"
     )
     ns = (
@@ -727,7 +732,9 @@ def test_docker_socket_denial_never_runs_the_guest_profile_remediation(tmp_path:
     _write_exec(tmp_path / "docker", f"echo {_SOCKET_DENIED_STDERR!r} >&2\nexit 126")
     aa = tmp_path / "apparmor.d"
     _seed_profiles(aa)
-    script = f"set -uo pipefail\nsource {_PREFLIGHT!s}\n_container_runtime_gate docker\n"
+    script = (
+        f"set -uo pipefail\nsource {shlex.quote(str(_PREFLIGHT))}\n_container_runtime_gate docker\n"
+    )
     env = {
         **os.environ,
         "PATH": f"{tmp_path}:{os.environ.get('PATH', '')}",

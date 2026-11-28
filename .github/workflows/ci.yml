@@ -21,10 +21,9 @@ permissions:
 
 jobs:
   # Fast lane for pull requests: decide which heavy jobs the diff actually
-  # needs. A docs-only or ui-only PR skips the two ~8-minute Python matrix
-  # jobs; their required status checks still report (a job skipped by its
-  # own `if:` counts as passing for branch protection, a workflow skipped by
-  # a `paths:` filter does not). The filter errs toward running: anything
+  # needs. A docs-only or ui-only PR skips the Python shards; the required
+  # status checks still report through the `python` summary job (a workflow
+  # skipped by a `paths:` filter would not report at all). The filter errs toward running: anything
   # outside `ui/`, `docs/` and prose files runs the full suite. Pushes to
   # main never skip (the nightly gate reads that run).
   changes:
@@ -77,49 +76,44 @@ jobs:
       - name: Sunset-shim + scar-ratchet guardrail
         run: python scripts/check_sunset.py
 
-  python:
+  # The Python suite (~31k tests) split across 4 runners per interpreter.
+  # One runner took 17-18 minutes for a PR, which was the whole critical path
+  # to a mergeable Python change; four shards bring that to about 6. Each shard
+  # runs `--shard I/4` (tests/conftest.py): whole test files are dealt out by
+  # test count, so every file runs in exactly one shard and module-scoped
+  # fixtures stay together. The required status checks are
+  # reported by the `python` summary job below, not by these shards.
+  python-shard:
+    name: py ${{ matrix.python-version }} shard ${{ matrix.shard }}/4
     runs-on: ubuntu-latest
     needs: [changes]
-    # On a PR whose diff cannot touch the package (see `changes`) the steps
-    # below are skipped; see the note on `if:`.
     # `!cancelled()` lets the job run even though `changes` itself is skipped
-    # on pushes to main. The job itself always runs: branch protection
-    # requires the matrix contexts "python (3.12)" and "python (3.14)", and a
-    # skipped matrix job never creates them (#3148), so a ui-only PR could
-    # never merge. Instead every STEP is gated on `needs_python` below and the
-    # two contexts report success in seconds.
-    if: ${{ !cancelled() }}
-    env:
-      needs_python: ${{ github.event_name == 'push' || needs.changes.outputs.python == 'true' }}
-    # The ~13k-test suite runs across 4 xdist workers (#2341); serially it had
-    # grown to ~30 min quiet and 38-45+ min under --cov on 3.12, which hit
-    # this cap. The bound exists because an infra stall (a 41-minute apt-get
-    # hang on #1915, see #1927) would otherwise run to GitHub's 6-hour
-    # default. 45 covers the parallel suite plus slow-runner margin.
-    timeout-minutes: 45
+    # on pushes to main. On a PR whose diff cannot touch the package (see
+    # `changes`) the shards are skipped and the summary job reports green.
+    if: ${{ !cancelled() && (github.event_name == 'push' || needs.changes.outputs.python == 'true') }}
+    # A shard runs in about 5 minutes. The bound exists because an infra stall
+    # (a 41-minute apt-get hang on #1915, see #1927) would otherwise run to
+    # GitHub's 6-hour default.
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
-        # PRs test 3.12 (the floor) and 3.14 (what Ubuntu 26.04 installs run);
-        # both are blocking, matching the required "python (3.12)" and
-        # "python (3.14)" status checks. Pushes to main also run 3.13 so the
-        # full supported range still gates the protected branch.
+        # PRs test 3.12 (the floor) and 3.14 (what Ubuntu 26.04 installs run).
+        # Pushes to main also run 3.13 so the full supported range still gates
+        # the protected branch.
         python-version: ${{ (github.event_name == 'pull_request' && fromJSON('["3.12","3.14"]')) || fromJSON('["3.12","3.13","3.14"]') }}
+        shard: [1, 2, 3, 4]
     steps:
-      - if: ${{ env.needs_python == 'true' }}
-        uses: actions/checkout@v7
-      - if: ${{ env.needs_python == 'true' }}
-        uses: actions/setup-python@v7
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python-version }}
           cache: pip
-      - if: ${{ env.needs_python == 'true' }}
-        name: Install uv
+      - name: Install uv
         # Via pip on the setup-python interpreter — no third-party action tag
         # to chase (astral-sh/setup-uv@v8 didn't resolve and bricked the job).
         run: pip install uv
-      - if: ${{ env.needs_python == 'true' }}
-        name: Install
+      - name: Install
         # --locked: fail if uv.lock has drifted from pyproject.toml, so CI
         # installs the exact pinned versions — the same ones a local
         # `uv sync` venv gets. (--frozen does NOT check: it installs from
@@ -129,21 +123,51 @@ jobs:
         # --python pins the venv to the matrix interpreter setup-python laid
         # down, so uv can't silently pick a different system python.
         run: uv sync --locked --extra dev --python "$(which python)"
-      - if: ${{ env.needs_python == 'true' }}
+      # Lint and format are whole-tree checks: one shard per interpreter is enough.
+      - if: ${{ matrix.shard == 1 }}
         name: Lint
         run: uv run ruff check src tests
-      - if: ${{ env.needs_python == 'true' }}
+      - if: ${{ matrix.shard == 1 }}
         name: Format check
         run: uv run ruff format --check src tests
-      - if: ${{ env.needs_python == 'true' }}
-        name: Test
-        # -n 4: pytest-xdist workers (ubuntu-latest has 4 vCPUs); pytest-cov
-        # combines the per-worker coverage data (#2341).
-        # Coverage (+ verbose) only on main pushes — it's a report, not a gate,
-        # so PRs skip the instrumentation overhead and run a quiet, faster suite.
-        # PRs also deselect the `podman` and `network` markers (pyproject.toml
-        # [tool.pytest.ini_options]); main pushes (which gate the nightly) run them.
-        run: uv run pytest tests/ -n 4 ${{ github.event_name == 'push' && '-v --cov=hal0 --cov-report=term-missing' || '-q -m "not podman and not network"' }}
+      - name: Test
+        # -n 4: pytest-xdist workers (ubuntu-latest has 4 vCPUs, #2341).
+        # PRs deselect the `podman` and `network` markers (pyproject.toml
+        # [tool.pytest.ini_options]); main pushes (which gate the nightly) run
+        # them. No coverage: the report was printed on every main push, slowed
+        # 3.12/3.13 several-fold under the settrace tracer, and nothing read it.
+        run: uv run pytest tests/ -n 4 -q --durations=30 --shard ${{ matrix.shard }}/4 ${{ github.event_name == 'pull_request' && '-m "not podman and not network"' || '' }}
+
+  # The checks branch protection requires: "python (3.12)" and "python (3.14)"
+  # (plus "python (3.13)" on main). Green when every shard passed, or when the
+  # shards were skipped for a PR that cannot touch the package; red when any
+  # shard failed, timed out or was cancelled, or when the diff classifier
+  # itself failed. A matrix job skipped by its own `if:` never creates its
+  # contexts (#3148), so this job always runs.
+  python:
+    runs-on: ubuntu-latest
+    needs: [changes, python-shard]
+    if: always()
+    timeout-minutes: 5
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ${{ (github.event_name == 'pull_request' && fromJSON('["3.12","3.14"]')) || fromJSON('["3.12","3.13","3.14"]') }}
+    steps:
+      - name: Summarise the shards
+        env:
+          CHANGES: ${{ needs.changes.result }}
+          SHARDS: ${{ needs.python-shard.result }}
+        run: |
+          echo "changes: ${CHANGES}, shards: ${SHARDS}"
+          case "${CHANGES}" in
+            success|skipped) ;;
+            *) echo "::error::diff classifier result is '${CHANGES}'"; exit 1 ;;
+          esac
+          case "${SHARDS}" in
+            success|skipped) exit 0 ;;
+            *) echo "::error::python suite failed: shards result is '${SHARDS}'"; exit 1 ;;
+          esac
 
   ui:
     runs-on: ubuntu-latest

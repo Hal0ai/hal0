@@ -34,95 +34,22 @@ import cycle (#1523). It is re-exported here unchanged, so every existing
 
 from __future__ import annotations
 
-from typing import Any
-
 from hal0.redaction import (
     LOG_SECRET_RE,
     MASK,
     SENSITIVE_KEY_RE,
     is_sensitive_key,
-    is_token_count_key,
+    is_token_count,
+    redact_config,
     redact_log_line,
     redact_text_tree,
+    redact_value,
 )
 
 # The key-name pattern lives in hal0.redaction now (so hal0.bridge can use it without importing
 # this package); the old name stays for the mirrors that cite it (installer/lib/failure-report.sh,
 # doctor_bundle).
 _SENSITIVE_RE = SENSITIVE_KEY_RE
-
-# ``MASK`` is defined once in hal0.redaction and re-exported above — both
-# strategies must mask to the SAME sentinel or a caller grepping for it
-# would find only half the redactions.
-
-
-def redact_value(value: Any) -> dict[str, Any]:
-    """Project a sensitive *value* into the masked ``{value, set}`` shape.
-
-    ``set`` is True for any non-empty / non-None value (including 0 and
-    False — those are still "configured"). Empty string and None are
-    treated as "unset" so the UI can render the slot as empty.
-    """
-    is_set = value is not None and value != ""
-    return {"value": MASK, "set": bool(is_set)}
-
-
-# ── Line-level secret redaction (moved from hal0.mcp.admin) ─────────────────
-#
-# redact_config() above (with is_sensitive_key, which lives in hal0.redaction
-# and is re-exported here) scrubs STRUCTURED dict/list trees by key NAME. Free-text log lines (journald output) have no key
-# shape to inspect, so this second helper scans the line's TEXT for
-# known secret-bearing shapes instead. It originated in hal0.mcp.admin
-# (security review MED-1, logs_tail) and lives here — not there — so
-# hal0.api.routes.logs (a REST route mounted on every install) can reuse
-# it without importing hal0.mcp.admin, which hard-fails at import time
-# when the optional ``mcp`` SDK isn't installed (see that module's
-# "Fail-fast import" docstring section); pulling that dependency into
-# the core /api/logs route would break every install that hasn't opted
-# into the MCP admin server. hal0.mcp.admin now imports
-# ``redact_log_line`` from here so logs_tail and /api/logs share one
-# behaviour (api-logs-redact, surfaced by the SEC-mcp-clientid lane).
-#
-def is_token_count(key: str, value: Any) -> bool:
-    """True for a token-count setting: a ``*tokens`` key holding a number or nothing.
-
-    A count such as ``max_request_tokens = 4096`` is not a secret, and masking
-    it left the dashboard showing a blank field for a configured limit (#3805).
-    A string, list or mapping under the same name is still masked.
-    """
-    return is_token_count_key(key) and (
-        value is None or (isinstance(value, (int, float)) and not isinstance(value, bool))
-    )
-
-
-def redact_config(config: Any) -> Any:
-    """Recursively scrub sensitive-keyed values from a config tree.
-
-    - ``dict``: walk keys. For a sensitive key, replace its value with
-      :func:`redact_value`'s ``{value, set}`` projection, unless it is a
-      token count (:func:`is_token_count`). For a nested
-      dict or list value, recurse. Otherwise pass through.
-    - ``list``: recurse element-by-element (so a list of dicts is fully
-      scrubbed). Lists of scalars pass through as-is — only keyed
-      containers can hide a sensitive name.
-    - scalar: return as-is.
-
-    Pure — does not mutate the input. Returns a new dict / list at each
-    level it walks; scalars are shared.
-    """
-    if isinstance(config, dict):
-        out: dict[str, Any] = {}
-        for k, v in config.items():
-            if is_sensitive_key(k) and not is_token_count(k, v):
-                out[k] = redact_value(v)
-            elif isinstance(v, (dict, list)):
-                out[k] = redact_config(v)
-            else:
-                out[k] = v
-        return out
-    if isinstance(config, list):
-        return [redact_config(item) for item in config]
-    return config
 
 
 __all__ = [

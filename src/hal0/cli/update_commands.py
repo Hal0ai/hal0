@@ -729,6 +729,25 @@ def _restart_drifted_slots() -> None:
             console.print(f"[yellow]could not restart {f.get('slot')}:[/yellow] {f.get('error')}")
 
 
+def _channel_saved_message(previous: str | None, new: str, *, check: bool) -> str:
+    """What ``--channel`` did, in words that cannot be read as a dry run (#3970).
+
+    ``--channel`` always saves, including alongside ``--check``, which is the
+    one way to switch channel without applying an update. The message names
+    the old and the new channel and says it was saved, so nobody mistakes the
+    pair for a preview.
+    """
+    if previous is None:
+        change = f"update channel set to [bold]{new}[/bold]"
+    elif previous == new:
+        change = f"update channel is already [bold]{new}[/bold]"
+    else:
+        change = f"update channel changed from [bold]{previous}[/bold] to [bold]{new}[/bold]"
+    saved = "nothing to save" if previous == new else "saved; this box now follows it"
+    tail = " --check only stops the update from being applied." if check and previous != new else ""
+    return f"[green]{change}[/green] ({saved}).{tail}"
+
+
 def _running_api_version() -> str | None:
     """Version the live hal0-api process reports on ``/api/health``, or None.
 
@@ -745,7 +764,9 @@ def _running_api_version() -> str | None:
     except Exception:
         return None
     if isinstance(body, dict):
-        version = body.get("version")
+        # ``release`` carries the nightly suffix; ``version`` alone cannot tell
+        # a nightly from the stable release of the same number (#3969).
+        version = body.get("release") or body.get("version")
         if version:
             return str(version)
     return None
@@ -766,12 +787,17 @@ def _render_rollback_result(body: dict) -> None:
     channel = body.get("channel", "stable")
     rolled_back_to = str(body.get("rolled_back_to") or "")
     reverted = Path(rolled_back_to).name.removeprefix("hal0-") if rolled_back_to else ""
+    # The headline names what the reverted tree is, from its own release name.
+    # The configured channel is a different fact and gets its own line: after
+    # a rollback from a nightly to the stable release of the same number it
+    # still says "nightly", which used to label a stable tree as one (#3969).
+    kind = "nightly build" if "-nightly." in reverted else "release"
     headline = (
-        f"[green]rolled back[/green] to [bold]{reverted}[/bold] ({channel})"
+        f"[green]rolled back[/green] to [bold]{reverted}[/bold] ({kind})"
         if reverted
-        else f"[green]rolled back[/green] ({channel})"
+        else "[green]rolled back[/green]"
     )
-    lines = [headline]
+    lines = [headline, f"[dim]update channel: {channel} (unchanged by a rollback)[/dim]"]
     previous_now = body.get("previous_now")
     if previous_now:
         lines.append(
@@ -829,12 +855,18 @@ def update(
     channel: UpdateChannel | None = typer.Option(
         None,
         "--channel",
-        help="Persist the update channel (stable, preview, or nightly), then check.",
+        help=(
+            "Switch this box to an update channel (stable, preview, or nightly) and "
+            "save it, then check that channel. The switch is saved even with --check."
+        ),
     ),
     check: bool = typer.Option(
         False,
         "--check",
-        help="Only check for updates; do not apply.",
+        help=(
+            "Check for updates and stop before applying. Does not undo --channel: "
+            "the two together switch the channel without updating."
+        ),
     ),
     rollback: bool = typer.Option(
         False,
@@ -886,12 +918,21 @@ def update(
         raise typer.Exit(1)
 
     if channel is not None:
+        # Read the saved channel first so the message can say what changed.
+        # Fail-soft: an older daemon or a failed read just loses the "from".
+        previous: str | None = None
+        try:
+            current = api_get("/api/updates/channel")
+            if isinstance(current, dict) and current.get("channel"):
+                previous = str(current["channel"])
+        except CliApiError:
+            previous = None
         try:
             api_put("/api/updates/channel", json={"channel": channel.value})
         except CliApiError as exc:
             die(str(exc))
             return
-        console.print(f"[green]channel set to {channel.value}[/green]")
+        console.print(_channel_saved_message(previous, channel.value, check=check), soft_wrap=True)
 
     # Standalone action: bounce drifted slots on demand, then stop. Kept
     # separate from the check/apply flow so an operator can clear post-update
@@ -1132,6 +1173,7 @@ def update(
 _COMPONENT_PENDING = (
     "pending",
     "stale",
+    "broken",
     "ahead",
     "build_failed",
     "snapshot_failed",
@@ -1197,7 +1239,10 @@ def _print_component_table(rows: list[dict]) -> bool:
     all_ok = True
     for row in rows:
         status_txt = row.get("status", "?")
-        if status_txt in _COMPONENT_PENDING:
+        if status_txt == "broken":
+            all_ok = False
+            status_txt = "[red]broken[/red]"
+        elif status_txt in _COMPONENT_PENDING:
             all_ok = False
             status_txt = f"[yellow]{status_txt}[/yellow]"
         elif status_txt == "converged":
@@ -1239,9 +1284,29 @@ def _print_component_table(rows: list[dict]) -> bool:
             console.print(
                 f"[yellow]![/yellow] {row['id']}: {row.get('error') or ''} [dim]{shown}[/dim]"
             )
-        if command not in shown:
+        # A broken row (#4065) is the exception: its files are gone, the
+        # converge verb skips an absent component, and the row's remedy
+        # already names what reinstalls it.
+        if command not in shown and row.get("status") != "broken":
             console.print(f"[yellow]![/yellow] {row['id']}: not converged — run `{command}`")
     return all_ok
+
+
+def _unconverged_footer(rows: list[dict]) -> str:
+    """The exit-2 line under the component table.
+
+    The converge verbs do not repair a ``broken`` row (#4065: its files are
+    gone and each arm skips an absent component), so they are named only when
+    some other row is unconverged.
+    """
+    unconverged = [r.get("status") for r in rows if r.get("status") in _COMPONENT_PENDING]
+    if unconverged and all(s == "broken" for s in unconverged):
+        return "(exit 2 = a component's install is missing; see its row above for the repair)"
+    tail = "; a broken row names its own repair above" if "broken" in unconverged else ""
+    return (
+        "(exit 2 = components not converged — run `hal0 update` "
+        f"or `hal0 update component <id>`{tail})"
+    )
 
 
 @update_app.command("status")
@@ -1256,13 +1321,11 @@ def update_status_cmd() -> None:
         die(str(exc))
         return
     _print_check(body)
-    components_ok = _print_component_table(_component_rows())
+    rows = _component_rows()
+    components_ok = _print_component_table(rows)
     _print_hermes_gateway_notice()
     if not components_ok:
-        console.print(
-            "[dim](exit 2 = components not converged — run `hal0 update` "
-            "or `hal0 update component <id>`)[/dim]"
-        )
+        console.print(f"[dim]{_unconverged_footer(rows)}[/dim]")
         raise typer.Exit(2)
 
 

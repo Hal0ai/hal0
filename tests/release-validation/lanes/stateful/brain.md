@@ -171,3 +171,9 @@ values you changed.
 * Fabrication pair on a count: 'how many models do I have registered' vs the 'check' phrasing, against /api/models length; list_models returned the right answer both ways.
 * memory_add retain from the steward can be cancelled via DELETE .../operations/{id}; a child cancel makes the parent `cancelled` (#2699, known).
 * VRAM question: score every derived figure within 1% of the tool_result; 3 of 6 wrong on 20261127 (#2728, known).
+
+## Added in kit 22
+
+* Run the six-turn VRAM probe only after `hal0 memory ops list` shows zero pending/processing (contended: 134-204 s per turn; quiet: 7-20 s).
+* Score used and free VRAM as well as total (3 of 6 gave used 29.4-29.9 GB vs 30.98); add a mangled-digit check ('16,016 MB' for 86016 MB beside the right figure is a self-contradiction).
+* On a `hal0 chat --brain` timeout, record the ops-list queue state to tell the 120 s client timeout from a hang.

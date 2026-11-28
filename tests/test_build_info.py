@@ -13,7 +13,10 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
-from hal0.build_info import build_sha
+import pytest
+
+import hal0
+from hal0.build_info import build_sha, serving_release
 
 
 def test_finds_the_sha_of_this_checkout() -> None:
@@ -69,3 +72,56 @@ def test_result_is_cached_for_the_process_lifetime(monkeypatch) -> None:
     assert first == second
     assert calls["n"] <= 1
     build_sha.cache_clear()
+
+
+# serving_release — #3969. The release the process started from, nightly
+# suffix included, read once so an update or rollback that moves ``current``
+# under a running daemon does not change the answer.
+
+
+@pytest.fixture
+def release_root(tmp_path, monkeypatch):
+    """A throwaway install root whose ``current`` tree the test controls."""
+    root = tmp_path / "usr-lib" / "hal0"
+    (root / "current").mkdir(parents=True)
+    monkeypatch.setattr("hal0.updater.updater._usr_lib_root", lambda: root)
+    serving_release.cache_clear()
+    yield root
+    serving_release.cache_clear()
+
+
+def test_serving_release_reads_the_release_trees_version(release_root) -> None:
+    (release_root / "current" / "VERSION").write_text("1.8.1-nightly.20261127155122\n")
+    assert serving_release() == "1.8.1-nightly.20261127155122"
+
+
+def test_serving_release_keeps_its_first_answer_when_current_moves(release_root) -> None:
+    version = release_root / "current" / "VERSION"
+    version.write_text("1.8.1-nightly.20261127155122\n")
+    assert serving_release() == "1.8.1-nightly.20261127155122"
+    version.write_text("1.8.1\n")  # a rollback swapped the tree under the daemon
+    assert serving_release() == "1.8.1-nightly.20261127155122"
+
+
+def test_serving_release_falls_back_to_the_package_version(release_root) -> None:
+    assert not (release_root / "current" / "VERSION").exists()
+    assert serving_release() == hal0.__version__
+
+
+def test_api_startup_reads_the_serving_release_before_anything_can_move_it(
+    release_root, tmp_path, monkeypatch
+) -> None:
+    """The lifespan fills the cache. Without that, the first reader would be
+    the rollback route itself, after ``current`` had already moved."""
+    from fastapi.testclient import TestClient
+
+    from hal0.api import create_app
+
+    monkeypatch.setenv("HAL0_HOME", str(tmp_path / "home"))
+    (tmp_path / "home" / "etc" / "hal0").mkdir(parents=True)
+    version = release_root / "current" / "VERSION"
+    version.write_text("1.8.1-nightly.20261127155122\n")
+    with TestClient(create_app()):
+        assert serving_release.cache_info().currsize == 1
+        version.write_text("1.8.1\n")
+        assert serving_release() == "1.8.1-nightly.20261127155122"

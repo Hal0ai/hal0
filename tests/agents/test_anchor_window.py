@@ -9,6 +9,7 @@ evidence yet" case, and the drift guard tying hal0's copy of Hermes'
 
 from __future__ import annotations
 
+import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -483,7 +484,7 @@ class TestReadHermesMinimumContext:
         (pkg / "model_metadata.py").write_text("MINIMUM_CONTEXT_LENGTH = 70000\n", encoding="utf-8")
         shim = tmp_path / "python-shim"
         shim.write_text(
-            f'#!/bin/sh\nexec {sys.executable} "$@"\n',
+            f'#!/bin/sh\nexec {shlex.quote(sys.executable)} "$@"\n',
             encoding="utf-8",
         )
         shim.chmod(0o755)

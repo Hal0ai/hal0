@@ -547,6 +547,96 @@ def test_rollback_falls_back_to_health_for_running_version(
     assert "systemctl restart hal0-api" in result.output
 
 
+def test_rollback_between_nightly_and_same_numbered_stable_says_restart(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#3969: the daemon still serves the nightly; the reverted tree is the
+    stable release of the same number. The banner must not say "already
+    serving"."""
+    body = dict(
+        _ROLLBACK_BODY,
+        rolled_back_to="/usr/lib/hal0/hal0-1.8.1",
+        previous_now="/usr/lib/hal0/hal0-1.8.1-nightly.20261127155122",
+        running_version="1.8.1-nightly.20261127155122",
+        restart_required=True,
+    )
+    monkeypatch.setattr(uc, "_api_unreachable", lambda url: False)
+    monkeypatch.setattr(uc, "_interactive", lambda: False)
+    monkeypatch.setattr(uc, "api_post", lambda path, **k: body)
+    result = runner.invoke(app, ["update", "--rollback"])
+    assert result.exit_code == 0, result.output
+    assert "already serving" not in result.output
+    assert "restart required" in result.output
+    assert "1.8.1-nightly.20261127155122" in result.output
+
+
+def test_rollback_headline_names_the_reverted_tree_not_the_channel(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#3969: rolled back to a stable tree while the channel is still nightly.
+    The headline describes the tree; the channel is a separate line."""
+    body = dict(
+        _ROLLBACK_BODY,
+        channel="nightly",
+        rolled_back_to="/usr/lib/hal0/hal0-1.8.1",
+        previous_now="/usr/lib/hal0/hal0-1.8.1-nightly.20261127155122",
+        running_version="1.8.1-nightly.20261127155122",
+        restart_required=True,
+    )
+    monkeypatch.setattr(uc, "_api_unreachable", lambda url: False)
+    monkeypatch.setattr(uc, "_interactive", lambda: False)
+    monkeypatch.setattr(uc, "api_post", lambda path, **k: body)
+    out = " ".join(runner.invoke(app, ["update", "--rollback"]).output.split())
+    assert "rolled back to 1.8.1 (release)" in out
+    assert "1.8.1 (nightly)" not in out
+    assert "update channel: nightly" in out
+
+    body = dict(body, rolled_back_to="/usr/lib/hal0/hal0-1.8.1-nightly.20261127155122")
+    out = " ".join(runner.invoke(app, ["update", "--rollback"]).output.split())
+    assert "rolled back to 1.8.1-nightly.20261127155122 (nightly build)" in out
+
+
+def test_rollback_health_fallback_prefers_the_full_release(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A daemon that sends no running_version but reports ``release`` on
+    /api/health is compared by release, not by the bare package version."""
+    body = {
+        "rolled_back": True,
+        "channel": "stable",
+        "rolled_back_to": "/usr/lib/hal0/hal0-1.8.1",
+        "previous_now": "/usr/lib/hal0/hal0-1.8.1-nightly.20261127155122",
+        "schema_warning": None,
+    }
+    health = {"version": "1.8.1", "release": "1.8.1-nightly.20261127155122"}
+    monkeypatch.setattr(uc, "_api_unreachable", lambda url: False)
+    monkeypatch.setattr(uc, "_interactive", lambda: False)
+    monkeypatch.setattr(uc, "api_post", lambda path, **k: body)
+    monkeypatch.setattr(uc, "api_get", lambda path, **k: health)
+    result = runner.invoke(app, ["update", "--rollback"])
+    assert result.exit_code == 0, result.output
+    assert "restart required" in result.output
+
+
+def test_version_flag_appends_the_installed_release(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The line still starts ``hal0 <package version>``; a nightly adds its release."""
+    import hal0
+
+    nightly = f"{hal0.__version__}-nightly.20261127155122"
+    monkeypatch.setattr("hal0.updater.updater.installed_version", lambda: nightly)
+    result = runner.invoke(app, ["--version"])
+    assert result.exit_code == 0, result.output
+    assert result.output.strip() == f"hal0 {hal0.__version__} (release {nightly})"
+
+
+def test_version_flag_is_unchanged_on_a_stable_release(monkeypatch: pytest.MonkeyPatch) -> None:
+    import hal0
+
+    monkeypatch.setattr("hal0.updater.updater.installed_version", lambda: hal0.__version__)
+    result = runner.invoke(app, ["--version"])
+    assert result.output.strip() == f"hal0 {hal0.__version__}"
+
+
 def test_rollback_restart_notice_suppressed_when_api_unreachable(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2044,3 +2134,112 @@ def test_update_exits_0_on_a_pi_advisory_row(monkeypatch: pytest.MonkeyPatch, st
     assert result.exit_code == 0, result.output
     assert f"pi note {status}" in result.output
     assert "update applied." in result.output
+
+
+# #3970: --channel always saves, including with --check. The message must say
+# what changed and that it was saved, so the pair is not read as a dry run.
+
+
+def _channel_run(
+    monkeypatch: pytest.MonkeyPatch, saved: str | None, args: list[str]
+) -> tuple[str, list[object]]:
+    puts: list[object] = []
+    monkeypatch.setattr(uc, "_api_unreachable", lambda url: False)
+    monkeypatch.setattr(uc, "_interactive", lambda: False)
+    monkeypatch.setattr(uc, "api_put", lambda path, **k: puts.append(k.get("json")) or {})
+
+    def fake_get(path: str, **kwargs: object) -> dict:
+        if path == "/api/updates/channel":
+            if saved is None:
+                raise uc.CliApiError("older daemon")
+            return {"channel": saved}
+        return {
+            "current": "1.8.1",
+            "latest": "1.8.1",
+            "channel": args[args.index("--channel") + 1],
+            "update_available": False,
+            "manifest": {},
+        }
+
+    monkeypatch.setattr(uc, "api_get", fake_get)
+    result = runner.invoke(app, ["update", *args])
+    assert result.exit_code == 0, result.output
+    return " ".join(result.output.split()), puts
+
+
+def test_channel_with_check_saves_and_says_so(monkeypatch: pytest.MonkeyPatch) -> None:
+    out, puts = _channel_run(monkeypatch, "stable", ["--channel", "nightly", "--check"])
+    assert puts == [{"channel": "nightly"}]
+    assert "update channel changed from stable to nightly" in out
+    assert "saved" in out
+    assert "--check only stops the update from being applied" in out
+
+
+def test_channel_without_check_names_old_and_new(monkeypatch: pytest.MonkeyPatch) -> None:
+    out, puts = _channel_run(monkeypatch, "nightly", ["--channel", "stable"])
+    assert puts == [{"channel": "stable"}]
+    assert "update channel changed from nightly to stable" in out
+    assert "--check only stops" not in out
+
+
+def test_channel_unchanged_says_already(monkeypatch: pytest.MonkeyPatch) -> None:
+    out, _ = _channel_run(monkeypatch, "stable", ["--channel", "stable", "--check"])
+    assert "update channel is already stable" in out
+    assert "nothing to save" in out
+
+
+def test_channel_message_survives_an_unreadable_saved_channel(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    out, puts = _channel_run(monkeypatch, None, ["--channel", "nightly", "--check"])
+    assert puts == [{"channel": "nightly"}]
+    assert "update channel set to nightly" in out
+
+
+def test_help_does_not_read_as_a_dry_run() -> None:
+    # Read the option definitions, not the rendered help: the rendering wraps
+    # and colours the text differently from one terminal to the next.
+    params = inspect.signature(uc.update).parameters
+    assert "saved even with --check" in params["channel"].default.help
+    assert "Does not undo --channel" in params["check"].default.help
+
+
+def test_component_table_counts_a_broken_row_and_skips_the_converge_hint() -> None:
+    """A broken component (#4065) fails the status check like a pending one,
+    and prints its own repair, not the converge verb that would skip it."""
+    printed: list[str] = []
+    import hal0.cli.update_commands as m
+
+    orig = m.console.print
+    try:
+        m.console.print = lambda *a, **k: printed.append(str(a[0]) if a else "")  # type: ignore[method-assign]
+        ok = m._print_component_table(
+            [
+                _component_row(
+                    id="hindsight",
+                    status="broken",
+                    installed=None,
+                    error="no usable install was found, but its service is enabled and cannot start",
+                    remedy="re-run the installer (`sudo bash install.sh`) to reinstall it",
+                )
+            ]
+        )
+    finally:
+        m.console.print = orig  # type: ignore[method-assign]
+    assert ok is False
+    text = "\n".join(printed)
+    assert "install.sh" in text
+    assert "hal0 update component hindsight" not in text
+
+
+def test_status_footer_names_the_converge_verbs_only_when_they_help() -> None:
+    import hal0.cli.update_commands as m
+
+    broken = _component_row(id="hindsight", status="broken")
+    pending = _component_row(id="hermes", status="pending")
+    only_broken = m._unconverged_footer([broken])
+    assert "hal0 update component" not in only_broken and "repair" in only_broken
+    mixed = m._unconverged_footer([broken, pending])
+    assert "hal0 update component <id>" in mixed and "broken row" in mixed
+    plain = m._unconverged_footer([pending])
+    assert "hal0 update component <id>" in plain and "broken" not in plain

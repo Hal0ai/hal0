@@ -1862,10 +1862,11 @@ async def _is_npu_trio_request(
       3. The :class:`NpuTrioRouter` itself is attached on ``app.state``
          (lifespan didn't fail to construct it).
 
-    Returning ``False`` means we fall through to the regular dispatcher
-    path — which, in the NPU-not-enabled case, is exactly the right
-    fallback: dispatch routes to a GPU/CPU embed/stt slot if one exists,
-    else 404s.
+    Returning ``False`` means the trio does not take the request. For a
+    model that is not the NPU slot's, the regular dispatcher then routes it.
+    For one that names the NPU embed slot, ``/v1/embeddings`` refuses it
+    (:func:`_refuse_npu_embed_substitute`, #4001) rather than let another
+    embed slot answer with a different model.
 
     Note: we deliberately DON'T check whether the FLM chat is currently
     loaded here. That probe lives inside the trio router. When the
@@ -1922,6 +1923,53 @@ def _match_npu_trio_cfg(
         if requested in (default, slot_name, alias) and (default or slot_name):
             return cfg
     return None
+
+
+async def _refuse_npu_embed_substitute(request: Request, body: dict[str, Any]) -> None:
+    """Raise the no-route envelope when ``body`` names the NPU embed slot.
+
+    Called only after the trio declined the request, so reaching here with a
+    match means the NPU embed path cannot answer. Usually the role is off (no
+    anchor, or the anchor's ``[npu].embed`` off). The other case is the role
+    on with no trio router on ``app.state`` (its construction failed at
+    start-up); ``details.reason`` says which, so the message never claims the
+    role is off when it is on. The envelope is the dispatcher's own
+    ``dispatch.no_route`` (404), which is what such a request already got on a
+    box with no other embed slot.
+    """
+    slot_manager = getattr(request.app.state, "slot_manager", None)
+    raw_model = body.get("model") if body else None
+    if slot_manager is None or not isinstance(raw_model, str) or not raw_model.strip():
+        return
+    requested = raw_model.strip()
+    try:
+        configs = await slot_manager.iter_configs()
+    except Exception:
+        return
+    cfg = _match_npu_trio_cfg(configs, "embedding", requested)
+    if cfg is None:
+        return
+    from hal0.dispatcher.router import NoRouteFound
+    from hal0.slots.activation import npu_modality_active
+
+    slot_name = str(cfg.get("name", "")).strip()
+    served_by = f"the NPU embed role ({slot_name or 'flm-embed'})"
+    if npu_modality_active(configs, "embedding"):
+        reason = "npu_embed_router_unavailable"
+        why = (
+            "which is on but has no dispatch path in this hal0-api process; "
+            "restart hal0-api, or name another embedding model"
+        )
+    else:
+        reason = "npu_embed_role_off"
+        why = (
+            "which is off; turn the NPU embed role on and load the NPU chat slot, "
+            "or name another embedding model"
+        )
+    raise NoRouteFound(
+        f"model {requested!r} is served by {served_by}, {why}",
+        details={"model": requested, "slot": slot_name, "reason": reason},
+    )
 
 
 async def _npu_embed_tag(request: Request, body: dict[str, Any]) -> str:
@@ -2229,6 +2277,12 @@ async def embeddings(request: Request, dispatcher: DispatcherDep) -> Response:
         trio_response = await _dispatch_via_npu_trio(request, body=body, kind="embed")
         if trio_response is not None:
             return trio_response
+    # #4001: a request that names the NPU embed slot (its name, its model or
+    # the pre-canon alias) is for that model only. With the NPU embed role off
+    # the dispatcher would route by capability to another embed slot and send
+    # that slot's model in place of the one named: a 200 with vectors of
+    # another model and another length. Refuse instead.
+    await _refuse_npu_embed_substitute(request, body)
     return await _dispatch_and_forward(request, dispatcher, body=body)
 
 
