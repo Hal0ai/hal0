@@ -296,3 +296,102 @@ def test_voice_binds_existing_bytes_without_downloading(
     assert outcome == "bound"
     assert calls == []
     assert sm.updates == [("tts", {"model": {"default": "kokoro-v1"}})]
+
+
+# ── fix round 1 ─────────────────────────────────────────────────────────────
+
+
+class _UnreadableSlotManager(_FakeSlotManager):
+    async def get_config(self, slot: str) -> dict[str, Any]:
+        raise OSError("unreadable toml")
+
+
+class _StickyLessSlotManager(_FakeSlotManager):
+    """update_config 'succeeds' but the binding never lands."""
+
+    async def update_config(self, slot: str, updates: dict[str, Any]) -> None:
+        self.updates.append((slot, updates))
+
+
+def test_voice_unreadable_binding_binds_nothing_and_exits_1(
+    tmp_path: Path,
+    installer_root: Path,
+    store: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    calls = _stub_run_pull(monkeypatch)
+    sm = _UnreadableSlotManager()
+    monkeypatch.setattr("hal0.cli.setup_command._build_offline_deps", lambda: (sm, _FakeRegistry()))
+    assert main(["--slots-dir", str(tmp_path / "slots")]) == 1
+    captured = capsys.readouterr()
+    lines = [ln for ln in captured.err.splitlines() if ln.strip()]
+    assert len(lines) == 1 and "could not be read" in lines[0]
+    assert calls == [] and sm.updates == []
+    assert "ready" not in captured.out
+
+
+def test_voice_other_model_bound_exits_0_with_one_line(
+    tmp_path: Path,
+    installer_root: Path,
+    store: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    calls = _stub_run_pull(monkeypatch)
+    sm = _FakeSlotManager(bound="some-other-voice")
+    monkeypatch.setattr("hal0.cli.setup_command._build_offline_deps", lambda: (sm, _FakeRegistry()))
+    assert main(["--slots-dir", str(tmp_path / "slots")]) == 0
+    out = [ln for ln in capsys.readouterr().out.splitlines() if ln.strip()]
+    assert len(out) == 1 and "already uses another model" in out[0]
+    assert calls == [] and sm.updates == [] and sm.bound == "some-other-voice"
+
+
+def test_voice_activation_that_does_not_stick_exits_1(
+    tmp_path: Path,
+    installer_root: Path,
+    store: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _stub_run_pull(monkeypatch)
+    sm = _StickyLessSlotManager()
+    monkeypatch.setattr("hal0.cli.setup_command._build_offline_deps", lambda: (sm, _FakeRegistry()))
+    assert main(["--slots-dir", str(tmp_path / "slots")]) == 1
+    captured = capsys.readouterr()
+    lines = [ln for ln in captured.err.splitlines() if ln.strip()]
+    assert len(lines) == 1 and "kokoro-v1" in lines[0]
+    assert "ready" not in captured.out
+
+
+def test_ensure_cli_one_failing_name_does_not_stop_the_rest(
+    tmp_path: Path,
+    installer_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    real = static_seeds.ensure_seed_slot
+
+    def _flaky(name: str, **kwargs: Any):
+        if name == "img":
+            raise RuntimeError("lock\ntimed out")
+        return real(name, **kwargs)
+
+    monkeypatch.setattr(static_seeds, "ensure_seed_slot", _flaky)
+    slots = tmp_path / "slots"
+    rc = static_seeds._main(["--slots-dir", str(slots), "--ensure", "tts", "img", "rerank"])
+    assert rc == 1
+    captured = capsys.readouterr()
+    assert captured.out.splitlines() == ["tts created", "rerank created"]
+    assert "img failed: " in captured.err and "lock timed out" in captured.err
+    assert (slots / "tts.toml").is_file() and (slots / "rerank.toml").is_file()
+
+
+def test_ensure_cli_positional_names_with_ensure_exit_2(
+    tmp_path: Path, installer_root: Path
+) -> None:
+    slots = tmp_path / "slots"
+    with pytest.raises(SystemExit) as exc:
+        static_seeds._main(["--slots-dir", str(slots), "--ensure", "tts", "--", "img"])
+    assert exc.value.code == 2
+    assert not (slots / "tts.toml").exists() and not (slots / "img.toml").exists()

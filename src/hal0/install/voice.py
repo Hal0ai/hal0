@@ -18,6 +18,8 @@ Transcription is not part of voice (the NPU serves it).
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import io
 import logging
 import sys
 from pathlib import Path
@@ -76,8 +78,9 @@ async def provision_voice(
     """Make sure the ``tts`` slot exists, then pull and bind ``kokoro-v1``.
 
     Returns ``"present"`` (already bound and on disk, nothing done), ``"other"``
-    (another model is bound, left alone) or ``"bound"`` (landed now). Raises on
-    a failed pull; :func:`main` turns that into one stderr line and exit 1.
+    (another model is bound, left alone), ``"unreadable"`` (the slot's binding
+    could not be read, so nothing was bound) or ``"bound"`` (landed now and
+    read back). Raises on a failed pull or a binding that did not stick; :func:`main` turns that into one stderr line and exit 1.
     """
     from hal0.install.orchestrate import PullPlan, _activate_slot_model, run_pull_and_activate
     from hal0.install.static_seeds import ensure_seed_slot
@@ -85,7 +88,10 @@ async def provision_voice(
     from hal0.registry.pull import make_job
 
     # An explicit ask: a tombstone left by an earlier delete is cleared.
-    ensure_seed_slot(VOICE_SLOT_NAME, slots_dir=slots_dir)
+    # structlog prints its "seed applied" line to stdout; keep stdout to the
+    # one outcome line install.sh shows.
+    with contextlib.redirect_stdout(io.StringIO()):
+        ensure_seed_slot(VOICE_SLOT_NAME, slots_dir=slots_dir)
 
     curated = get_curated(VOICE_MODEL_ID)
     if curated is None:  # pragma: no cover — guarded by the curated catalogue tests
@@ -93,6 +99,8 @@ async def provision_voice(
 
     on_disk = already_pulled(VOICE_MODEL_ID, capability=VOICE_CAPABILITY) is not None
     bound = await _current_binding(slot_manager)
+    if bound is None:
+        return "unreadable"  # "no binding" is "", not None: never guess
     if bound and bound != VOICE_MODEL_ID:
         return "other"  # operator config wins, never replaced
     if bound == VOICE_MODEL_ID and on_disk:
@@ -102,6 +110,7 @@ async def provision_voice(
         registry.ensure(VOICE_MODEL_ID)
     if on_disk:
         await _activate_slot_model(slot_manager, VOICE_SLOT_NAME, VOICE_MODEL_ID)
+        await _verify_bound(slot_manager)
         return "bound"
 
     plan = PullPlan(
@@ -122,7 +131,19 @@ async def provision_voice(
             f"voice model pull ended in state {getattr(plan.job, 'state', '?')!r}: "
             f"{getattr(plan.job, 'error', None)}"
         )
+    await _verify_bound(slot_manager)
     return "bound"
+
+
+async def _verify_bound(slot_manager) -> None:
+    """Read the binding back: ``_activate_slot_model`` swallows write errors."""
+    now = await _current_binding(slot_manager)
+    if now != VOICE_MODEL_ID:
+        shown = "unreadable" if now is None else (now or "none")
+        raise RuntimeError(
+            f"the '{VOICE_SLOT_NAME}' slot binding is {shown!r} after activation, "
+            f"not {VOICE_MODEL_ID!r}"
+        )
 
 
 def _one_line(text: str) -> str:
@@ -141,7 +162,8 @@ def main(argv: list[str] | None = None) -> int:
     # ERROR, not WARNING: the pull driver warns "slot left model-less" on a failed
     # pull, which would put a second line beside the one reason printed below.
     logging.basicConfig(level=logging.ERROR, format="  %(message)s")
-    logging.getLogger("hal0.install.orchestrate").setLevel(logging.ERROR)
+    for noisy in ("hal0.install.orchestrate", __name__):
+        logging.getLogger(noisy).setLevel(logging.ERROR)
     try:
         parser = argparse.ArgumentParser(prog="python -m hal0.install.voice")
         parser.add_argument("--plan", action="store_true")
@@ -173,12 +195,19 @@ def main(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
         return 1
+    if outcome == "unreadable":
+        print(
+            f"  voice model not bound: the '{VOICE_SLOT_NAME}' slot's configuration "
+            "could not be read",
+            file=sys.stderr,
+        )
+        return 1
     if outcome == "present":
         print(
             f"  voice model {VOICE_MODEL_ID} already bound to the '{VOICE_SLOT_NAME}' slot — nothing to do"
         )
     elif outcome == "other":
-        print(f"  the '{VOICE_SLOT_NAME}' slot already has a model bound — left as it is")
+        print(f"  voice already uses another model on the '{VOICE_SLOT_NAME}' slot — left as it is")
     else:
         print(f"  voice model ready: {VOICE_MODEL_ID} bound to the '{VOICE_SLOT_NAME}' slot")
     return 0

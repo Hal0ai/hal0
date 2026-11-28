@@ -604,7 +604,8 @@ def _ensure_main(names: list[str], slots_dir: Path | None) -> int:
 
     Every name is checked against :data:`SEED_TEMPLATES` before any slot is
     created, so an unknown name exits 2 with nothing written. A name whose
-    template file is missing exits 1 (after the lines already printed).
+    name that fails prints ``NAME failed: reason`` on stderr and the exit
+    status is 1, but the other names are still processed.
     """
     import contextlib
     import sys
@@ -620,8 +621,9 @@ def _ensure_main(names: list[str], slots_dir: Path | None) -> int:
             # the one result line per name that install.sh reads.
             with contextlib.redirect_stdout(sys.stderr):
                 result = ensure_seed_slot(name, slots_dir=slots_dir)
-        except (FileNotFoundError, OSError) as exc:
-            print(f"{name}: cannot create the slot ({exc})", file=sys.stderr)
+        except Exception as exc:
+            reason = " ".join(f"{type(exc).__name__}: {exc}".split())
+            print(f"{name} failed: {reason}", file=sys.stderr)
             status = 1
             continue
         print(f"{name} {'created' if result is SeedResult.CREATED else 'exists'}")
@@ -665,6 +667,10 @@ def _main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     if args.ensure is not None:
+        if args.names:
+            parser.error(
+                "--ensure takes its names after the flag; positional names are not allowed"
+            )
         return _ensure_main(args.ensure, args.slots_dir)
     if not args.names:
         parser.error("the following arguments are required: names")
