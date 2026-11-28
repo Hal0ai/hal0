@@ -61,7 +61,9 @@ def _check_int(label: str, field: str, value: object, allowed=None) -> int:
 def _choice(label: str, field: str, value: object, allowed) -> str:
     text = _check_text(label, field, value)
     if text not in allowed:
-        raise ShapeError(f"{label}: field {field!r} must be one of {'|'.join(allowed)}, got {text!r}")
+        raise ShapeError(
+            f"{label}: field {field!r} must be one of {'|'.join(allowed)}, got {text!r}"
+        )
     return text
 
 

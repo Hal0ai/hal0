@@ -167,10 +167,7 @@ def run(args: argparse.Namespace) -> int:
         nonlocal stop_signal
         stop_signal = signum
 
-    old = {
-        s: signal.signal(s, _on_signal)
-        for s in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT)
-    }
+    old = {s: signal.signal(s, _on_signal) for s in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT)}
     transcript = _create_private(args.transcript, "wb")
     master = -1
     pid = -1

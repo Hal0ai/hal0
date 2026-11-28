@@ -29,7 +29,9 @@ def titles() -> list[str]:
     return re.findall(r'^ui_step\s+"([^"]+)"', INSTALL_SH.read_text(), re.MULTILINE)
 
 
-def assemble(tmp_path: Path, **files: str | None) -> tuple[subprocess.CompletedProcess, dict | None]:
+def assemble(
+    tmp_path: Path, **files: str | None
+) -> tuple[subprocess.CompletedProcess, dict | None]:
     out = tmp_path / "result.json"
     cmd = [
         sys.executable, "-I", str(RESULT), "assemble",

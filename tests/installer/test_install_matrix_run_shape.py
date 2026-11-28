@@ -562,7 +562,9 @@ def test_an_interrupt_during_pct_create_waits_for_it_and_then_cleans_up(host):
     calls = host.calls()
     created = [i for i, c in enumerate(calls) if "pct create" in c]
     destroyed = [i for i, c in enumerate(calls) if "pct destroy 172" in c]
-    assert created and destroyed and destroyed[0] > created[0], "the create ran to its end, then was cleaned up"
+    assert created and destroyed and destroyed[0] > created[0], (
+        "the create ran to its end, then was cleaned up"
+    )
     assert not (host.state / "present").exists()
     assert "LEFT BEHIND" not in err
 
@@ -637,7 +639,9 @@ def test_a_second_interrupt_during_cleanup_still_reports_left_behind(host):
 
 
 def test_failed_install_still_writes_result(host):
-    r = host.run("u2604-cpu-unattended", "--vmid", "172", "--out", str(host.out), FAKE_INSTALL_RC="1")
+    r = host.run(
+        "u2604-cpu-unattended", "--vmid", "172", "--out", str(host.out), FAKE_INSTALL_RC="1"
+    )
     assert r.returncode == 1
     result = json.loads((host.out / "result.json").read_text())
     assert result["install_exit_code"] == 1

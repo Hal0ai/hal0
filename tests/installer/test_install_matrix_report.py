@@ -61,14 +61,29 @@ def table_rows(out: str) -> list[str]:
 
 
 def test_table_has_one_row_per_result(tmp_path):
-    put(tmp_path, "20261128T100000Z-u2604-cpu-terminal", make_result("u2604-cpu-terminal", "2026-11-28T10:00:00Z"))
+    put(
+        tmp_path,
+        "20261128T100000Z-u2604-cpu-terminal",
+        make_result("u2604-cpu-terminal", "2026-11-28T10:00:00Z"),
+    )
     put(tmp_path, "20261128T110000Z-u2604-gpu", make_result("u2604-gpu", "2026-11-28T11:00:00Z"))
     proc = run(tmp_path)
     assert proc.returncode == 0, proc.stderr
     rows = table_rows(proc.stdout)
     assert len(rows) == 2
     gpu = next(r for r in rows if "u2604-gpu" in r)
-    for cell in ("stable 1.8.2", "5:21", "Install runners 200.5s", "12.3", "5.0", "20/2/0", "4.5", "1.25s qwen", "ok/fail", "7.5"):
+    for cell in (
+        "stable 1.8.2",
+        "5:21",
+        "Install runners 200.5s",
+        "12.3",
+        "5.0",
+        "20/2/0",
+        "4.5",
+        "1.25s qwen",
+        "ok/fail",
+        "7.5",
+    ):
         assert cell in gpu, cell
 
 
@@ -84,8 +99,16 @@ def test_rows_in_shape_order(tmp_path):
 
 
 def test_latest_per_shape_keeps_newest(tmp_path):
-    put(tmp_path, "z-old-name", make_result("u2604-gpu", "2026-11-28T12:00:00Z", hal0_version="1.9.0"))
-    put(tmp_path, "a-new-name", make_result("u2604-gpu", "2026-11-28T08:00:00Z", hal0_version="1.8.0"))
+    put(
+        tmp_path,
+        "z-old-name",
+        make_result("u2604-gpu", "2026-11-28T12:00:00Z", hal0_version="1.9.0"),
+    )
+    put(
+        tmp_path,
+        "a-new-name",
+        make_result("u2604-gpu", "2026-11-28T08:00:00Z", hal0_version="1.8.0"),
+    )
     both = run(tmp_path)
     assert len(table_rows(both.stdout)) == 2
     latest = run(tmp_path, "--latest-per-shape")
@@ -148,7 +171,11 @@ def test_null_exit_code_listed_as_failed(tmp_path):
 
 
 def test_exit_zero_with_failed_units_listed(tmp_path):
-    put(tmp_path, "units", make_result("u2604-gpu", "2026-11-28T11:00:00Z", failed_units=["hal0-x.service"]))
+    put(
+        tmp_path,
+        "units",
+        make_result("u2604-gpu", "2026-11-28T11:00:00Z", failed_units=["hal0-x.service"]),
+    )
     put(tmp_path, "clean", make_result("u2604-cpu-terminal", "2026-11-28T10:00:00Z"))
     failures = run(tmp_path).stdout.split("\n\n", 1)[1]
     assert "failed units" in failures

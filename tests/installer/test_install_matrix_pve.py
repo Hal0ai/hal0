@@ -69,7 +69,7 @@ class Fake:
             'has_n=0; for a in "$@"; do [[ "$a" == -n ]] && has_n=1; [[ "$a" == -- ]] && break; done\n'
             f'[[ "$has_n" == 1 ]] || cat > {shlex.quote(str(self.stdin_dump))}\n'
             'cmd="${*: -1}"\n'
-            f"exec bash {shlex.quote(str(self.dir / 'handler.sh'))} \"$cmd\"\n"
+            f'exec bash {shlex.quote(str(self.dir / "handler.sh"))} "$cmd"\n'
         )
         ssh.chmod(0o755)
         for name in ("pct", "pveam", "pvesm", "pvesh"):
@@ -88,13 +88,13 @@ class Fake:
             f = self.dir / f"out{i}"
             f.write_bytes(out if isinstance(out, bytes) else out.encode())
             if out == HANG:
-                lines.append(f"if [[ \"$cmd\" == *{shlex.quote(needle)}* ]]; then exec sleep 60; fi")
+                lines.append(f'if [[ "$cmd" == *{shlex.quote(needle)}* ]]; then exec sleep 60; fi')
                 continue
             lines.append(
-                f"if [[ \"$cmd\" == *{shlex.quote(needle)}* ]]; then "
+                f'if [[ "$cmd" == *{shlex.quote(needle)}* ]]; then '
                 f"cat {shlex.quote(str(f))}; exit {rc}; fi"
             )
-        lines.append("echo \"fake ssh: unexpected command: $cmd\" >&2; exit 97")
+        lines.append('echo "fake ssh: unexpected command: $cmd" >&2; exit 97')
         (self.dir / "handler.sh").write_text("\n".join(lines) + "\n")
 
     def calls(self) -> list[str]:
@@ -135,9 +135,7 @@ def _free(avail: int) -> str:
 def _guests(*rows: tuple[int, str]) -> str:
     import json
 
-    return json.dumps(
-        [{"vmid": v, "type": "lxc", "tags": t, "name": f"g{v}"} for v, t in rows]
-    )
+    return json.dumps([{"vmid": v, "type": "lxc", "tags": t, "name": f"g{v}"} for v, t in rows])
 
 
 def _owned_rules(fake: Fake, vmid: int, conf: str = TAGGED_CONF):
@@ -324,7 +322,9 @@ def test_pve_run_leaves_callers_stdin_alone(fake):
 
 # --- a create that may still be running ------------------------------------
 
-PGREP_CMD = "if pgrep -f '[p]ct create 172( |$)' >/dev/null 2>&1; then echo busy; else echo idle; fi"
+PGREP_CMD = (
+    "if pgrep -f '[p]ct create 172( |$)' >/dev/null 2>&1; then echo busy; else echo idle; fi"
+)
 
 
 def test_wait_create_done_asks_one_fixed_question(fake):
@@ -336,17 +336,13 @@ def test_wait_create_done_asks_one_fixed_question(fake):
 
 def test_wait_create_done_gives_up_after_its_bound(fake):
     fake.rule("pgrep -f", "busy\n")
-    r = fake.run(
-        "ct_wait_create_done 172 1; echo rc=$?", env={"HAL0_MATRIX_POLL_SLEEP": "0"}
-    )
+    r = fake.run("ct_wait_create_done 172 1; echo rc=$?", env={"HAL0_MATRIX_POLL_SLEEP": "0"})
     assert "rc=1" in r.stdout and "still running" in r.stderr
 
 
 def test_wait_create_done_does_not_take_a_dead_ssh_for_idle(fake):
     fake.rule("pgrep -f", "", 255)
-    r = fake.run(
-        "ct_wait_create_done 172 1; echo rc=$?", env={"HAL0_MATRIX_POLL_SLEEP": "0"}
-    )
+    r = fake.run("ct_wait_create_done 172 1; echo rc=$?", env={"HAL0_MATRIX_POLL_SLEEP": "0"})
     assert "rc=1" in r.stdout
 
 
@@ -508,14 +504,15 @@ def test_storage_from_env_is_checked_too(fake):
     fake.rule("pvesm status --content rootdir", STORAGE)
     ok = fake.run("pve_storage 60", env={"HAL0_MATRIX_STORAGE": "tank"})
     assert ok.stdout.strip() == "tank" and "storage tank: 467 GB free" in ok.stderr
-    low = fake.run(
-        "pve_storage 500; echo rc=$?", env={"HAL0_MATRIX_STORAGE": "tank"}
-    )
+    low = fake.run("pve_storage 500; echo rc=$?", env={"HAL0_MATRIX_STORAGE": "tank"})
     assert "rc=1" in low.stdout and low.stdout.strip().splitlines()[0] != "tank"
 
 
 def test_storage_from_env_must_be_listed_and_active(fake):
-    fake.rule("pvesm status --content rootdir", STORAGE.replace("tank      zfspool     active", "tank      zfspool   disabled"))
+    fake.rule(
+        "pvesm status --content rootdir",
+        STORAGE.replace("tank      zfspool     active", "tank      zfspool   disabled"),
+    )
     for name in ("nowhere", "tank"):
         r = fake.run("pve_storage 10; echo rc=$?", env={"HAL0_MATRIX_STORAGE": name})
         assert "rc=1" in r.stdout
@@ -525,8 +522,7 @@ def test_storage_from_env_must_be_listed_and_active(fake):
 def test_storage_with_unreadable_free_space_is_refused(fake, avail):
     fake.rule(
         "pvesm status --content rootdir",
-        "Name Type Status Total Used Available %\n"
-        f"local dir active 100000000 1 {avail} 1.00%\n",
+        f"Name Type Status Total Used Available %\nlocal dir active 100000000 1 {avail} 1.00%\n",
     )
     r = fake.run("pve_storage 10; echo rc=$?")
     assert "rc=1" in r.stdout
@@ -592,9 +588,7 @@ ACTIONS = [
     ("ct_destroy 172", "pct destroy 172 --force --purge"),
 ]
 GUARD_HOST = "pct config 172 | grep -q '^hostname: hal0-mx-172$'"
-GUARD_TAG = (
-    "pct config 172 | grep -Eq '^tags: ([^;,]*[;,])*hal0-matrix([;,].*)?$'"
-)
+GUARD_TAG = "pct config 172 | grep -Eq '^tags: ([^;,]*[;,])*hal0-matrix([;,].*)?$'"
 
 
 @pytest.mark.parametrize("call,marker", ACTIONS)
@@ -672,9 +666,24 @@ def _guard_verdict(fake, vmid, conf, nonce=""):
         ("hostname: hal0-mx-172\ntags: xhal0-matrix\n", 172, "", False),
         (NONCE_CONF.format(vmid=172), 172, NONCE, True),
         (TAGGED_CONF.format(vmid=172), 172, NONCE, False),
-        (TAGGED_CONF.format(vmid=172) + "description: hal0-matrix run ffffffffffffffff\n", 172, NONCE, False),
-        (TAGGED_CONF.format(vmid=172) + "description: hal0-matrix%20run%20" + NONCE + "\n", 172, NONCE, True),
-        (TAGGED_CONF.format(vmid=172) + "description: hal0-matrix run " + NONCE + "0\n", 172, NONCE, False),
+        (
+            TAGGED_CONF.format(vmid=172) + "description: hal0-matrix run ffffffffffffffff\n",
+            172,
+            NONCE,
+            False,
+        ),
+        (
+            TAGGED_CONF.format(vmid=172) + "description: hal0-matrix%20run%20" + NONCE + "\n",
+            172,
+            NONCE,
+            True,
+        ),
+        (
+            TAGGED_CONF.format(vmid=172) + "description: hal0-matrix run " + NONCE + "0\n",
+            172,
+            NONCE,
+            False,
+        ),
     ],
 )
 def test_the_guard_text_accepts_only_what_ct_owned_accepts(fake, conf, vmid, nonce, expected):
@@ -914,10 +923,7 @@ def test_create_writes_the_run_nonce_into_the_description(fake):
     fake.rule("pvesm status --content rootdir", STORAGE)
     fake.rule("test -e /etc/pve/lxc/172.conf", "absent\n")
     fake.rule("pct create", "")
-    r = fake.run(
-        "CT_NONCE=0123456789abcdef; "
-        "ct_create 172 local:vztmpl/x.tar.zst 0 4 8192 40"
-    )
+    r = fake.run("CT_NONCE=0123456789abcdef; ct_create 172 local:vztmpl/x.tar.zst 0 4 8192 40")
     assert r.returncode == 0, r.stderr
     call = [c for c in fake.calls() if "pct create" in c][-1]
     tokens = shlex.split(call)
@@ -928,8 +934,6 @@ def test_create_refuses_a_malformed_nonce(fake):
     r = fake.run("CT_NONCE='x; id'; ct_create 172 local:vztmpl/x.tar.zst 0 4 8192 40")
     assert r.returncode == 90
     assert fake.calls() == []
-
-
 
 
 def test_destroy_with_nonce_refuses_a_guest_with_another_description(fake):
@@ -1209,9 +1213,7 @@ def test_strict_create_success_continues(fake):
     fake.rule("pvesm status --content rootdir", STORAGE)
     fake.rule("test -e /etc/pve/lxc/172.conf", "absent\n")
     fake.rule("pct create", "")
-    r = fake.run(
-        f"ct_create 172 local:vztmpl/x.tar.zst 0 4 8192 40\necho {MARK}", strict=True
-    )
+    r = fake.run(f"ct_create 172 local:vztmpl/x.tar.zst 0 4 8192 40\necho {MARK}", strict=True)
     assert MARK in r.stdout, r.stderr
 
 

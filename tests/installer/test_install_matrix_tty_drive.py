@@ -44,12 +44,18 @@ def drive(
     cmd = command or ["bash", "script.sh"]
     proc = subprocess.run(
         [
-            sys.executable, "-I", str(DRIVER),
-            "--answers", str(answers),
-            "--transcript", str(transcript),
-            "--result", str(result),
+            sys.executable,
+            "-I",
+            str(DRIVER),
+            "--answers",
+            str(answers),
+            "--transcript",
+            str(transcript),
+            "--result",
+            str(result),
             *(extra or []),
-            "--", *cmd,
+            "--",
+            *cmd,
         ],
         cwd=tmp_path,
         capture_output=True,
@@ -88,9 +94,7 @@ def test_stdin_pipe_with_tty_present(tmp_path: Path) -> None:
 
 def test_idle_timeout_reports_tail(tmp_path: Path) -> None:
     script = 'read -r -p "Secret handshake? " a < /dev/tty\n'
-    proc, res, _ = drive(
-        tmp_path, script, "Continue\\?\ty\\n\n", extra=["--idle-timeout", "2"]
-    )
+    proc, res, _ = drive(tmp_path, script, "Continue\\?\ty\\n\n", extra=["--idle-timeout", "2"])
     assert proc.returncode == 124
     assert res["exit_code"] == 124
     assert res["idle_timed_out"] is True
@@ -135,12 +139,9 @@ def test_timeout_kills_whole_process_group(tmp_path: Path) -> None:
 
 def test_rule_fires_once(tmp_path: Path) -> None:
     script = (
-        'read -r -p "Continue? [y/N] " a < /dev/tty\n'
-        'read -r -p "Continue? [y/N] " b < /dev/tty\n'
+        'read -r -p "Continue? [y/N] " a < /dev/tty\nread -r -p "Continue? [y/N] " b < /dev/tty\n'
     )
-    proc, res, _ = drive(
-        tmp_path, script, "Continue\\?\ty\\n\n", extra=["--idle-timeout", "2"]
-    )
+    proc, res, _ = drive(tmp_path, script, "Continue\\?\ty\\n\n", extra=["--idle-timeout", "2"])
     assert proc.returncode == 124
     assert res["idle_timed_out"] is True
     assert res["questions_answered"] == 1
@@ -293,11 +294,18 @@ def test_result_written_when_driver_is_terminated(tmp_path: Path) -> None:
     (tmp_path / "answers.tsv").write_text("")
     drv = subprocess.Popen(
         [
-            sys.executable, "-I", str(DRIVER),
-            "--answers", str(tmp_path / "answers.tsv"),
-            "--transcript", str(tmp_path / "transcript.txt"),
-            "--result", str(tmp_path / "result.json"),
-            "--", "bash", "script.sh",
+            sys.executable,
+            "-I",
+            str(DRIVER),
+            "--answers",
+            str(tmp_path / "answers.tsv"),
+            "--transcript",
+            str(tmp_path / "transcript.txt"),
+            "--result",
+            str(tmp_path / "result.json"),
+            "--",
+            "bash",
+            "script.sh",
         ],
         cwd=tmp_path,
     )

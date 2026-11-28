@@ -208,7 +208,9 @@ def test_fresh_test_ct_drives_the_install_without_a_tty() -> None:
     assert "install-matrix/run-shape.sh" in wrapper, (
         "fresh-test-ct.sh no longer calls the install-matrix orchestrator"
     )
-    run_shape = (_REPO_ROOT / "scripts" / "install-matrix" / "run-shape.sh").read_text(encoding="utf-8")
+    run_shape = (_REPO_ROOT / "scripts" / "install-matrix" / "run-shape.sh").read_text(
+        encoding="utf-8"
+    )
     assert "HAL0_NONINTERACTIVE=1" in run_shape, (
         "run-shape.sh lost its unattended entry (HAL0_NONINTERACTIVE=1): a headless "
         "install would then prompt on /dev/tty"

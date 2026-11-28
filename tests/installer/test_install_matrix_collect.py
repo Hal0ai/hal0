@@ -86,8 +86,7 @@ DOCTOR = (
 )
 
 BARE_TOOLS = (
-    "bash cat tr date sleep od timeout ls head tail sort readlink dirname df mkdir "
-    "kill env sed"
+    "bash cat tr date sleep od timeout ls head tail sort readlink dirname df mkdir kill env sed"
 ).split()
 
 
@@ -98,9 +97,7 @@ class Guest:
         self.bin = tmp_path / "bin"
         for d in (self.root, self.stubs, self.bin):
             d.mkdir()
-        self.write_bin(
-            "df", "#!/usr/bin/env bash\nprintf '%s\\n' '         Used' '  4242424242'\n"
-        )
+        self.write_bin("df", "#!/usr/bin/env bash\nprintf '%s\\n' '         Used' '  4242424242'\n")
         self.write_bin(
             "systemctl",
             "#!/usr/bin/env bash\n"
@@ -430,9 +427,7 @@ def test_every_key_prints_with_no_tools(guest: Guest, mode: str, keys: set[str])
 
 
 def test_doctor_without_python_is_minus_one(guest: Guest):
-    guest.write_bin(
-        "hal0", "#!/usr/bin/env bash\ncat \"$STUB_DIR/doctor.json\"\nexit 1\n"
-    )
+    guest.write_bin("hal0", '#!/usr/bin/env bash\ncat "$STUB_DIR/doctor.json"\nexit 1\n')
     _, kv = guest.run("probe")
     assert (kv["doctor_ok"], kv["doctor_warn"], kv["doctor_critical"]) == ("-1", "-1", "-1")
     assert kv["doctor_exit"] == "1"

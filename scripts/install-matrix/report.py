@@ -44,9 +44,15 @@ def load_results(root: Path) -> list[dict]:
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, ValueError) as exc:
-            print(f"report: skipping {path}: unreadable ({exc.__class__.__name__})", file=sys.stderr)
+            print(
+                f"report: skipping {path}: unreadable ({exc.__class__.__name__})", file=sys.stderr
+            )
             continue
-        if not isinstance(data, dict) or data.get("schema") != SCHEMA or not isinstance(data.get("shape"), str):
+        if (
+            not isinstance(data, dict)
+            or data.get("schema") != SCHEMA
+            or not isinstance(data.get("shape"), str)
+        ):
             print(f"report: skipping {path}: not a {SCHEMA} result", file=sys.stderr)
             continue
         out.append(data)
@@ -110,7 +116,11 @@ def row(res: dict) -> list[str]:
     else:
         doc = "-"
     token, model = chat.get("first_token_seconds"), chat.get("model")
-    chat_cell = "-" if token is None and not model else f"{secs(token) + 's' if is_num(token) else '-'} {d(model)}"
+    chat_cell = (
+        "-"
+        if token is None and not model
+        else f"{secs(token) + 's' if is_num(token) else '-'} {d(model)}"
+    )
     mem = "-" if not memory else f"{okfail(memory.get('write_ok'))}/{okfail(memory.get('read_ok'))}"
     slots = res.get("slot_count")
     return [
@@ -183,7 +193,13 @@ def main(argv: list[str]) -> int:
                 newest[res["shape"]] = res
         results = list(newest.values())
     rows = shape_rows()
-    results.sort(key=lambda r: (rows.get(r["shape"], len(rows) + 1), r["shape"] if r["shape"] not in rows else "", started(r)))
+    results.sort(
+        key=lambda r: (
+            rows.get(r["shape"], len(rows) + 1),
+            r["shape"] if r["shape"] not in rows else "",
+            started(r),
+        )
+    )
     print(render(results))
     return 0
 
