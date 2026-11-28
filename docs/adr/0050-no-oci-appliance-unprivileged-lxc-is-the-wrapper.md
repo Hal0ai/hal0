@@ -11,6 +11,11 @@ and 2): hal0 also offers an opt-in rootless podman box (`install.sh --box`,
 v1.8.0). The statement that a wrapper protects the host, not the credentials
 inside it, stands.
 
+**Decision 5 carried out** (#3327): the Proxmox quick path now creates an
+unprivileged container by default, after the unprivileged path was run on
+Ubuntu 26.04 on Strix Halo. The script is `scripts/proxmox-ve/ct/hal0.sh`;
+`var_unprivileged=0` is the privileged opt-in.
+
 ## Context
 
 A bare-metal install puts hal0 deep into the host: systemd units, a `hal0`
@@ -91,5 +96,5 @@ which user the agent runs as. ADR-0002 and ADR-0024 carry that analysis.
 
 - `SECURITY.md`, "Bundled agent trust boundary".
 - `docs/getting-started/incus.mdx`, `docs/getting-started/proxmox.mdx`,
-  `scripts/proxmox-ve/hal0.sh`.
+  `scripts/proxmox-ve/hal0.sh` (since replaced by `scripts/proxmox-ve/ct/hal0.sh`).
 - #3134, #3126, #3250, #3255, #3301, #3327, #3328.

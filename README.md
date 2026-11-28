@@ -208,14 +208,15 @@ Full step list and the complete env-var table:
 On a Proxmox host:
 
 ```sh
-bash -c "$(curl -fsSL https://raw.githubusercontent.com/Hal0ai/hal0/main/scripts/proxmox-ve/hal0.sh)"
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/Hal0ai/hal0/main/scripts/proxmox-ve/ct/hal0.sh)"
 ```
 
-Creates a privileged Ubuntu 26.04 LXC, forwards the host's AMD GPU and NPU
-nodes when it has any, and runs the standard bootstrap inside it. Pass
-`UNPRIVILEGED=1` for the narrower container. `--advanced` opens whiptail
-prompts; every parameter has an env-var override (`CTID`, `RAM_MB`,
-`STORAGE`, …). See
+Creates an unprivileged Ubuntu 26.04 LXC, forwards the host's AMD GPU nodes
+when it has any, and runs the standard bootstrap inside it. The script is in
+the [community-scripts](https://community-scripts.org) form, with their
+Default and Advanced menus; settings are `var_*` environment variables
+(`var_ctid`, `var_ram`, `var_container_storage`, …). A second host command,
+`hal0-npu-passthrough <CTID>`, forwards the NPU. See
 [`scripts/proxmox-ve/README.md`](./scripts/proxmox-ve/README.md).
 
 ### Other install paths
