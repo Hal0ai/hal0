@@ -768,12 +768,17 @@ def _render_rollback_result(body: dict) -> None:
     channel = body.get("channel", "stable")
     rolled_back_to = str(body.get("rolled_back_to") or "")
     reverted = Path(rolled_back_to).name.removeprefix("hal0-") if rolled_back_to else ""
+    # The headline names what the reverted tree is, from its own release name.
+    # The configured channel is a different fact and gets its own line: after
+    # a rollback from a nightly to the stable release of the same number it
+    # still says "nightly", which used to label a stable tree as one (#3969).
+    kind = "nightly build" if "-nightly." in reverted else "release"
     headline = (
-        f"[green]rolled back[/green] to [bold]{reverted}[/bold] ({channel})"
+        f"[green]rolled back[/green] to [bold]{reverted}[/bold] ({kind})"
         if reverted
-        else f"[green]rolled back[/green] ({channel})"
+        else "[green]rolled back[/green]"
     )
-    lines = [headline]
+    lines = [headline, f"[dim]update channel: {channel} (unchanged by a rollback)[/dim]"]
     previous_now = body.get("previous_now")
     if previous_now:
         lines.append(

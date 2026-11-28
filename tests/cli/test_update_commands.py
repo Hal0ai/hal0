@@ -570,6 +570,32 @@ def test_rollback_between_nightly_and_same_numbered_stable_says_restart(
     assert "1.8.1-nightly.20261127155122" in result.output
 
 
+def test_rollback_headline_names_the_reverted_tree_not_the_channel(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#3969: rolled back to a stable tree while the channel is still nightly.
+    The headline describes the tree; the channel is a separate line."""
+    body = dict(
+        _ROLLBACK_BODY,
+        channel="nightly",
+        rolled_back_to="/usr/lib/hal0/hal0-1.8.1",
+        previous_now="/usr/lib/hal0/hal0-1.8.1-nightly.20261127155122",
+        running_version="1.8.1-nightly.20261127155122",
+        restart_required=True,
+    )
+    monkeypatch.setattr(uc, "_api_unreachable", lambda url: False)
+    monkeypatch.setattr(uc, "_interactive", lambda: False)
+    monkeypatch.setattr(uc, "api_post", lambda path, **k: body)
+    out = " ".join(runner.invoke(app, ["update", "--rollback"]).output.split())
+    assert "rolled back to 1.8.1 (release)" in out
+    assert "1.8.1 (nightly)" not in out
+    assert "update channel: nightly" in out
+
+    body = dict(body, rolled_back_to="/usr/lib/hal0/hal0-1.8.1-nightly.20261127155122")
+    out = " ".join(runner.invoke(app, ["update", "--rollback"]).output.split())
+    assert "rolled back to 1.8.1-nightly.20261127155122 (nightly build)" in out
+
+
 def test_rollback_health_fallback_prefers_the_full_release(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
