@@ -186,7 +186,7 @@ if [[ "$DRY_RUN" == "1" ]]; then
       "bash -s -- gpu"*) printf 'dev /dev/dri/renderD128\nmajor 226\n' ;;
       "pct config "*)
         vm="${cmd#pct config }"
-        printf 'hostname: hal0-mx-%s\ntags: hal0-matrix\ndescription: hal0-matrix run %s\n' "${vm%% *}" "$NONCE"
+        printf 'hostname: hal0-mx-%s\ntags: hal0-matrix\ndescription: hal0-matrix run %s%%0A\n' "${vm%% *}" "$NONCE"
         ;;
       *) ;;
     esac

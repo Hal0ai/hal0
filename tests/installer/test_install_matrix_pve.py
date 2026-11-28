@@ -29,11 +29,18 @@ HELPER_README = PROXMOX_DIR / "README.md"
 
 FEATURES = "nesting=1,keyctl=1,fuse=1,mknod=1"
 
-TAGGED_CONF = "hostname: hal0-mx-{vmid}\ntags: hal0-matrix\ncores: 2\n"
+# What `pct config` really prints for a description (Proxmox VE 9.2): the
+# spaces stay literal and the text ends in an encoded newline, `%0A`. That is
+# the fake host's DEFAULT form; the other forms are tested on purpose.
+NONCE = "0123456789abcdef"
+DESC_REAL = "description: hal0-matrix run " + NONCE + "%0A\n"
+# A guest of this harness, as the host shows it: tag, hostname, this run's description.
+TAGGED_CONF = "hostname: hal0-mx-{vmid}\ntags: hal0-matrix\ncores: 2\n" + DESC_REAL
+# The same guest with no description at all.
+BARE_CONF = "hostname: hal0-mx-{vmid}\ntags: hal0-matrix\ncores: 2\n"
 UNTAGGED_CONF = "hostname: hal0-mx-{vmid}\ncores: 2\n"
 WRONG_HOST_CONF = "hostname: hal0\ntags: hal0-matrix\ncores: 2\n"
-NONCE = "0123456789abcdef"
-NONCE_CONF = TAGGED_CONF + "description: hal0-matrix run " + NONCE + "\n"
+NONCE_CONF = TAGGED_CONF
 
 
 # An action now arrives as `{ pct config V | grep ... ; } && <action>`. The fake
@@ -664,6 +671,11 @@ def test_the_guard_decides_in_the_same_command_when_the_config_changes_under_us(
     assert not re.search(r"pct (start|exec|destroy)|pkill", ran), ran
 
 
+def _with_desc(text: str, vmid: int = 172) -> str:
+    """A harness guest whose description line carries exactly ``text``."""
+    return BARE_CONF.format(vmid=vmid) + "description: " + text + "\n"
+
+
 def _guard_verdict(fake, vmid, conf, nonce=""):
     """Run the guard text itself, with a `pct` that prints `conf`."""
     script = (
@@ -689,29 +701,63 @@ def _guard_verdict(fake, vmid, conf, nonce=""):
         ("hostname: hal0-mx-172\ntags: hal0-matrix-old;x\n", 172, "", False),
         ("hostname: hal0-mx-172\ntags: xhal0-matrix\n", 172, "", False),
         (NONCE_CONF.format(vmid=172), 172, NONCE, True),
-        (TAGGED_CONF.format(vmid=172), 172, NONCE, False),
-        (
-            TAGGED_CONF.format(vmid=172) + "description: hal0-matrix run ffffffffffffffff\n",
-            172,
-            NONCE,
-            False,
-        ),
-        (
-            TAGGED_CONF.format(vmid=172) + "description: hal0-matrix%20run%20" + NONCE + "\n",
-            172,
-            NONCE,
-            True,
-        ),
-        (
-            TAGGED_CONF.format(vmid=172) + "description: hal0-matrix run " + NONCE + "0\n",
-            172,
-            NONCE,
-            False,
-        ),
+        (BARE_CONF.format(vmid=172), 172, NONCE, False),
+        (_with_desc("hal0-matrix run ffffffffffffffff%0A"), 172, NONCE, False),
+        (_with_desc("hal0-matrix run " + NONCE), 172, NONCE, True),  # no suffix
+        (_with_desc("hal0-matrix%20run%20" + NONCE), 172, NONCE, True),  # %20, no suffix
+        (_with_desc("hal0-matrix%20run%20" + NONCE + "%0A"), 172, NONCE, True),  # %20 and suffix
+        (_with_desc("hal0-matrix run " + NONCE + "0%0A"), 172, NONCE, False),
+        (_with_desc("hal0-matrix run " + NONCE + "0"), 172, NONCE, False),
+        (_with_desc("hal0-matrix run " + NONCE + "%0A%0A"), 172, NONCE, False),
+        (_with_desc("hal0-matrix run " + NONCE + "%0Ax"), 172, NONCE, False),
+        (_with_desc("hal0-matrix run " + NONCE + " %0A"), 172, NONCE, False),
+        (_with_desc("hal0-matrix run " + NONCE + " "), 172, NONCE, False),
+        (_with_desc("note hal0-matrix run " + NONCE + "%0A"), 172, NONCE, False),
+        (_with_desc("hal0-matrix run " + NONCE + "%0Anote"), 172, NONCE, False),
+        (_with_desc("hal0-matrix run " + NONCE.upper() + "%0A"), 172, NONCE, False),
+        (_with_desc("hal0-matrix run 0123456789abcde%0A"), 172, NONCE, False),
     ],
 )
 def test_the_guard_text_accepts_only_what_ct_owned_accepts(fake, conf, vmid, nonce, expected):
     assert _guard_verdict(fake, vmid, conf, nonce) is expected
+
+
+# One parser: the local read (ct_owned, ct_mark_state) and the remote guard give
+# the same answer for every form of the description line.
+DESC_FORMS = [
+    ("hal0-matrix run " + NONCE + "%0A", True),
+    ("hal0-matrix run " + NONCE, True),
+    ("hal0-matrix%20run%20" + NONCE + "%0A", True),
+    ("hal0-matrix%20run%20" + NONCE, True),
+    ("hal0-matrix run " + NONCE + "%0A%0A", False),
+    ("hal0-matrix run " + NONCE + "%0Ax", False),
+    ("hal0-matrix run " + NONCE + " ", False),
+    ("x hal0-matrix run " + NONCE + "%0A", False),
+    ("hal0-matrix run " + NONCE + "0%0A", False),
+]
+
+
+@pytest.mark.parametrize("text,expected", DESC_FORMS)
+def test_ct_owned_reads_the_description_the_way_the_guard_does(fake, text, expected):
+    _owned_rules(fake, 172, _with_desc(text))
+    assert (fake.run(f"ct_owned 172 {NONCE}").returncode == 0) is expected
+    assert _guard_verdict(fake, 172, _with_desc(text), NONCE) is expected
+
+
+@pytest.mark.parametrize("text,expected", DESC_FORMS)
+def test_mark_state_reads_the_real_form(fake, text, expected):
+    _owned_rules(fake, 172, _with_desc(text))
+    got = fake.run(f"ct_mark_state 172 {NONCE}").stdout.strip()
+    assert got == ("mine" if expected else "unknown")
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["hal0-matrix run ffffffffffffffff%0A", "hal0-matrix%20run%20ffffffffffffffff"],
+)
+def test_mark_state_names_another_runs_nonce_in_the_real_form(fake, text):
+    _owned_rules(fake, 172, _with_desc(text))
+    assert fake.run(f"ct_mark_state 172 {NONCE}").stdout.strip() == "other"
 
 
 # --- the range is sanity-checked ---------------------------------------------
@@ -961,14 +1007,14 @@ def test_create_refuses_a_malformed_nonce(fake):
 
 
 def test_destroy_with_nonce_refuses_a_guest_with_another_description(fake):
-    _owned_rules(fake, 172, TAGGED_CONF)  # tag and hostname fit, no nonce
+    _owned_rules(fake, 172, BARE_CONF)  # tag and hostname fit, no nonce
     r = fake.run(f"ct_destroy 172 {NONCE}")
     assert r.returncode == 1
     assert _destroy_calls(fake) == []
 
 
 def test_destroy_with_nonce_refuses_another_runs_nonce(fake):
-    _owned_rules(fake, 172, TAGGED_CONF + "description: hal0-matrix run ffffffffffffffff\n")
+    _owned_rules(fake, 172, _with_desc("hal0-matrix run ffffffffffffffff%0A"))
     r = fake.run(f"ct_destroy 172 {NONCE}")
     assert r.returncode == 1
     assert _destroy_calls(fake) == []
@@ -984,7 +1030,7 @@ def test_destroy_with_nonce_destroys_the_guest_that_carries_it(fake):
 
 
 def test_destroy_without_nonce_keeps_the_manual_rule(fake):
-    _owned_rules(fake, 172, TAGGED_CONF)
+    _owned_rules(fake, 172, BARE_CONF)
     fake.rule("pct destroy 172 --force --purge", "")
     fake.rule("test -e /etc/pve/lxc/172.conf", "absent\n")
     assert fake.run("ct_destroy 172").returncode == 0

@@ -26,6 +26,15 @@ WRAPPER = REPO / "scripts" / "fresh-test-ct.sh"
 
 FAKE_SSH = r"""#!/usr/bin/env bash
 # Fake Proxmox host + guest. State lives in $FAKE_STATE.
+# A description reads back the way Proxmox VE prints it: literal spaces and a
+# trailing `%0A` (an encoded newline). FAKE_DESC_SUFFIX= (set, empty) drops it;
+# FAKE_DESC_PCT20=1 writes the spaces as %20.
+desc_line() {
+  local d
+  d="$(cat "$FAKE_STATE/description")"
+  [[ -z "${FAKE_DESC_PCT20:-}" ]] || d="${d// /%20}"
+  printf 'description: %s%s\n' "$d" "${FAKE_DESC_SUFFIX-%0A}"
+}
 printf '%s\n' "$*" >> "$FAKE_STATE/ssh.log"
 printf '%s %s\n' "$(date +%s.%N)" "${*: -1}" >> "$FAKE_STATE/ssh.times"
 cmd="${*: -1}"
@@ -38,7 +47,7 @@ if [[ "$cmd" == "{ pct config "* ]]; then
   [[ -e "$FAKE_STATE/present" ]] || exit 1
   conf="$(printf 'hostname: hal0-mx-%s\ntags: hal0-matrix\ncores: 8\n' "$vm"
     [[ -z "${FAKE_LOCK:-}" ]] || echo 'lock: create'
-    [[ ! -s "$FAKE_STATE/description" ]] || printf 'description: %s\n' "$(cat "$FAKE_STATE/description")")"
+    [[ ! -s "$FAKE_STATE/description" ]] || desc_line)"
   GUARD="$guard" CONF="$conf" bash -c 'pct() { printf "%s\n" "$CONF"; }; export -f pct; exec bash -c "$GUARD"' || exit 1
   cmd="${cmd#*; \} && }"
   plain="${cmd//\\/}"
@@ -92,7 +101,7 @@ case "$cmd" in
     vm="${cmd#pct config }"
     printf 'hostname: hal0-mx-%s\ntags: hal0-matrix\ncores: 8\n' "${vm%% *}"
     [[ -z "${FAKE_LOCK:-}" ]] || echo 'lock: create'
-    [[ ! -s "$FAKE_STATE/description" ]] || printf 'description: %s\n' "$(cat "$FAKE_STATE/description")"
+    [[ ! -s "$FAKE_STATE/description" ]] || desc_line
     exit 0 ;;
   "pct create "*)
     [[ -z "${FAKE_CREATE_FAILS:-}" ]] || exit 1
@@ -647,6 +656,21 @@ def test_a_failed_create_with_the_right_description_is_proven_and_destroyed(host
     assert "destroyed container 172" in r.stderr
     assert not (host.state / "present").exists()
     assert "unsure=" not in (host.out / "run.txt").read_text()
+
+
+@pytest.mark.parametrize(
+    "env",
+    [{"FAKE_DESC_SUFFIX": ""}, {"FAKE_DESC_PCT20": "1"}, {}],
+    ids=["no-suffix", "pct20-and-suffix", "real-form"],
+)
+def test_every_form_of_the_real_description_proves_the_guest_and_it_is_destroyed(host, env):
+    r = host.run(
+        "u2404-cpu", "--vmid", "172", "--out", str(host.out), FAKE_CREATE_RC="1", **env
+    )  # fmt: skip
+    assert r.returncode == 1, r.stderr
+    assert "UNSURE" not in r.stderr and "LEFT BEHIND" not in r.stderr
+    assert "destroyed container 172" in r.stderr
+    assert not (host.state / "present").exists()
 
 
 def test_the_guest_this_run_created_carries_its_nonce(host):

@@ -333,6 +333,35 @@ print(lo)
 ' "$lo" "$hi" "$_PVE_TAG" || return 1
 }
 
+# The description is the proof that a guest is THIS run's. Proxmox VE (9.2)
+# prints it with literal spaces and a trailing `%0A` (an encoded newline), and
+# may show a space as `%20`, so the one accepted form is
+#   hal0-matrix run <16 hex>   spaces literal or %20, then an optional %0A
+# and nothing else before or after. Two places read it and both use this form:
+# _pve_desc_nonce (the local read) and _pve_desc_pattern (the remote grep).
+
+# _pve_desc_nonce <text after "description:">: prints the 16-hex nonce when the
+# text is exactly the accepted form, nothing and status 1 otherwise. The text
+# is untrusted and is only compared, never evaluated.
+_pve_desc_nonce() {
+  local d="${1:-}"
+  d="${d# }"
+  d="${d%\%0A}"
+  d="${d//%20/ }"
+  if [[ "$d" =~ ^hal0-matrix\ run\ ([0-9a-f]{16})$ ]]; then
+    printf '%s' "${BASH_REMATCH[1]}"
+    return 0
+  fi
+  return 1
+}
+
+# _pve_desc_pattern <nonce>: the extended regular expression (for grep -E, on
+# the host) that matches a whole `pct config` description line for exactly this
+# nonce. The caller has already checked the nonce as 16 hex characters.
+_pve_desc_pattern() {
+  printf '^description: %s(%%20| )run(%%20| )%s(%%0A)?$' "$_PVE_TAG" "$1"
+}
+
 # ct_owned <vmid> [nonce]: 0 only for a guest this harness created. With a
 # nonce the guest's description must also be `hal0-matrix run <nonce>`, which
 # proves it is the guest THIS run created.
@@ -355,10 +384,7 @@ ct_owned() {
   tags="${tags// /}"
   [[ "$host" == "${_PVE_HOST_PREFIX}"* ]] || return 1
   if [[ -n "$nonce" ]]; then
-    desc="${desc//%20/ }"
-    desc="${desc# }"
-    desc="${desc% }"
-    [[ "$desc" == "hal0-matrix run ${nonce}" ]] || return 1
+    [[ "$(_pve_desc_nonce "$desc")" == "$nonce" ]] || return 1
   fi
   local IFS=';,'
   for t in $tags; do
@@ -376,7 +402,7 @@ ct_owned() {
 # way. Read only. The reply is untrusted text and is only compared, never
 # evaluated.
 ct_mark_state() {
-  local vmid="${1:-}" nonce="${2:-}" conf line desc="" host="" _PVE_DEADLINE
+  local vmid="${1:-}" nonce="${2:-}" conf line desc="" host="" seen="" _PVE_DEADLINE
   _PVE_DEADLINE="$(_pve_t READ 60)"
   if ! _pve_in_range "$vmid" || [[ ! "$nonce" =~ ^[0-9a-f]{16}$ ]]; then
     printf 'unknown\n'
@@ -393,12 +419,10 @@ ct_mark_state() {
     printf 'unknown\n'
     return 0
   fi
-  desc="${desc//%20/ }"
-  desc="${desc# }"
-  desc="${desc% }"
-  if [[ "$desc" == "hal0-matrix run ${nonce}" ]]; then
+  seen="$(_pve_desc_nonce "$desc")" || seen=""
+  if [[ "$seen" == "$nonce" ]]; then
     printf 'mine\n'
-  elif [[ "$desc" =~ ^hal0-matrix\ run\ [0-9a-f]{16}$ ]]; then
+  elif [[ -n "$seen" ]]; then
     printf 'other\n'
   else
     printf 'unknown\n'
@@ -419,7 +443,7 @@ ct_guard() {
   g="{ pct config ${vmid} | grep -q '^hostname: ${_PVE_HOST_PREFIX}${vmid}\$'"
   g+=" && pct config ${vmid} | grep -Eq '^tags: ([^;,]*[;,])*${_PVE_TAG}([;,].*)?\$'"
   if [[ -n "$nonce" ]]; then
-    g+=" && pct config ${vmid} | grep -Eq '^description: ${_PVE_TAG}(%20| )run(%20| )${nonce}\$'"
+    g+=" && pct config ${vmid} | grep -Eq '$(_pve_desc_pattern "$nonce")'"
   fi
   printf '%s; } && ' "$g"
 }
