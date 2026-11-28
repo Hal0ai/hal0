@@ -21,7 +21,7 @@ TEXT = INSTALL_SH.read_text(encoding="utf-8")
 
 _STEP_START = '\nui_step "Pre-flight checks"'
 _STEP_END = '\nui_step "System user"'
-_SEAM = "\nhal0_collect_answers\n"
+_SEAM = "\nhal0_collect_answers || _seam_rc=$?\n"
 _FILE_BEGIN = "# file-origin: begin"
 _FILE_END = "# file-origin: end\n"
 
@@ -99,7 +99,9 @@ def test_file_origin_region_holds_only_the_python_install() -> None:
         "pip",
     ):
         assert name not in code, name
-    assert _code(region).count("_hal0_resolve_main_python_or_die") == 1
+    # once for the setup screens (Python 3.12 before any question), once for a
+    # given file when the tree has no setup screens
+    assert _code(region).count("_hal0_resolve_main_python_or_die") == 2
 
 
 def test_file_origin_branch_is_the_only_early_install() -> None:
@@ -428,7 +430,7 @@ def test_models_dir_ignored_when_no_document_applied(tmp_path: Path) -> None:
 
 def test_models_dir_block_sits_right_after_the_seam() -> None:
     code = _code(TEXT)
-    seam = code.index("\nhal0_collect_answers\n")
+    seam = code.index(_SEAM)
     assert code.index("MODELS_DIR_FLAG_GIVEN", seam) < code.index("persist_bootstrap_cosign", seam)
     assert "MODELS_DIR_FLAG_GIVEN=1" in TEXT[: TEXT.index(_SEAM)]
 

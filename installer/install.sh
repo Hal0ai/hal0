@@ -231,6 +231,9 @@ SUMMARY_JSON_PATH=""
 # down already honour. COMPONENT_FLAG_GIVEN=1 tells the interactive component
 # picker that the operator already chose on the command line.
 COMPONENT_FLAG_GIVEN=0
+# The installer's own arguments, kept as given: the setup screens
+# (hal0_run_wizard) get the flags they know after their `--`.
+_HAL0_INSTALL_ARGS=("$@")
 for arg in "$@"; do
     case "$arg" in
         --dev) DEV_MODE=1 ;;
@@ -880,13 +883,26 @@ if ! _facts_err="$(hal0_facts_write "${_facts_path}" 2>&1)"; then
 fi
 
 # file-origin: begin (the one place the detection half installs anything)
-# A person who passes an answers file has already chosen, and reading it needs
-# a Python. The reader runs on 3.10 and newer, so a document is checked before
-# anything changes whenever such an interpreter exists (hal0_answers_python:
-# ${PY}, else a python3 on PATH). Only when none exists at all is one installed
-# now, before the seam. A below-floor but 3.10+ interpreter is replaced by the
-# normal resolution after the seam.
-if [[ "${_main_python_usable}" -eq 0 && -n "${HAL0_ANSWERS_FILE:-}" ]] \
+# With the setup screens in this release tree, every run goes through them, and
+# they need Python 3.12 or newer, the same floor as hal0 itself: when ${PY} is
+# not usable, the interpreter is resolved now, before the seam, and installed
+# when the box has none (said in one line first).
+# Without them, only a person who passes an answers file has already chosen,
+# and reading it needs a Python. The reader runs on 3.10 and newer, so a
+# document is checked before anything changes whenever such an interpreter
+# exists (hal0_answers_python: ${PY}, else a python3 on PATH). Only when none
+# exists at all is one installed now, before the seam. A below-floor but 3.10+
+# interpreter is replaced by the normal resolution after the seam.
+if hal0_wizard_present; then
+    if [[ "${_main_python_usable}" -eq 0 ]]; then
+        if ! command -v python3.14 >/dev/null 2>&1 && ! command -v python3.13 >/dev/null 2>&1 \
+            && ! command -v python3.12 >/dev/null 2>&1; then
+            info "Installing Python, which hal0 needs before it can ask anything."
+        fi
+        _hal0_resolve_main_python_or_die install-first
+        _main_python_usable=1
+    fi
+elif [[ "${_main_python_usable}" -eq 0 && -n "${HAL0_ANSWERS_FILE:-}" ]] \
     && ! hal0_answers_python >/dev/null; then
     info "Installing Python, which is needed to read your answers file."
     _hal0_resolve_main_python_or_die install-first
@@ -897,7 +913,29 @@ fi
 # ── Answers seam ────────────────────────────────────────────────────────────
 # The one place answers enter the install. Everything below this line may
 # change the host or depends on a choice.
-hal0_collect_answers
+# answers-seam: begin
+_seam_rc=0
+hal0_collect_answers || _seam_rc=$?
+if (( _seam_rc != 0 )); then
+    # Without the setup screens a refused document stops the install through the
+    # ERR trap, as before.
+    [[ "${_HAL0_WIZARD_CALLED:-0}" == "1" ]] || false
+    # The setup screens already said why. Quitting and an interrupt changed
+    # nothing, so they leave no failure report; anything else may.
+    case "${_seam_rc}" in
+        10)
+            info "Nothing was changed."
+            _HAL0_REPORT_WRITTEN=1
+            exit 10
+            ;;
+        130)
+            _HAL0_REPORT_WRITTEN=1
+            exit 130
+            ;;
+        *) exit 1 ;;
+    esac
+fi
+# answers-seam: end
 
 # answers-models-dir: begin
 # MODELS_DIR was settled above, before the seam, so a document's model_store.path
@@ -1052,7 +1090,9 @@ _tty_read() {
 
 if [[ "${DEV_MODE}" -eq 0 ]]; then
     # gpu_rc was captured by the detection half of this step, before the answers
-    # seam; the branches below act on it, unchanged.
+    # seam; the branches below act on it, unchanged. After the setup screens the
+    # CPU-only question is not asked again: they asked it, and their answer is
+    # HAL0_ALLOW_CPU_ONLY (hardware.allow_cpu_only in their document).
     if (( gpu_rc == HAL0_GPU_RC_BROKEN_GID )); then
         err "GPU passthrough is broken: the render device is visible but its gid does not map to the render group in this container (no group, or the wrong one)."
         err "Every GPU slot would silently fall back to CPU. Apply the dev0/gid fix shown above on the Proxmox host, then re-run install.sh."
@@ -1073,7 +1113,7 @@ if [[ "${DEV_MODE}" -eq 0 ]]; then
         if [[ "${HAL0_ALLOW_CPU_ONLY:-0}" == "1" ]]; then
             _cpu_only_image_gate || exit 1
             warn "No usable GPU lane on this box — proceeding CPU-only (HAL0_ALLOW_CPU_ONLY=1); slots will be created with device=cpu."
-        elif [[ -r /dev/tty ]] && _confirm_cpu_only; then
+        elif [[ "${HAL0_WIZARD_RAN:-0}" != "1" && -r /dev/tty ]] && _confirm_cpu_only; then
             _cpu_only_image_gate || exit 1
             warn "Proceeding with a CPU-only install (confirmed at the prompt); slots will be created with device=cpu."
         else
@@ -1139,7 +1179,7 @@ if [[ "${DEV_MODE}" -eq 0 ]]; then
         if [[ "${HAL0_ALLOW_CPU_ONLY:-0}" == "1" ]]; then
             _cpu_only_image_gate || exit 1
             warn "No GPU devices inside this container — proceeding CPU-only (HAL0_ALLOW_CPU_ONLY=1)."
-        elif [[ -r /dev/tty ]] && _confirm_cpu_only; then
+        elif [[ "${HAL0_WIZARD_RAN:-0}" != "1" && -r /dev/tty ]] && _confirm_cpu_only; then
             _cpu_only_image_gate || exit 1
             warn "Proceeding with a CPU-only install (confirmed at the prompt)."
         else
@@ -1160,6 +1200,12 @@ fi
 # 0600 persist still happen in the "Configuration" step below, which is the
 # first point where the venv's `hf` console script exists.
 HF_TOKEN_VAL="${HF_TOKEN:-${HUGGING_FACE_HUB_TOKEN:-}}"
+# A token the person typed on the setup screens (hal0_run_wizard read it from
+# the wizard's root-only token file) is what they chose in this run.
+if [[ -n "${_HAL0_WIZARD_HF_TOKEN:-}" ]]; then
+    HF_TOKEN_VAL="${_HAL0_WIZARD_HF_TOKEN}"
+fi
+unset _HAL0_WIZARD_HF_TOKEN
 # Pre-declared because `_tty_read` writes through a nameref, which shellcheck
 # cannot follow (SC2154) — and an unset target would trip `set -u` if the
 # helper ever grew an early return.
