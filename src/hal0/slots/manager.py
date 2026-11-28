@@ -114,6 +114,7 @@ from hal0.slots.state import (
     SlotCrashLooping,
     SlotFabricClockHazard,
     SlotNotFound,
+    SlotNotReady,
     SlotNpuConflict,
     SlotOutputSanityFailed,
     SlotPinned,
@@ -282,6 +283,29 @@ _FLAP_COALESCE_WINDOW_S = 60.0
 # which point the fail-watcher's stale-WARMING reload is the backstop.
 _ADOPTED_WARMING_POLL_INTERVAL_S: float = 5.0
 _ADOPTED_WARMING_POLL_MAX_S: float = _WARMING_STALE_AFTER_S
+# #4082: stamped on the record of a slot adoption put into WARMING, and on no
+# other: its unit is running and only /health has not answered yet. ``load()``
+# reads it to tell that slot from the residue of a load that never converged.
+_ADOPTED_WARMING_KEY = "adopted_warming"
+# What a caller is told to wait before retrying a load refused for such a slot:
+# one beat of the promotion poll.
+_ADOPTED_WARMING_RETRY_AFTER_S: int = int(_ADOPTED_WARMING_POLL_INTERVAL_S)
+# How long load() may hold the slot lock asking such a slot's /health. The
+# llama probe answers or fails inside 3 s and FLM's and ComfyUI's inside 5 s,
+# but Halogen's liveness read waits up to 35 s; a hung engine must not make
+# every request queue behind that. No answer in time is "not ready yet".
+_ADOPTED_WARMING_PROBE_MAX_S: float = 5.0
+
+
+def _event(name: str, **fields: Any) -> str:
+    """``name key=value ...`` for a log message that must name its slot.
+
+    hal0-api's console handler prints the message and drops ``extra=``, so a
+    line like ``slot.error`` reached the journal with no slot and no reason
+    (#4082). The lifecycle lines that explain why an engine was stopped or
+    left alone carry their fields in the message as well as in ``extra``.
+    """
+    return " ".join([name, *(f"{k}={v}" for k, v in fields.items() if v not in (None, ""))])
 
 
 # ── Hook protocols ───────────────────────────────────────────────────────────
@@ -1582,6 +1606,11 @@ class SlotManager:
         carried_extra: dict[str, Any] = dict(prior.extra) if prior else {}
         if extra:
             carried_extra.update(extra)
+        if not (extra and extra.get(_ADOPTED_WARMING_KEY)):
+            # #4082: the mark belongs to the one WARMING that adoption stamped.
+            # ``adopted`` itself is carried for the life of the record, so it
+            # cannot tell an adopted WARMING from a later load that timed out.
+            carried_extra.pop(_ADOPTED_WARMING_KEY, None)
         if not (extra and extra.get("stall_ceiling")):
             # #3282: the stall-ceiling mark belongs to the one ERROR that
             # stamped it; any other transition (leaving ERROR, or a different
@@ -1675,7 +1704,8 @@ class SlotManager:
         write_state_atomic(self._state_file_for(name), record)
         self._states[key] = record
         log.info(
-            "slot.transition", extra={"slot": name, "from": current.value, "to": to_state.value}
+            _event("slot.transition", slot=name, **{"from": current.value}, to=to_state.value),
+            extra={"slot": name, "from": current.value, "to": to_state.value},
         )
         # Structured ERROR audit trail (separate from the info-level
         # transition log) so operators can `journalctl -u hal0-api |
@@ -1687,7 +1717,12 @@ class SlotManager:
             # a reserved LogRecord attribute and stdlib logging raises
             # KeyError when it collides. Use ``reason`` instead.
             log.error(
-                "slot.error",
+                _event(
+                    "slot.error",
+                    slot=name,
+                    **{"from": current.value},
+                    reason=repr(message or "(no message)"),
+                ),
                 extra={
                     "slot": name,
                     "from": current.value,
@@ -2295,8 +2330,63 @@ class SlotManager:
                 # the slot lying in WARMING forever while its unit crash-looped.
                 # Treat it exactly like the ERROR branch: tear the unit down and
                 # re-enter the lifecycle from OFFLINE.
+                # #4082: except a slot ADOPTION put into WARMING. Its unit is
+                # running (it may be serving requests) and only /health has not
+                # answered yet; nothing here failed, so nothing is torn down.
+                # Ask /health once: an answer promotes it, as its poll would
+                # have within a beat; otherwise refuse, retryably, and leave
+                # the engine and the poll alone. A slot that stays that way is
+                # the fail-watcher's stale-WARMING recovery (unload, load).
+                inflight_rec = self._states.get(self._key(slot_name))
+                if (
+                    current is SlotState.WARMING
+                    and inflight_rec is not None
+                    and inflight_rec.extra.get(_ADOPTED_WARMING_KEY)
+                    # A load that names another model is a swap the caller
+                    # asked for, not a wake of what is running.
+                    and (not model_id or model_id == inflight_rec.model_id)
+                    and await self._is_active(slot_name)
+                ):
+                    try:
+                        answered = await asyncio.wait_for(
+                            self._probe_health(slot_name, strict=True),
+                            timeout=_ADOPTED_WARMING_PROBE_MAX_S,
+                        )
+                    except TimeoutError:
+                        answered = False
+                    if answered:
+                        log.info(
+                            _event("slot.load_promoted_adopted_warming", slot=slot_name),
+                            extra={"slot": slot_name},
+                        )
+                        await self._promote_adopted_slot(slot_name)
+                        return await self.status(slot_name)
+                    log.info(
+                        _event(
+                            "slot.load_left_adopted_warming",
+                            slot=slot_name,
+                            reason="unit_active_health_not_ok",
+                        ),
+                        extra={"slot": slot_name, "reason": "unit_active_health_not_ok"},
+                    )
+                    raise SlotNotReady(
+                        f"slot {slot_name!r} is running but its model server has not "
+                        f"answered /health yet; it was left as it is. Retry shortly, or "
+                        f"run `hal0 slot restart {slot_name}` to recycle it",
+                        details={
+                            "slot": slot_name,
+                            "state": current.value,
+                            "retry_after_s": _ADOPTED_WARMING_RETRY_AFTER_S,
+                            "restart": f"hal0 slot restart {slot_name}",
+                        },
+                    )
                 log.info(
-                    "slot.load_from_stale_inflight_state",
+                    _event(
+                        "slot.load_from_stale_inflight_state",
+                        slot=slot_name,
+                        **{"from": current.value},
+                        reason="load_never_converged",
+                    ),
                     extra={"slot": slot_name, "from": current.value},
                 )
                 # A slot parked in WARMING by a failed load carries the same
@@ -5857,6 +5947,8 @@ class SlotManager:
             # in real readiness rather than trusting FSM state alone (#791).
             "health_ok": healthy,
         }
+        if not healthy:
+            extras[_ADOPTED_WARMING_KEY] = True
         detail = "container unit active" if healthy else "container active, model server not ready"
         # ``force=True`` is required: the legal-transition map does not
         # contain offline→ready. Adoption is the exception — the state
@@ -5882,7 +5974,13 @@ class SlotManager:
             # so poll /health until its model server answers.
             self._start_adopt_promoter(slot_name)
         log.info(
-            "slot.adopted",
+            _event(
+                "slot.adopted",
+                slot=slot_name,
+                resolved=resolved.value,
+                prior=prior.state.value if prior is not None else None,
+                detail=repr(detail),
+            ),
             extra={
                 "slot": slot_name,
                 "port": port,
