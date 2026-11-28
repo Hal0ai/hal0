@@ -1170,7 +1170,7 @@ def test_oneliner_runs_in_a_terminal_and_passes_summary_flag(host):
     plan = "\n".join(plan_lines(r))
     assert "ssh -tt" in plan
     assert "| bash -s -- --summary-json=/root/hal0-summary.json" in plan
-    assert "pct exec 170 -- bash -c '" in plan
+    assert "pct exec 170 -- env LC_ALL=C LANG=C bash -c '" in plan
     assert "HAL0_NONINTERACTIVE" not in plan
     assert "cpu-consent.tsv" in plan
 
