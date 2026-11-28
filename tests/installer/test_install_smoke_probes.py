@@ -212,7 +212,7 @@ def _memory_run(
 
 def test_no_memory_run_says_skipped_not_ok(tmp_path: Path) -> None:
     res = _memory_run(tmp_path, "HAL0_SKIP_HINDSIGHT=1")
-    assert "INFO: memory-engine check skipped — memory was not installed, by choice" in res.stdout
+    assert "INFO: memory-engine check skipped — memory was turned off for this run" in res.stdout
     assert "memory-engine version probe ok" not in res.stdout
     assert "FAILED:memory-engine-version" not in res.stdout
     assert "memory-engine" not in res.stderr
@@ -223,9 +223,37 @@ def test_missing_unit_with_memory_wanted_warns_and_is_recorded(tmp_path: Path) -
     res = _memory_run(tmp_path, f"HINDSIGHT_UNIT_DST={missing}")
     assert "memory-engine check FAILED — the memory engine is not installed" in res.stderr
     assert "HAL0_HINDSIGHT_PYTHON" in res.stderr
+    assert "see the warnings above for the cause" in res.stderr
     assert "memory-engine version probe ok" not in res.stdout
     assert "FAILED:memory-engine-version" in res.stdout
     assert res.returncode == 0, "recording a failed probe must not change the exit status"
+
+
+def test_no_usable_python_with_no_unit_is_a_failed_check(tmp_path: Path) -> None:
+    """Memory wanted, no Python found (install.sh sets SKIP + a reason): not
+    a choice, so the check fails and says why."""
+    missing = shlex.quote(f"{tmp_path}/missing")
+    setup = f"HAL0_SKIP_HINDSIGHT=1\nHINDSIGHT_UNAVAILABLE_REASON='no usable Python 3.11-3.14'\nHINDSIGHT_UNIT_DST={missing}"
+    res = _memory_run(tmp_path, setup)
+    assert "turned off" not in res.stdout
+    assert (
+        "memory-engine check FAILED — the memory engine is not installed (no usable Python 3.11-3.14)"
+        in res.stderr
+    )
+    assert "FAILED:memory-engine-version" in res.stdout
+
+
+def test_no_usable_python_but_a_healthy_engine_is_probed_normally(tmp_path: Path) -> None:
+    unit = tmp_path / "hindsight-api.service"
+    unit.write_text("[Service]\n", encoding="utf-8")
+    setup = (
+        "HAL0_SKIP_HINDSIGHT=1\nHINDSIGHT_UNAVAILABLE_REASON='no usable Python 3.11-3.14'\n"
+        f"HINDSIGHT_UNIT_DST={shlex.quote(str(unit))}"
+    )
+    res = _memory_run(tmp_path, setup, version="9.9.9")
+    assert "INFO: memory-engine version probe ok (hindsight-api 9.9.9 on :9177)" in res.stdout
+    assert "FAILED:memory-engine-version" not in res.stdout
+    assert "memory-engine" not in res.stderr
 
 
 def test_passing_engine_keeps_the_ok_line_exactly(tmp_path: Path) -> None:

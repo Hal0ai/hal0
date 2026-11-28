@@ -32,7 +32,7 @@ applying. Add those subsections to a version's section to surface them; see
 
 ### Fixed
 
-- **The installer's closing memory-engine check no longer says "ok" when the memory engine was never installed.** With `--no-memory` it now says the check was skipped because memory was not installed, by choice. When memory was wanted but its install did not complete, it warns that the memory engine is not installed, names the fix, and lists the check in the "Verify FAILED" part of the closing summary; the installer's exit status is unchanged. (#4007)
+- **The installer's closing memory-engine check no longer says "ok" when the memory engine was never installed.** When memory was turned off for the run it says the check was skipped. When memory was wanted but not installed (its install failed, or no usable Python was found) it warns that the memory engine is not installed, points to the warnings above for the cause, and lists the check in the "Verify FAILED" part of the closing summary; the installer's exit status is unchanged. (#4007)
 
 ## [1.8.3] — 2026-11-28
 
