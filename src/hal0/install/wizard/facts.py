@@ -96,6 +96,7 @@ class Facts:
     npu_device: bool | None
     npu_flm_build: bool | None
     memory_python: bool | None
+    hermes_installed: bool | None
     install_state: str
     install_version: str | None
     disks: tuple[Disk, ...]
@@ -272,6 +273,7 @@ def load_facts(
     gpu = _section(data, "gpu")
     npu = _section(data, "npu")
     install = _section(data, "install")
+    hermes = _section(data, "hermes")
     return Facts(
         container=_opt(data, "container", "container", str),
         podman_present=_opt(podman, "podman.present", "present", bool),
@@ -283,6 +285,7 @@ def load_facts(
         npu_device=_opt(npu, "npu.device", "device", bool),
         npu_flm_build=_opt(npu, "npu.flm_build", "flm_build", bool),
         memory_python=_opt(data, "memory_python", "memory_python", bool),
+        hermes_installed=_opt(hermes, "hermes.installed", "installed", bool),
         install_state=_choice(install, "install.state", "state", INSTALL_STATES, "fresh"),
         install_version=_opt(install, "install.version", "version", str),
         disks=tuple(_system_disks() if disks is None else disks),

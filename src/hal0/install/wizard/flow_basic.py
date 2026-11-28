@@ -44,6 +44,8 @@ from .paths import check_copy, check_store_text, validate_folder
 
 _DOWNLOAD_MBIT = 100
 _NPU_JOB = "npu"
+_ASSISTANT_JOB = "hermes"
+_ASSISTANT_STOP = "will be stopped (it stays installed)"
 _TERMINAL_ON = "ON: the assistant can run commands as a root-equivalent user"
 _NO_DOWNLOADS = "nothing yet; models are added after install"
 _NO_CHAT_DOWNLOAD = "no chat model to download"
@@ -263,6 +265,7 @@ def review_rows(s: State) -> tuple[Row, ...]:
             "Installing",
             ", ".join(c.label for c in jobs if c.id != _NPU_JOB) or "only the model server",
         ),
+        *_assistant_stop_rows(s, doc),
         *_terminal_rows(s, doc),
         make_row("downloads", "Downloads", ", ".join(t for t, _ in items) or _no_downloads(pick)),
     ]
@@ -319,6 +322,18 @@ def _access_rows(s: State, doc: Document) -> list[Row]:
         make_row("reachable", "Reachable at", reach),
         make_row("admin_key", "Admin key", admin.get(str(get(doc, ADMIN_KEY)), "unchanged")),
     ]
+
+
+def _assistant_stop_rows(s: State, doc: Document) -> list[Row]:
+    """Say so when confirming will stop an assistant that is already installed.
+
+    The installer leaves services alone with --dev or --no-start, so it says nothing then.
+    """
+    if s.facts.hermes_installed is not True or s.mode:
+        return []
+    if any(c.id == _ASSISTANT_JOB for c in jobs_wanted(s, doc)):
+        return []
+    return [make_row("assistant_stop", "Assistant", _ASSISTANT_STOP)]
 
 
 def _terminal_rows(s: State, doc: Document) -> list[Row]:

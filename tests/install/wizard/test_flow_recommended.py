@@ -784,3 +784,93 @@ def test_the_recommended_review_fits_a_terminal_of_80_by_24(
             lines = render(review, width=80, plain=plain, color=False)
             assert len(lines) <= 24, (plain, len(lines))
             assert any("Terminal tool" in strip_ansi(x) for x in lines)
+
+
+# ------------------------------------- an installed assistant that will be stopped
+
+_STOP_LABEL = "Assistant"
+_STOP_VALUE = "will be stopped (it stays installed)"
+_MINIMAL = [Override("install.type", "minimal", "--bare")]
+
+
+def _stop_rows(rows: tuple[Row, ...]) -> list[Row]:
+    return [r for r in rows if r.id == "assistant_stop"]
+
+
+def _minimal_review(catalog: Catalog, facts: Facts, over: list[Override] | None = None) -> State:
+    return run(start(catalog, facts, over=_MINIMAL if over is None else over), "ENTER", "ENTER")
+
+
+def test_minimal_with_an_installed_assistant_says_it_will_be_stopped(
+    catalog: Catalog, usable_facts: Facts
+) -> None:
+    facts = replace(usable_facts, hermes_installed=True)
+    rows = view(_minimal_review(catalog, facts)).rows
+    (row,) = _stop_rows(rows)
+    assert (row.label, row.detail) == (_STOP_LABEL, _STOP_VALUE)
+    ids = [r.id for r in rows]
+    assert ids.index("assistant_stop") == ids.index("install") + 1
+    assert ids.index("terminal_tool") == ids.index("assistant_stop") + 1
+
+
+@pytest.mark.parametrize("known", [False, None])
+def test_no_stop_row_when_the_assistant_is_not_installed_or_unknown(
+    catalog: Catalog, usable_facts: Facts, known: bool | None
+) -> None:
+    facts = replace(usable_facts, hermes_installed=known)
+    assert _stop_rows(view(_minimal_review(catalog, facts)).rows) == []
+
+
+def test_no_stop_row_when_the_assistant_stays_on(catalog: Catalog, usable_facts: Facts) -> None:
+    facts = replace(usable_facts, hermes_installed=True)
+    assert _stop_rows(view(_minimal_review(catalog, facts, [])).rows) == []
+
+
+@pytest.mark.parametrize("flag", ["--no-hermes", "--no-agents"])
+def test_a_flag_that_fixes_the_assistant_off_shows_the_stop_row(
+    catalog: Catalog, usable_facts: Facts, flag: str
+) -> None:
+    facts = replace(usable_facts, hermes_installed=True)
+    over = [Override("apps.hermes.enabled", False, flag)]
+    assert len(_stop_rows(view(_minimal_review(catalog, facts, over)).rows)) == 1
+
+
+@pytest.mark.parametrize("mode", ["--dev", "--no-start"])
+def test_no_stop_row_with_a_mode_that_leaves_services_alone(
+    catalog: Catalog, usable_facts: Facts, mode: str
+) -> None:
+    facts = replace(usable_facts, hermes_installed=True)
+    s = run(start(catalog, facts, over=_MINIMAL, mode=mode), "ENTER", "ENTER")
+    assert _stop_rows(view(s).rows) == []
+
+
+def test_the_minimal_review_with_the_stop_row_fits_80_by_24(
+    catalog: Catalog, usable_facts: Facts
+) -> None:
+    facts = replace(usable_facts, hermes_installed=True)
+    review = view(_minimal_review(catalog, facts))
+    assert review.screen is Screen.REVIEW
+    for plain in (False, True):
+        lines = render(review, width=80, plain=plain, color=False)
+        assert len(lines) <= 24, (plain, len(lines))
+        assert any(_STOP_VALUE in strip_ansi(x) for x in lines)
+
+
+def test_the_installed_fact_does_not_change_the_document(
+    catalog: Catalog, usable_facts: Facts
+) -> None:
+    from hal0.install.wizard.flow_model import effective_doc
+
+    unknown = _minimal_review(catalog, usable_facts)
+    known = _minimal_review(catalog, replace(usable_facts, hermes_installed=True))
+    assert effective_doc(known) == effective_doc(unknown)
+    assert chosen(known) == chosen(unknown)
+
+
+def test_the_assistant_help_says_turning_it_off_stops_an_installed_one(catalog: Catalog) -> None:
+    (hermes,) = [c for c in catalog.components if c.id == "hermes"]
+    assert hermes.help.endswith(
+        " Turning this off on a box that already has the assistant stops it; it stays "
+        "installed, and turning it on here again starts it."
+    )
+    assert "does not remove or stop" not in hermes.help

@@ -11,6 +11,7 @@ from hal0.install.wizard.document import Override, effective
 from hal0.install.wizard.facts import Facts, load_facts
 from hal0.install.wizard.flow import (
     Outcome,
+    Row,
     Screen,
     State,
     chosen,
@@ -992,3 +993,49 @@ def test_a_control_character_in_typed_text_is_refused_before_it_is_stored(
     assert chosen(after) == chosen(s)
     assert secret(after) is None
     assert after.token is None
+
+
+# ---------------------------------- the assistant row says an installed one will be stopped
+
+_STOP_NOTE = "installed; will be stopped"
+
+
+def _assistant_job(state: State) -> Row:
+    return next(r for r in view(state).rows if r.id == "hermes")
+
+
+def test_an_unticked_assistant_row_notes_that_the_installed_one_will_be_stopped(
+    catalog: Catalog, usable_facts: Facts
+) -> None:
+    facts = replace(usable_facts, hermes_installed=True)
+    s = custom(catalog, facts)
+    assert _assistant_job(s).note == ""  # on by default: nothing to stop
+    off = open_field(s, "hermes")
+    row = _assistant_job(off)
+    assert (row.value, row.state, row.note) == (False, "open", _STOP_NOTE)
+
+
+@pytest.mark.parametrize("known", [False, None])
+def test_no_stop_note_when_the_assistant_is_not_installed_or_unknown(
+    catalog: Catalog, usable_facts: Facts, known: bool | None
+) -> None:
+    s = open_field(custom(catalog, replace(usable_facts, hermes_installed=known)), "hermes")
+    assert _assistant_job(s).note == ""
+
+
+def test_the_stop_note_follows_a_note_a_flag_already_gives(
+    catalog: Catalog, usable_facts: Facts
+) -> None:
+    facts = replace(usable_facts, hermes_installed=True)
+    over = [Override("apps.hermes.enabled", False, "--no-hermes")]
+    row = _assistant_job(custom(catalog, facts, over=over))
+    assert row.note == f"set by --no-hermes; {_STOP_NOTE}"
+
+
+@pytest.mark.parametrize("mode", _MODES)
+def test_no_stop_note_with_a_mode_that_leaves_services_alone(
+    catalog: Catalog, usable_facts: Facts, mode: str
+) -> None:
+    facts = replace(usable_facts, hermes_installed=True)
+    s = open_field(custom(catalog, facts, mode=mode), "hermes")
+    assert _assistant_job(s).note == ""
