@@ -6,6 +6,12 @@ policy file, the operator's override env file, the terminal-tool decision) and
 ``/var/lib/hal0/agents`` (the identity secret every agent key derives from, the
 session secret, each agent's data directory) on every run.
 
+An agent's upstream packages stay with that state on a default run: the
+companion that removes them runs only under a confirmed ``--purge``. If a
+default run removed the packages while keeping the seed and data directory,
+``hal0 agent install`` on the re-install would return early ("already
+present") and report an agent with nothing behind it.
+
 These run the real ``installer/uninstall.sh`` in ``--dev`` mode against a
 throwaway prefix, which needs no root and touches nothing outside the prefix.
 """
@@ -56,11 +62,12 @@ def _tree(prefix: Path, *, companion_exit: int = 0) -> dict[str, Path]:
     return files
 
 
-def _run(prefix: Path, *args: str) -> subprocess.CompletedProcess[str]:
+def _run(prefix: Path, *args: str, stdin: str = "") -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         ["bash", str(_UNINSTALL), "--dev", *args],
         env={"PATH": "/usr/bin:/bin", "HAL0_PREFIX": str(prefix), "HOME": str(prefix)},
         cwd=prefix,
+        input=stdin,
         capture_output=True,
         text=True,
         check=False,
@@ -69,49 +76,69 @@ def _run(prefix: Path, *args: str) -> subprocess.CompletedProcess[str]:
 
 
 _KEPT = ("policy", "pi_policy", "override", "terminal", "identity", "session")
+_STATE = (*_KEPT, "workspace_file", "hermes_data")
 
 
 def test_default_run_keeps_agent_config_and_state(tmp_path: Path) -> None:
     files = _tree(tmp_path)
     proc = _run(tmp_path)
     assert proc.returncode == 0, proc.stdout + proc.stderr
-    for name in (*_KEPT, "workspace_file", "hermes_data"):
+    for name in _STATE:
         assert files[name].read_text() == "operator data\n", name
-    assert "Kept agent configuration" in proc.stdout
+    assert "agent policy" in proc.stdout + proc.stderr
     assert not files["venvs"].exists()
 
 
-def test_companion_runs_with_its_agent_directory_intact_then_is_removed(tmp_path: Path) -> None:
+def test_default_run_does_not_run_or_remove_the_companion(tmp_path: Path) -> None:
+    """The agent's packages stay with its kept state, so a re-install works."""
     files = _tree(tmp_path)
     proc = _run(tmp_path)
-    assert files["seen"].read_text().strip() == "intact"
-    assert "Ran uninstall companion for pi" in proc.stdout
-    assert not files["companion"].exists()
-    assert "No uninstall companion for hermes" in proc.stdout
-
-
-def test_failed_companion_is_kept_for_a_retry(tmp_path: Path) -> None:
-    files = _tree(tmp_path, companion_exit=3)
-    proc = _run(tmp_path)
-    assert "Companion uninstall for pi returned non-zero" in proc.stdout + proc.stderr
+    assert not files["seen"].exists()
     assert files["companion"].exists()
-    assert files["policy"].exists()
+    assert "uninstall companion" not in proc.stdout + proc.stderr
 
 
-def test_purge_removes_agent_config_and_state_after_the_companion_ran(tmp_path: Path) -> None:
+def test_purge_runs_the_companion_with_its_directory_intact_then_removes_all(
+    tmp_path: Path,
+) -> None:
     files = _tree(tmp_path)
     proc = _run(tmp_path, "--purge", "--force")
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert files["seen"].read_text().strip() == "intact"
-    for name in (*_KEPT, "workspace_file", "hermes_data"):
+    assert "Ran uninstall companion for pi" in proc.stdout
+    assert "No uninstall companion for hermes" in proc.stdout
+    for name in (*_STATE, "companion"):
         assert not files[name].exists(), name
-    assert "Kept agent configuration" not in proc.stdout
 
 
-def test_header_and_help_say_the_agent_directories_are_kept() -> None:
+def test_purge_with_a_failing_companion_still_removes_everything(tmp_path: Path) -> None:
+    files = _tree(tmp_path, companion_exit=3)
+    proc = _run(tmp_path, "--purge", "--force")
+    assert "Companion uninstall for pi returned non-zero" in proc.stdout + proc.stderr
+    for name in _STATE:
+        assert not files[name].exists(), name
+
+
+def test_declined_purge_keeps_agent_state_and_runs_no_companion(tmp_path: Path) -> None:
+    """Anything but DELETE at the prompt must leave agents as a default run does."""
+    files = _tree(tmp_path)
+    proc = _run(tmp_path, "--purge", stdin="no\n")
+    assert "Aborted" in proc.stdout + proc.stderr
+    for name in _STATE:
+        assert files[name].read_text() == "operator data\n", name
+    assert not files["seen"].exists()
+    assert files["companion"].exists()
+
+
+def test_header_and_help_say_what_is_kept() -> None:
     text = _UNINSTALL.read_text(encoding="utf-8")
-    assert "/etc/hal0/agents" in text.split("set -uo pipefail")[0]
+    header = text.split("set -uo pipefail")[0]
+    assert "/etc/hal0/agents" in header
+    assert "stay installed with that state" in header
     helped = subprocess.run(
         ["bash", str(_UNINSTALL), "--help"], capture_output=True, text=True, check=True
     ).stdout
     assert "agent policy" in helped and "identity and data" in helped
+    assert "own packages stay" in helped
+    default, purge = helped.split("--purge        ")[:2]
+    assert "bundled agents' packages" in purge and "bundled agents' packages" not in default
