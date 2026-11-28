@@ -1,0 +1,125 @@
+{
+  "version": 1,
+  "generated_from": "src/hal0/registry/curated.py",
+  "models": [
+    {
+      "id": "qwen3-coder-next",
+      "role": "starter",
+      "name": "Qwen3 Coder Next",
+      "size_gb": 49.0,
+      "min_gpu_pool_gb": 56.0
+    },
+    {
+      "id": "qwen3.8-27b",
+      "role": "starter",
+      "name": "Qwen3.8 27B",
+      "size_gb": 18.49,
+      "min_gpu_pool_gb": 25.0
+    },
+    {
+      "id": "qwopus3-6-27b-coder-mtp-q6-k",
+      "role": "starter",
+      "name": "Qwopus3.6 27B Coder (MTP Q6_K)",
+      "size_gb": 22.4,
+      "min_gpu_pool_gb": 23.0
+    },
+    {
+      "id": "gpt-oss-20b",
+      "role": "starter",
+      "name": "GPT-OSS 20B",
+      "size_gb": 12.0,
+      "min_gpu_pool_gb": 16.0
+    },
+    {
+      "id": "qwen3.5-9b",
+      "role": "starter",
+      "name": "Qwen3.5 9B",
+      "size_gb": 6.0,
+      "min_gpu_pool_gb": 8.0
+    },
+    {
+      "id": "qwopus3-5-9b-coder-mtp-q6-k",
+      "role": "starter",
+      "name": "Qwopus3.5 9B Coder (MTP Q6_K)",
+      "size_gb": 7.6,
+      "min_gpu_pool_gb": 8.0
+    },
+    {
+      "id": "qwen3-5-9b-deepseek-v4-flash-mtp-q6-k",
+      "role": "starter",
+      "name": "Qwen3.5 9B DeepSeek V4 Flash (MTP Q6_K)",
+      "size_gb": 7.6,
+      "min_gpu_pool_gb": 8.0
+    },
+    {
+      "id": "gemma-4-12b-it-ud-q4-k-xl",
+      "role": "starter",
+      "name": "Gemma 4 12B IT (UD Q4_K_XL)",
+      "size_gb": 7.4,
+      "min_gpu_pool_gb": 8.0
+    },
+    {
+      "id": "hal0-brain-sft-f16",
+      "role": "starter",
+      "name": "hal0 brain (F16, portable)",
+      "size_gb": 2.0,
+      "min_gpu_pool_gb": 4.0
+    },
+    {
+      "id": "lfm2.5-2.6b",
+      "role": "starter",
+      "name": "LFM2.5 2.6B",
+      "size_gb": 2.87,
+      "min_gpu_pool_gb": 4.0
+    },
+    {
+      "id": "qwen3-4b",
+      "role": "starter",
+      "name": "Qwen3 4B",
+      "size_gb": 2.5,
+      "min_gpu_pool_gb": 4.0
+    },
+    {
+      "id": "qwopus3-5-4b-coder-mtp-q6-k",
+      "role": "starter",
+      "name": "Qwopus3.5 4B Coder (MTP Q6_K)",
+      "size_gb": 3.6,
+      "min_gpu_pool_gb": 4.0
+    },
+    {
+      "id": "llama32-3b",
+      "role": "starter",
+      "name": "Llama 3.2 3B Instruct",
+      "size_gb": 2.0,
+      "min_gpu_pool_gb": 3.0
+    },
+    {
+      "id": "phi3-mini",
+      "role": "starter",
+      "name": "Phi-3 Mini 4K Instruct",
+      "size_gb": 2.4,
+      "min_gpu_pool_gb": 3.0
+    },
+    {
+      "id": "qwen3.5-0.8b",
+      "role": "starter",
+      "name": "Qwen3.5 0.8B",
+      "size_gb": 0.6,
+      "min_gpu_pool_gb": 1.0
+    },
+    {
+      "id": "hal0-brain-sft-f16",
+      "role": "brain",
+      "name": "hal0 brain (F16, portable)",
+      "size_gb": 2.0,
+      "min_gpu_pool_gb": 4.0
+    },
+    {
+      "id": "lfm2.5-2.6b",
+      "role": "brain",
+      "name": "LFM2.5 2.6B",
+      "size_gb": 2.87,
+      "min_gpu_pool_gb": 4.0
+    }
+  ]
+}
