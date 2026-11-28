@@ -57,7 +57,14 @@ def test_installed_current_active_and_global_passes(tmp_path: Path) -> None:
         ({"status": "converged", "active": False, "global": True}, "not active"),
         ({"status": "converged", "active": True, "global": False}, "not global"),
         ({"status": "outdated", "active": True, "global": True}, "older than this release"),
+        ({"status": "absent"}, "restart hal0-api"),
         ({"status": "absent"}, "hal0 update component openwebui"),
+        ({"status": "unavailable", "http_status": 500}, "answered HTTP 500"),
+        (
+            {"status": "unavailable", "http_status": 200, "reason": "unexpected_body"},
+            "does not understand",
+        ),
+        ({"status": "unavailable", "reason": "BadStatusLine"}, "did not answer"),
         ({"status": "auth_rejected"}, "rejected"),
         ({"status": "conflict"}, "does not manage"),
         ({"status": "unavailable"}, "did not answer"),
@@ -137,3 +144,56 @@ def test_inspect_maps_http_failures(code: int, want: str) -> None:
 def test_inspect_without_a_token_asks_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("HAL0_OPENWEBUI_ADMIN_TOKEN", raising=False)
     assert fs.inspect_hindsight_rag_function()["status"] == "auth_required"
+
+
+def test_the_base_url_comes_from_api_env_or_the_default_never_the_shell(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The admin token is sent to the address hal0-api would use. An exported
+    variable in the shell that runs the doctor must not redirect it."""
+    monkeypatch.setenv("HAL0_OPENWEBUI_INTERNAL_URL", "http://elsewhere.invalid:1")
+    _, seen = _row(tmp_path, state={"status": "absent"})
+    assert seen[0]["base_url"] == fs.DEFAULT_BASE_URL
+
+    env = tmp_path / "api.env"
+    unit = tmp_path / "openwebui.container"
+    env.write_text(
+        "HAL0_OPENWEBUI_ADMIN_TOKEN=tok\nHAL0_OPENWEBUI_INTERNAL_URL=http://127.0.0.1:3999\n"
+    )
+    calls: list[dict[str, Any]] = []
+    da.check_openwebui_memory_filter(
+        unit_path=unit, api_env=env, inspect=lambda **kw: calls.append(kw) or {"status": "absent"}
+    )
+    assert calls[0]["base_url"] == "http://127.0.0.1:3999"
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [
+        __import__("http.client").client.BadStatusLine("junk"),
+        __import__("http.client").client.InvalidURL("bad"),
+        __import__("http.client").client.IncompleteRead(b""),
+        ConnectionRefusedError("refused"),
+        TimeoutError("slow"),
+    ],
+)
+def test_inspect_reports_unavailable_for_every_transport_failure(exc: Exception) -> None:
+    """A listener that is not HTTP, a bad URL or a cut-off body must not
+    raise through the doctor: one row cannot take the whole report down."""
+
+    def request(method: str, path: str, payload: dict | None = None):
+        raise exc
+
+    out = fs.inspect_hindsight_rag_function(requester=request)
+    assert out["status"] == "unavailable"
+    assert out["reason"] == type(exc).__name__
+
+
+def test_inspect_marks_an_unexpected_body() -> None:
+    request, _ = _requester({"not": "a list"})
+    out = fs.inspect_hindsight_rag_function(requester=request)
+    assert (out["status"], out["http_status"], out["reason"]) == (
+        "unavailable",
+        200,
+        "unexpected_body",
+    )

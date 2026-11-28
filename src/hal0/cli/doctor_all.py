@@ -2576,10 +2576,23 @@ def check_openwebui_memory_filter(
         )
     if inspect is None:
         from hal0.openwebui.function_sync import inspect_hindsight_rag_function as inspect
-    base_url = _read_env_value(env_path, "HAL0_OPENWEBUI_INTERNAL_URL")
-    state = inspect(token=token, base_url=base_url or None)
+    from hal0.openwebui.function_sync import DEFAULT_BASE_URL
+
+    # api.env or the default, never this shell's environment: the token goes
+    # where hal0-api would send it and nowhere an exported variable points.
+    base_url = (
+        _read_env_value(env_path, "HAL0_OPENWEBUI_INTERNAL_URL") or ""
+    ).strip() or DEFAULT_BASE_URL
+    state = inspect(token=token, base_url=base_url)
     status = state.get("status")
     converge = "run `hal0 update component openwebui`"
+    # The converge runs inside hal0-api, which reads the token from its own
+    # environment: a token added to api.env reaches it only after a restart,
+    # and without one the converge installs nothing and says nothing.
+    restart_then_converge = (
+        "restart hal0-api so it reads the token (`sudo systemctl restart hal0-api`), "
+        f"then {converge}"
+    )
     if status == "converged":
         off = [
             n
@@ -2598,7 +2611,9 @@ def check_openwebui_memory_filter(
     if status == "outdated":
         return Check(key, label, _WARN, f"installed but older than this release; {converge}")
     if status == "absent":
-        return Check(key, label, _WARN, f"not installed although a token is set; {converge}")
+        return Check(
+            key, label, _WARN, f"not installed although a token is set; {restart_then_converge}"
+        )
     if status == "auth_rejected":
         return Check(
             key,
@@ -2615,7 +2630,30 @@ def check_openwebui_memory_filter(
             "a Function with the ID hal0_hindsight_rag exists that hal0 does not manage; "
             "hal0 will not overwrite it: rename or remove it in Open WebUI, then " + converge,
         )
-    return Check(key, label, _WARN, "Open WebUI did not answer; start it and re-run hal0 doctor")
+    http_status = state.get("http_status")
+    if state.get("reason") == "unexpected_body":
+        return Check(
+            key,
+            label,
+            _WARN,
+            f"Open WebUI answered {http_status} with a body hal0 does not understand; "
+            "its Functions API may have changed in this Open WebUI version",
+        )
+    if http_status:
+        return Check(
+            key,
+            label,
+            _WARN,
+            f"Open WebUI answered HTTP {http_status} to the Functions request at {base_url}; "
+            "see its log (`journalctl -u openwebui`)",
+        )
+    why = f" ({state['reason']})" if state.get("reason") else ""
+    return Check(
+        key,
+        label,
+        _WARN,
+        f"Open WebUI did not answer at {base_url}{why}; start it and re-run hal0 doctor",
+    )
 
 
 @_report_unreadable("openwebui_mcp", "Open WebUI MCP tools")
