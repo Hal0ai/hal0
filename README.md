@@ -36,7 +36,7 @@ curl -fsSL https://hal0.dev/install.sh | sudo bash
 > plain-language walkthrough from install to your first model, slots,
 > profiles, agents and memory.
 
-> **v1.8.2 is the current stable release** (2026-11-27), a fix release on
+> **v1.8.2 is the current stable release** (2026-11-28), a fix release on
 > 1.8.0. The 1.8 line adds the agent
 > bridge, Open WebUI's tools and shared memory, an installer component
 > checklist, an opt-in rootless podman box, slot tune overrides, the

@@ -30,7 +30,7 @@ applying. Add those subsections to a version's section to surface them; see
 
 ## [Unreleased]
 
-## [1.8.2] — 2026-11-27
+## [1.8.2] — 2026-11-28
 
 ### Highlights
 
@@ -39,6 +39,7 @@ applying. Add those subsections to a version's section to surface them; see
 - **Phones get a bottom tab bar, card tables and larger touch targets.** Overview, Slots, Models and Agents are one tap away, wide tables show each row as a card, and long page sections fold behind a toggle. Wider screens with a mouse are unchanged.
 - **Open WebUI moves to v0.13.5, which converts the chat history on its first start.** Back up `/var/lib/hal0/openwebui` before you update a box that has chats; see Migrations.
 - **Every runner moves.** llama.cpp goes to b12816, ComfyUI to 0.46.0, kokoro to 0.6.1 and the NPU runner to FastFlowLM 1.0.14. No llama-server flag was removed. Two FLM models need pulling again, one FLM tag was renamed upstream, and your own ComfyUI custom nodes are worth a check after the update; see Migrations.
+- **A default `hal0 uninstall` no longer deletes the agents' configuration and the secret their keys derive from.** Earlier versions removed both on every uninstall, although the default uninstall is documented as keeping configuration and data.
 - **Two updater fixes.** A refused Hermes downgrade no longer leaves Hermes marked `build_failed`, and an update that is really a move to the other channel's build of the same version now says so.
 
 ### Breaking
@@ -51,6 +52,10 @@ applying. Add those subsections to a version's section to surface them; see
 
 ### Fixed
 
+- **A default `hal0 uninstall` keeps the agents' configuration and state.** It deleted `/etc/hal0/agents` and `/var/lib/hal0/agents` on every run, although the default uninstall is documented as keeping `/etc/hal0` and the data directory. That lost each agent's policy file, the `hermes.override.env` file, the terminal-tool decision, the secret every agent key derives from, and each agent's data directory. The default run now leaves the agents alone, packages included; `--purge` removes their packages and the two directories, after its confirmation. (#4009, #4014)
+- **A fresh install no longer leaves Open WebUI's chat port one restart away from going dead.** The installer started Open WebUI before it enabled root linger. On an install run with no root login session (`pct exec`, cloud-init, a CI runner), enabling linger then mounted a fresh `/run/user/0` over the directory podman kept network namespaces in, so `hal0 doctor all` showed a failing Container netns row and port 3001 stopped answering after the container's first restart. Root linger is now enabled before any service starts, and the installer waits for the runtime directory. A re-run on a box whose linger was off names the containers that need one restart. Repair an affected box with `hal0 doctor ports --fix`. (#3968, #3971)
+- **Re-running the installer repairs a box whose Python changed underneath it.** After an in-place OS release upgrade (Ubuntu 24.04 to 26.04 moves the system Python from 3.12 to 3.14), every hal0 service failed with `No module named 'hal0'`, and the installer re-run died at its Python step with `No module named 'pip'` and a hint to use `HAL0_PYTHON=python3.12`, which 26.04 does not ship. The installer now rebuilds the main venv when its interpreter does not run, is another minor version than the one selected, or cannot import pip, and its recovery hint lists the interpreters the box has. This was tested against a simulated stale venv, not a real release upgrade. The decision model server's venv is not covered; see #3960. (#3959, #3977)
+- **The installer names AMD's kernel floor for Strix Halo.** When it found no GPU render node on a bare-metal host, its hint said kernel 6.14 or newer was enough. AMD's floor is Linux 6.18.4, or on Ubuntu 24.04 the HWE kernel `6.17.0-19.19~24.04.2` or the OEM kernel `6.14.0-1018`; a plain 6.14 kernel lacks the fixes ROCm needs. The hint now gives those versions. (#3975, #3998)
 - **The Overview Services card keeps its "wired to" chips inside the card.** On a phone or tablet a service wired to several targets pushed the chips past the card's edge and made the whole page scroll sideways. The chips now sit on their own line under the service at every width, and the "Set `HAL0_…_PUBLIC_URL`" note wraps instead of ending in an ellipsis. (#3956)
 - **Models and Runner Images rows show the name at phone width.** At 390 px the six desktop columns left no room for the name, so a row showed a size and a status and nothing else. A row is now two lines there: state, name and menu, then tags, size and status. (#3956)
 - **Settings rows are no longer cut off by their panel.** At phone width the Hardware & Runtimes runner table, the Updates actions and the Security rows ran past the panel edge, which hid them; the memory reranker Provider select did the same up to tablet width. Rows now stack, and the runner table shows one runner per block. (#3956)
