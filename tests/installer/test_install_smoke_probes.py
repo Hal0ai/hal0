@@ -238,14 +238,11 @@ def test_missing_unit_with_memory_wanted_warns_and_is_recorded(tmp_path: Path) -
     assert "FAILED:memory-engine-version" in res.stdout
 
 
-# The installer runs the smoke under `set -euo pipefail` with an ERR trap that
-# aborts the install. The caller reads the probe's status with `|| _me_rc=$?`,
+# The installer runs the smoke under `set -euo pipefail`. It does not use
+# `set -E`, so an ERR trap does not fire inside a function; `set -e` is what
+# would end the run. The caller reads the probe's status with `|| _me_rc=$?`,
 # so a non-zero status must be recorded, never raised.
-_STRICT_SETUP = (
-    "set -euo pipefail\n"
-    "trap 'echo ERR_TRAP >&2; exit 99' ERR\n"
-    "smoke_memory_engine_version() { return %d; }\n"
-)
+_STRICT_SETUP = "set -euo pipefail\nsmoke_memory_engine_version() { return %d; }\n"
 _STRICT_TAIL = "run_post_install_smoke\necho REACHED_AFTER_SMOKE"
 
 
@@ -255,7 +252,6 @@ def test_nonzero_probe_status_does_not_abort_the_install(tmp_path: Path) -> None
         run_dir.mkdir()
         res = _memory_run(run_dir, _STRICT_SETUP % status, tail=_STRICT_TAIL)
         assert "REACHED_AFTER_SMOKE" in res.stdout, f"status {status}: {res.stderr}"
-        assert "ERR_TRAP" not in res.stderr, f"status {status}"
         assert res.returncode == 0, f"status {status}: {res.stderr}"
 
 
@@ -304,20 +300,29 @@ def _unit_guard_region() -> str:
     return _TEXT[start:end]
 
 
+_REGION_STUBS = ("systemctl", "install", "pip", "python3", "curl", "chown", "mkdir", "cmp", "grep")
+
+
 def _run_unit_guard(tmp_path: Path, setup: str) -> subprocess.CompletedProcess[str]:
     tree = tmp_path / "tree"
     tree.mkdir()  # an install tree without installer/systemd/hindsight-api.service
+    stubs = tmp_path / "stubs"
+    stubs.mkdir()
+    for name in _REGION_STUBS:
+        _write_exec(stubs / name, f"echo {name} >> {shlex.quote(f'{tmp_path}/stub.calls')}\nexit 1")
     script = tmp_path / "guard.sh"
     script.write_text(
         "#!/usr/bin/env bash\nset -euo pipefail\n"
         'info() { echo "INFO: $*"; }\nwarn() { echo "WARN: $*" >&2; }\n'
-        f"REPO_ROOT={shlex.quote(str(tree))}\n{setup}\n"
+        f"REPO_ROOT={shlex.quote(str(tree))}\n"
+        f"HAL0_BIN={shlex.quote(str(stubs / 'systemctl'))}\nVAR_DIR={shlex.quote(str(tmp_path / 'var'))}\n"
+        f"{setup}\n"
         f"{_unit_guard_region()}\necho REGION_DONE\n",
         encoding="utf-8",
     )
     return subprocess.run(
-        ["bash", str(script)],
-        env={"PATH": "/usr/bin:/bin", "HOME": str(tmp_path)},
+        ["/usr/bin/bash", str(script)],
+        env={"PATH": str(stubs), "HOME": str(tmp_path)},
         capture_output=True,
         text=True,
         timeout=30,
@@ -328,14 +333,19 @@ def _run_unit_guard(tmp_path: Path, setup: str) -> subprocess.CompletedProcess[s
 def test_missing_shipped_unit_file_is_named_in_a_warning(tmp_path: Path) -> None:
     res = _run_unit_guard(tmp_path, "unset HAL0_SKIP_HINDSIGHT")
     assert "REGION_DONE" in res.stdout, res.stderr
-    assert "installer/systemd/hindsight-api.service is missing" in res.stderr
+    assert (
+        "memory engine not set up on this run — installer/systemd/hindsight-api.service is missing"
+        in res.stderr
+    )
     assert "setting up Hindsight" not in res.stdout
+    assert not (tmp_path / "stub.calls").exists(), "the region must not start anything"
 
 
 def test_missing_shipped_unit_file_is_silent_when_memory_is_off(tmp_path: Path) -> None:
     res = _run_unit_guard(tmp_path, "HAL0_SKIP_HINDSIGHT=1")
     assert "REGION_DONE" in res.stdout, res.stderr
     assert res.stderr == ""
+    assert not (tmp_path / "stub.calls").exists(), "the region must not start anything"
 
 
 def test_no_usable_python_with_no_unit_is_a_failed_check(tmp_path: Path) -> None:
