@@ -105,6 +105,7 @@ hal0_apply_answers() {
 
     local -a names=() values=()
     local line name value known allowed
+    export -n output line value names values  # see _hal0_prepare_saved_answers
     # IFS='=' read drops one trailing '=' from the last field (a path ending in
     # '=' would lose it), so read whole lines and split at the first '='.
     while IFS= read -r line; do
@@ -186,20 +187,29 @@ _hal0_answers_warn() {
 }
 
 # Produce the saved form of the document at PATH into HAL0_ANSWERS_SAVED.
-# In this reader mode stdout carries the JSON on success and stderr only an
-# error (no warnings: apply already printed them), so merging them is safe.
-# On failure: one warning, nothing saved at the end. Always returns 0.
+# Standard output alone is the saved form. Standard error is kept apart: a
+# diagnostic printed by the interpreter must never end up inside the saved file.
+# It is dropped on success; on failure its first line goes into the one warning.
+# On failure: nothing saved at the end. Always returns 0.
 _hal0_prepare_saved_answers() {
-    local path="${1:-}" out rc=0 py="${_HAL0_ANSWERS_PY:-}"
+    local path="${1:-}" out rc=0 py="${_HAL0_ANSWERS_PY:-}" err_file err=""
+    # A local keeps the export attribute of a same-named variable in the
+    # environment; these hold document text and must not reach child processes.
+    export -n out err
     HAL0_ANSWERS_SAVED=""
     [[ -n "${py}" ]] || py="$(hal0_answers_python)" || py=""
     if [[ -z "${py}" ]]; then
         _hal0_answers_warn "could not prepare a copy of the answers document to keep: no Python 3.10 or newer"
         return 0
     fi
-    out="$("${py}" -I "${_HAL0_ANSWERS_READER}" --emit-saved "${path}" 2>&1)" || rc=$?
+    err_file="$(mktemp 2>/dev/null)" || err_file=/dev/null
+    out="$("${py}" -I "${_HAL0_ANSWERS_READER}" --emit-saved "${path}" 2>"${err_file}")" || rc=$?
+    if [[ "${err_file}" != /dev/null ]]; then
+        IFS= read -r err <"${err_file}" || true
+        rm -f -- "${err_file}"
+    fi
     if [[ "${rc}" -ne 0 || -z "${out}" ]]; then
-        _hal0_answers_warn "could not prepare a copy of the answers document to keep: ${out%%$'\n'*}"
+        _hal0_answers_warn "could not prepare a copy of the answers document to keep: ${err:-no reason given}"
         return 0
     fi
     HAL0_ANSWERS_SAVED="${out}"

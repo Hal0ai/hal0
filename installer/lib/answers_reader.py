@@ -119,6 +119,17 @@ _APP_KEYS = {
 }
 _GEN_MODES = ("off", "scaffold_only", "scaffold_and_download")
 
+# What a `slots` entry may carry: the keys src/hal0/install/answers.py
+# (_resolve_slots) reads. Each value is a flat scalar checked below.
+_SLOT_KEYS = frozenset(
+    {"capability", "name", "port", "model_id", "device", "profile", "context_size",
+     "enabled_on_pull"}
+)
+_SLOT_CAPABILITIES = ("chat", "coder")  # _VALID_SLOT_CAPABILITIES in the loader
+_SLOT_NAME = re.compile(r"^[a-z0-9][a-z0-9_-]{0,31}$")  # slots/routing.py slot-name policy
+_SLOT_MODEL = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:+/-]{0,199}$")
+_SLOT_WORD = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")  # device and profile
+
 # Generated beside the reader (scripts/gen_setup_models.py); located from this
 # file, never from the working directory.
 _MANIFEST = os.path.join(
@@ -546,6 +557,82 @@ def _load_manifest(path: str, problems: _Problems) -> dict[str, set[str]] | None
         return None
 
 
+def _q_flat(value: Any) -> str:
+    """Like _q, but a list or object is named, never shown: it may hold a pasted secret."""
+    if isinstance(value, dict):
+        return "an object"
+    if isinstance(value, list):
+        return "a list"
+    return _q(value)
+
+
+def _slot_text(entry: dict[str, Any], key: str, pattern: re.Pattern[str], full: str,
+               problems: _Problems, *, nullable: bool) -> None:
+    if key not in entry:
+        return
+    value = entry[key]
+    if value is None and nullable:
+        return
+    if not isinstance(value, str) or not pattern.match(value):
+        shape = "a name like 'chat-1' (a-z, 0-9, '_', '-')" if pattern is _SLOT_NAME else (
+            "plain text (letters, digits, '.', '_', '-', ':', '+', '/')"
+        )
+        problems.error(f"{full}.{key}: must be {shape} (got {_q_flat(value)})")
+
+
+def _check_slots(slots: Any, strict: bool, problems: _Problems) -> None:
+    """Validate `slots` the way the loader reads it; nothing nested, nothing unknown kept."""
+    if slots is None:
+        return
+    if not isinstance(slots, list):
+        problems.error("slots: must be a list")
+        return
+    seen: dict[int, int] = {}
+    for i, entry in enumerate(slots):
+        full = f"slots[{i}]"
+        if not isinstance(entry, dict):
+            problems.error(f"{full}: must be a mapping")
+            continue
+        _unknown(entry, _SLOT_KEYS, full, strict, problems)
+        if "capability" in entry and entry["capability"] not in _SLOT_CAPABILITIES:
+            problems.error(
+                f"{full}.capability: must be one of {', '.join(_SLOT_CAPABILITIES)} "
+                f"(got {_q_flat(entry['capability'])})"
+            )
+        _slot_text(entry, "name", _SLOT_NAME, full, problems, nullable=False)
+        port = entry.get("port")
+        if "port" in entry:
+            if isinstance(port, bool) or not isinstance(port, int) or not 1 <= port <= 65535:
+                problems.error(f"{full}.port: must be an integer from 1 to 65535")
+            elif port in seen:
+                problems.error(f"{full}.port: {port} is already used by slots[{seen[port]}]")
+            else:
+                seen[port] = i
+        _slot_text(entry, "model_id", _SLOT_MODEL, full, problems, nullable=True)
+        _slot_text(entry, "device", _SLOT_WORD, full, problems, nullable=True)
+        _slot_text(entry, "profile", _SLOT_WORD, full, problems, nullable=True)
+        if "context_size" in entry:
+            size = entry["context_size"]
+            if size != "auto" and (isinstance(size, bool) or not isinstance(size, int) or size < 1):
+                problems.error(f"{full}.context_size: must be a positive integer or 'auto'")
+        if "enabled_on_pull" in entry and not isinstance(entry["enabled_on_pull"], bool):
+            problems.error(f"{full}.enabled_on_pull: must be true or false")
+
+
+def _bind_host_ok(value: Any) -> bool:
+    """An IP address or a host name: text, no control characters, not an option."""
+    if not isinstance(value, str):
+        return False
+    text = value.strip()
+    if not text or text.startswith("-") or _has_control(text):
+        return False
+    if _ip_literal(text):
+        return True
+    # A dotted name whose last label is a number (999.1.1.1) is a malformed address.
+    last = text.rstrip(".").rsplit(".", 1)[-1].lower()
+    return _dns_name(text) and not re.fullmatch(r"[0-9]+|0x[0-9a-f]*", last)
+
+
 def _a(word: str) -> str:
     return ("an " if word[:1] in "aeiou" else "a ") + word
 
@@ -585,8 +672,7 @@ def _build(doc: dict[str, Any], origin: str, problems: _Problems,
         problems.error(f"version: must be 1 (got {_q(version)})")
 
     _unknown(doc, _TOP_KEYS, "", strict, problems)
-    if doc.get("slots") is not None and not isinstance(doc["slots"], list):
-        problems.error("slots: must be a list")
+    _check_slots(doc.get("slots"), strict, problems)
     if doc.get("huggingface") is not None:
         if not isinstance(doc["huggingface"], dict):
             problems.error("huggingface: must be a mapping")
@@ -709,10 +795,17 @@ def _build(doc: dict[str, Any], origin: str, problems: _Problems,
             out["HAL0_PORT"] = str(port)
     if net.get("bind_host") is not None:
         # A key of the document format that the installer cannot honour (it
-        # binds 0.0.0.0): a warning in every document, never an error.
-        problems.warn(
-            "network.bind_host is not applied at install; change it afterwards with hal0 network"
-        )
+        # binds 0.0.0.0). It is still part of the document, so it is checked in
+        # every mode; a valid one draws the "not applied" warning, nothing more.
+        if not _bind_host_ok(net["bind_host"]):
+            problems.error(
+                f"network.bind_host: {_q_flat(net['bind_host'])} must be an IP address or a host name"
+            )
+        else:
+            problems.warn(
+                "network.bind_host is not applied at install; "
+                "change it afterwards with hal0 network"
+            )
     value = net.get("hostname")
     if value is not None:
         if not isinstance(value, str):
@@ -810,7 +903,8 @@ def _saved_document(doc: dict[str, Any]) -> dict[str, Any]:
 
     Unknown keys are dropped at every level that has a key table (a pasted
     secret would sit in one); `huggingface` and `apps.hermes.terminal_tool`
-    are known but never kept. `slots` is kept whole. Document key order holds.
+    are known but never kept. `slots` entries keep only the keys the loader reads.
+    Document key order holds.
     """
     tables: dict[str, frozenset[str]] = dict(_SECTION_KEYS)
     tables["access"] = frozenset({"admin_key"})
@@ -828,6 +922,12 @@ def _saved_document(doc: dict[str, Any]) -> dict[str, Any]:
                     entry = {k: v for k, v in entry.items() if k in keep}
                 apps[app] = entry
             value = apps
+        elif key == "slots" and isinstance(value, list):
+            value = [
+                {k: v for k, v in entry.items() if k in _SLOT_KEYS}
+                for entry in value
+                if isinstance(entry, dict)
+            ]
         elif key in tables and isinstance(value, dict):
             value = {k: v for k, v in value.items() if k in tables[key]}
         saved[key] = value

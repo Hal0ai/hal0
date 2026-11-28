@@ -622,6 +622,7 @@ def test_emit_saved_known_keys_round_trip(tmp_path: Path) -> None:
     assert proc.returncode == 0, proc.stderr
     expected = json.loads(json.dumps(doc))
     expected["apps"]["hermes"] = {"enabled": True}
+    expected["slots"] = [{"name": "a"}]  # unknown slot-entry keys are dropped
     assert json.loads(proc.stdout) == expected
     assert proc.stderr == ""
 
@@ -808,3 +809,121 @@ def test_the_document_is_read_through_one_nonblocking_descriptor() -> None:
     assert "os.O_NONBLOCK" in text and "os.fstat(fd)" in text
     assert text.count("_read_capped(path)") == 2  # the document and the model list
     assert "with open(" not in text and "os.stat(" not in text  # no second look by name
+
+
+# ── network.bind_host: checked in every mode, kept when valid ───────────────
+
+
+@pytest.mark.parametrize("strict", [False, True])
+@pytest.mark.parametrize("good", ["0.0.0.0", "127.0.0.1", "::1", "2001:db8::1", "box-1",
+                                  "box.example.com", " 192.0.2.5 "])
+def test_valid_bind_host_is_kept_and_warns_once(tmp_path: Path, strict: bool, good: str) -> None:
+    proc = run({"version": 1, "strict": strict, "network": {"bind_host": good}}, tmp_path)
+    assert lines(proc) == ["HAL0_NONINTERACTIVE=1"]
+    assert proc.stderr.count("network.bind_host is not applied at install") == 1
+
+
+@pytest.mark.parametrize("bad", ["-bad", "--help", "a b", "a;b", "$(x)", "x\ny", "x\x1b[31m", "",
+                                 "   ", "-1.2.3.4", "999.1.1.1", "bad_host", 5, True, [], {}, ["1.1.1.1"],
+                                 {"token": "secret"}, "a" * 300])
+@pytest.mark.parametrize("strict", [False, True])
+def test_invalid_bind_host_is_an_error(tmp_path: Path, strict: bool, bad: object) -> None:
+    proc = run({"version": 1, "strict": strict, "network": {"bind_host": bad}}, tmp_path)
+    assert proc.returncode == 2 and proc.stdout == ""
+    assert "network.bind_host" in proc.stderr
+    assert "\x1b" not in proc.stderr  # escaped, never raw
+    assert "secret" not in proc.stderr
+
+
+def test_bind_host_survives_into_the_saved_copy(tmp_path: Path) -> None:
+    proc = _emit({"version": 1, "network": {"bind_host": "192.0.2.1"}}, tmp_path)
+    assert json.loads(proc.stdout)["network"] == {"bind_host": "192.0.2.1"}
+    proc = _emit({"version": 1, "network": {"bind_host": {"x": "tok"}}}, tmp_path)
+    assert proc.returncode == 2 and proc.stdout == ""
+
+
+# ── slots: only what the document format defines, flat, validated ───────────
+
+_SLOT = {"capability": "coder", "name": "code-1", "port": 8201, "model_id": "qwen3-8b",
+         "device": "auto", "profile": "auto", "context_size": 8192, "enabled_on_pull": True}
+
+
+def test_a_full_slot_entry_is_accepted_and_kept(tmp_path: Path) -> None:
+    doc = {"version": 1, "strict": True, "slots": [_SLOT, {"capability": "chat", "name": "chat",
+                                                          "port": 8200, "model_id": "auto"}]}
+    proc = run(doc, tmp_path)
+    assert lines(proc) == ["HAL0_NONINTERACTIVE=1"]  # slots emit no variable
+    saved = _emit(doc, tmp_path)
+    assert json.loads(saved.stdout)["slots"] == doc["slots"]
+
+
+@pytest.mark.parametrize(
+    ("key", "bad"),
+    [
+        ("capability", "embed"), ("capability", 3), ("capability", None), ("capability", ["chat"]),
+        ("name", "Has Space"), ("name", "UPPER"), ("name", "x" * 40), ("name", ""), ("name", 5),
+        ("name", "a\nb"), ("name", {"k": "v"}),
+        ("port", 0), ("port", 65536), ("port", True), ("port", "8080"), ("port", 1.5), ("port", [1]),
+        ("model_id", 5), ("model_id", "bad id"), ("model_id", "a\x00b"), ("model_id", {"x": 1}),
+        ("model_id", ["a"]), ("model_id", "-x"),
+        ("device", "a b"), ("device", 3), ("device", ["gpu"]), ("device", {"a": 1}),
+        ("profile", "a b"), ("profile", 3), ("profile", {"a": 1}),
+        ("context_size", 0), ("context_size", -1), ("context_size", True), ("context_size", "big"),
+        ("context_size", [1]),
+        ("enabled_on_pull", "yes"), ("enabled_on_pull", 1), ("enabled_on_pull", None),
+    ],
+)
+def test_invalid_slot_values_are_errors(tmp_path: Path, key: str, bad: object) -> None:
+    entry = {**_SLOT, key: bad}
+    proc = run({"version": 1, "slots": [entry]}, tmp_path)
+    assert proc.returncode == 2 and proc.stdout == ""
+    assert f"slots[0].{key}" in proc.stderr
+
+
+@pytest.mark.parametrize("entry", ["x", 5, None, ["a"], True])
+def test_a_slot_entry_must_be_a_mapping(tmp_path: Path, entry: object) -> None:
+    proc = run({"version": 1, "slots": [entry]}, tmp_path)
+    assert proc.returncode == 2 and "slots[0]: must be a mapping" in proc.stderr
+
+
+def test_nesting_inside_a_slot_entry_is_refused(tmp_path: Path) -> None:
+    doc = {"version": 1, "slots": [{"name": "a", "extra": {"token": "hf_nested_secret"}}]}
+    for strict in (False, True):
+        proc = run({**doc, "strict": strict}, tmp_path)
+        assert "hf_nested_secret" not in proc.stderr
+    saved = _emit(doc, tmp_path)
+    assert "hf_nested_secret" not in saved.stdout
+
+
+def test_duplicate_slot_ports_are_an_error(tmp_path: Path) -> None:
+    proc = run({"version": 1, "slots": [{"name": "a", "port": 9000}, {"name": "b", "port": 9000}]}, tmp_path)
+    assert proc.returncode == 2 and "slots[1].port" in proc.stderr and "9000" in proc.stderr
+
+
+def test_unknown_slot_key_follows_strict(tmp_path: Path) -> None:
+    doc = {"version": 1, "slots": [{"name": "a", "mystery": "hf_token_like"}]}
+    loose = run(doc, tmp_path)
+    assert lines(loose) == ["HAL0_NONINTERACTIVE=1"]
+    assert "slots[0].mystery" in loose.stderr
+    strict = run({**doc, "strict": True}, tmp_path)
+    assert strict.returncode == 2 and "slots[0].mystery" in strict.stderr
+
+
+def test_unknown_slot_keys_are_dropped_from_the_saved_copy(tmp_path: Path) -> None:
+    doc = {"version": 1, "slots": [{"name": "a", "port": 9000, "token": "hf_secret_slot"}]}
+    proc = _emit(doc, tmp_path)
+    assert proc.returncode == 0, proc.stderr
+    assert "hf_secret_slot" not in proc.stdout
+    assert json.loads(proc.stdout)["slots"] == [{"name": "a", "port": 9000}]
+
+
+def test_slots_still_emit_no_variable(tmp_path: Path) -> None:
+    proc = run({"version": 1, "slots": [_SLOT]}, tmp_path)
+    assert lines(proc) == ["HAL0_NONINTERACTIVE=1"]
+
+
+@pytest.mark.parametrize("key", ["capability", "name", "model_id", "device", "profile"])
+def test_slot_messages_never_echo_a_nested_value(tmp_path: Path, key: str) -> None:
+    proc = run({"version": 1, "slots": [{key: {"token": "hf_nested_secret"}}]}, tmp_path)
+    assert proc.returncode == 2 and f"slots[0].{key}" in proc.stderr
+    assert "hf_nested_secret" not in proc.stderr

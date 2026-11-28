@@ -215,3 +215,83 @@ bash -c 'echo "child:[${{HAL0_ANSWERS_SAVED:-}}]"'
     )
     assert proc.stdout.splitlines() == ["rc=0", "0", "0", "child:[]"], proc.stderr
     assert "hf_secret_value" not in proc.stdout
+
+
+# ── the saved form is standard output alone ─────────────────────────────────
+
+
+def _fake_reader(tmp_path: Path, body: str) -> Path:
+    fake = tmp_path / "fake_reader.py"
+    fake.write_text(body, encoding="utf-8")
+    return fake
+
+
+def test_interpreter_diagnostics_never_enter_the_saved_file(tmp_path: Path) -> None:
+    fake = _fake_reader(
+        tmp_path,
+        "import sys\n"
+        "sys.stderr.write('DeprecationWarning: something noisy\\n')\n"
+        "sys.stdout.write('{\"version\": 1}\\n')\n",
+    )
+    proc = _bash(
+        f'_HAL0_ANSWERS_READER="{fake}"; _hal0_prepare_saved_answers /x/doc.json; '
+        'printf "[%s]" "$HAL0_ANSWERS_SAVED"',
+        tmp_path,
+    )
+    assert proc.stdout == '[{"version": 1}]', proc.stderr
+    assert "WARN" not in proc.stderr and "DeprecationWarning" not in proc.stderr
+
+
+def test_failure_warning_uses_the_first_line_of_standard_error(tmp_path: Path) -> None:
+    fake = _fake_reader(
+        tmp_path,
+        "import sys\nsys.stderr.write('error: first reason\\nsecond line\\n')\nsys.exit(2)\n",
+    )
+    proc = _bash(
+        f'_HAL0_ANSWERS_READER="{fake}"; _hal0_prepare_saved_answers /x/doc.json; '
+        'echo "saved=[$HAL0_ANSWERS_SAVED]"',
+        tmp_path,
+    )
+    assert "saved=[]" in proc.stdout
+    assert proc.stderr.count("WARN") == 1
+    assert "first reason" in proc.stderr and "second line" not in proc.stderr
+
+
+def test_standard_output_on_failure_is_not_saved_or_quoted(tmp_path: Path) -> None:
+    fake = _fake_reader(
+        tmp_path,
+        "import sys\nsys.stdout.write('{\"partial\": true}\\n')\nsys.stderr.write('error: bad\\n')\nsys.exit(2)\n",
+    )
+    proc = _bash(
+        f'_HAL0_ANSWERS_READER="{fake}"; _hal0_prepare_saved_answers /x/doc.json; '
+        'echo "saved=[$HAL0_ANSWERS_SAVED]"',
+        tmp_path,
+    )
+    assert "saved=[]" in proc.stdout and "partial" not in proc.stderr
+
+
+def test_locals_named_like_inherited_exports_do_not_carry_the_document(tmp_path: Path) -> None:
+    # `local out` keeps the export attribute of an environment variable `out`,
+    # so the saved form would reach every child process started afterwards.
+    doc = _doc(tmp_path, DOC)
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    spy = bin_dir / "rm"
+    spy.write_text(f'#!/bin/bash\nenv >"{tmp_path}/child.env"\n', encoding="utf-8")
+    spy.chmod(0o755)
+    full = f"""
+set -u
+PY="{sys.executable}"
+VAR_DIR="{tmp_path}/var/lib/hal0"
+PATH="{bin_dir}:$PATH"
+source "{ANSWERS_SH}"
+HAL0_ANSWERS_FILE="{doc}"
+hal0_collect_answers
+"""
+    env = {"PATH": os.environ["PATH"], "out": "x", "err": "x", "output": "x", "line": "x",
+           "value": "x", "names": "x", "values": "x"}
+    subprocess.run(["bash", "-c", full], capture_output=True, text=True, check=False, cwd=tmp_path, env=env)
+    dump = (tmp_path / "child.env").read_text(encoding="utf-8")
+    assert '"version"' not in dump and "HAL0_NONINTERACTIVE" not in dump.replace("HAL0_NONINTERACTIVE=1", "")
+    for name in ("out", "err", "output", "line", "value", "names", "values"):
+        assert f"\n{name}=x\n" in "\n" + dump  # the inherited value, not ours
