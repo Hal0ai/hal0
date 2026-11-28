@@ -3743,10 +3743,48 @@ else
             warn "could not create ${VAR_DIR}/.config/flm/models as hal0 — 'hal0 doctor perms' reports why"
         fi
         if [[ -n "${HAL0_FLM_MODELS_DIR:-}" ]]; then
-            # Operator override from root's own environment: a trusted path.
-            mkdir -p "${HAL0_FLM_MODELS_DIR}"
-            chown 1000:hal0 "${HAL0_FLM_MODELS_DIR}" 2>/dev/null || chown hal0:hal0 "${HAL0_FLM_MODELS_DIR}" || true
-            chmod 2775 "${HAL0_FLM_MODELS_DIR}" || true
+            # The value is NOT always a trusted path: it comes from root's
+            # environment OR from an answers document (data), and the hal0
+            # account may control part of the path. So nothing here names the
+            # path to chown, chmod or mkdir: `nofollow` acts on a descriptor and
+            # never follows a link at the last component (or below an untrusted
+            # directory). A directory that already exists and came from a
+            # document keeps its owner and mode; the document cannot re-own it.
+            _flm_from_doc=0
+            for _answered in "${HAL0_ANSWERS_EXPORTED[@]+"${HAL0_ANSWERS_EXPORTED[@]}"}"; do
+                [[ "${_answered}" == "HAL0_FLM_MODELS_DIR" ]] && _flm_from_doc=1
+            done
+            if [[ -e "${HAL0_FLM_MODELS_DIR}" || -L "${HAL0_FLM_MODELS_DIR}" ]]; then
+                if [[ "${_flm_from_doc}" -eq 1 ]]; then
+                    info "FLM model directory ${HAL0_FLM_MODELS_DIR} already exists; leaving its owner and mode as they are"
+                else
+                    nofollow dir --owner 1000:hal0 --mode 2775 --expect any "${HAL0_FLM_MODELS_DIR}" 2>/dev/null \
+                        || nofollow dir --owner hal0:hal0 --mode 2775 --expect any "${HAL0_FLM_MODELS_DIR}" \
+                        || warn "could not set the owner and mode of ${HAL0_FLM_MODELS_DIR}; 'hal0 doctor perms' reports why"
+                fi
+            else
+                # Missing parents first, top-down, root-owned. `nofollow dir`
+                # makes only the last component, and re-modes what it opens, so
+                # it is called only for components that do not exist yet.
+                _flm_walk=""
+                _flm_ok=1
+                IFS=/ read -r -a _flm_parts <<<"${HAL0_FLM_MODELS_DIR%/*}"
+                for _flm_part in "${_flm_parts[@]+"${_flm_parts[@]}"}"; do
+                    [[ -n "${_flm_part}" ]] || continue
+                    _flm_walk="${_flm_walk}/${_flm_part}"
+                    if [[ ! -e "${_flm_walk}" && ! -L "${_flm_walk}" ]]; then
+                        nofollow dir --create --owner root:root --mode 0755 --expect root "${_flm_walk}" || _flm_ok=0
+                    fi
+                done
+                if [[ "${_flm_ok}" -eq 1 ]] \
+                    && { nofollow dir --create --owner 1000:hal0 --mode 2775 --expect adopt "${HAL0_FLM_MODELS_DIR}" 2>/dev/null \
+                        || nofollow dir --create --owner hal0:hal0 --mode 2775 --expect adopt "${HAL0_FLM_MODELS_DIR}"; }; then
+                    info "created FLM model directory ${HAL0_FLM_MODELS_DIR}"
+                else
+                    warn "could not create ${HAL0_FLM_MODELS_DIR} safely; 'hal0 doctor perms' reports why"
+                fi
+            fi
+            unset _flm_from_doc _flm_walk _flm_ok _flm_parts _flm_part _answered
         fi
     fi
 

@@ -63,6 +63,24 @@ _DNS_LABEL = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$")
 _FS_PATH = re.compile(r"^/[\w.+@,:~= /-]*$")
 _URL_PATH = re.compile(r"^[A-Za-z0-9._~/%-]*$")
 
+# Trees a model store may never be, or sit inside, because the installer (as
+# root) creates it and hands it to the hal0 service account. A store there
+# would make a system tree writable by that account. Checked against the path
+# as written AND against its real path, so a link into one of them is caught.
+DENIED_TREES = (
+    "/etc",  # system configuration: root-owned files that run as root
+    "/usr", "/bin", "/sbin",  # programs and libraries root executes
+    "/lib", "/lib32", "/lib64", "/libx32",  # the same, and the loader
+    "/boot",  # kernel and boot loader
+    "/root",  # root's own home
+    "/proc", "/sys", "/dev",  # kernel interfaces, not storage
+    "/run", "/var/run",  # runtime state; /var/run is the same tree as /run
+    "/var/log",  # logs other services own
+    "/var/lib",  # service state (hal0's own models directory is the exception below)
+)
+# The one place under a denied tree that is a model store by design.
+ALLOWED_UNDER_DENIED = "/var/lib/hal0/models"
+
 # Keys the document may carry, per object. Anything else is "unknown".
 _TOP_KEYS = frozenset(
     {
@@ -306,7 +324,47 @@ def _abs_path(obj: dict[str, Any], key: str, where: str, problems: _Problems) ->
     if ".." in value.split("/"):
         problems.error(f"{full}: must not contain a '..' segment")
         return None
+    if not _safe_location(value, full, problems):
+        return None
     return value
+
+
+def _inside(path: str, tree: str) -> bool:
+    return path == tree or path.startswith(tree + "/")
+
+
+def _normal(path: str) -> str:
+    return "/" + "/".join(part for part in path.split("/") if part not in ("", "."))
+
+
+def _safe_location(value: str, full: str, problems: _Problems) -> bool:
+    """Refuse a model-store path that is too shallow, in a system tree, or a file."""
+    norm = _normal(value)
+    try:
+        real = _normal(os.path.realpath(norm))
+    except (OSError, ValueError):
+        problems.error(f"{full}: {_q(value)} cannot be resolved")
+        return False
+    for candidate in (norm, real):
+        if _inside(candidate, ALLOWED_UNDER_DENIED):
+            continue
+        for tree in DENIED_TREES:
+            if _inside(candidate, tree):
+                how = "" if candidate == norm else " (through a link)"
+                problems.error(f"{full}: {_q(value)} is inside {tree}{how}, a system location")
+                return False
+    if len([part for part in norm.split("/") if part]) < 2:
+        problems.error(f"{full}: {_q(value)} is too close to the root; use a folder like /mnt/models")
+        return False
+    try:
+        exists = os.path.lexists(norm)
+        is_dir = os.path.isdir(norm)
+    except (OSError, ValueError):
+        exists, is_dir = True, False
+    if exists and not is_dir:
+        problems.error(f"{full}: {_q(value)} exists and is not a directory")
+        return False
+    return True
 
 
 def _ident(value: Any, full: str, problems: _Problems) -> str | None:

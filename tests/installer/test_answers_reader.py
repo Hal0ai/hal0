@@ -624,3 +624,88 @@ def test_emit_saved_known_keys_round_trip(tmp_path: Path) -> None:
     expected["apps"]["hermes"] = {"enabled": True}
     assert json.loads(proc.stdout) == expected
     assert proc.stderr == ""
+
+
+# ── model-store locations: never a system tree, never a file ────────────────
+
+_STORE_KEYS = ("path", "flm_path")
+_DENIED = ("/etc", "/usr", "/bin", "/sbin", "/lib", "/lib32", "/lib64", "/libx32", "/boot",
+           "/root", "/proc", "/sys", "/dev", "/run", "/var/run", "/var/log", "/var/lib")
+
+
+@pytest.mark.parametrize("key", _STORE_KEYS)
+@pytest.mark.parametrize("tree", _DENIED)
+@pytest.mark.parametrize("suffix", ["", "/x", "/x/y"])
+def test_store_path_in_a_system_tree_is_refused(tmp_path: Path, key: str, tree: str,
+                                                suffix: str) -> None:
+    proc = run({"version": 1, "model_store": {key: tree + suffix}}, tmp_path)
+    assert proc.returncode == 2, proc.stdout
+    assert proc.stdout == ""
+    assert f"model_store.{key}" in proc.stderr and "system location" in proc.stderr
+
+
+@pytest.mark.parametrize("key", _STORE_KEYS)
+@pytest.mark.parametrize("bad", ["/", "/mnt", "/home", "//", "/./", "//mnt/", "/mnt/."])
+def test_store_path_needs_two_components(tmp_path: Path, key: str, bad: str) -> None:
+    proc = run({"version": 1, "model_store": {key: bad}}, tmp_path)
+    assert proc.returncode == 2 and proc.stdout == ""
+    assert f"model_store.{key}" in proc.stderr and "too close to the root" in proc.stderr
+
+
+@pytest.mark.parametrize("bad", ["//etc", "/./etc", "/etc/", "//usr//lib/x", "/var/./lib/x"])
+def test_store_path_spelled_oddly_is_still_refused(tmp_path: Path, bad: str) -> None:
+    proc = run({"version": 1, "model_store": {"path": bad}}, tmp_path)
+    assert proc.returncode == 2 and "system location" in proc.stderr
+
+
+@pytest.mark.parametrize("key", _STORE_KEYS)
+@pytest.mark.parametrize("ok", ["/var/lib/hal0/models", "/var/lib/hal0/models/flm"])
+def test_hal0_models_directory_is_allowed_under_var_lib(tmp_path: Path, key: str, ok: str) -> None:
+    proc = run({"version": 1, "model_store": {key: ok}}, tmp_path)
+    assert proc.returncode == 0, proc.stderr
+
+
+@pytest.mark.parametrize("bad", ["/var/lib/hal0", "/var/lib/hal0/other", "/var/lib/hal0/modelsx"])
+def test_the_rest_of_var_lib_hal0_is_refused(tmp_path: Path, bad: str) -> None:
+    assert run({"version": 1, "model_store": {"path": bad}}, tmp_path).returncode == 2
+
+
+@pytest.mark.parametrize("key", _STORE_KEYS)
+@pytest.mark.parametrize("ok", ["/mnt/disk/models", "/srv/hal0/models", "/home/someone/models",
+                                "/mnt/my models/a=b", "/opt/hal0", "/var/data/models"])
+def test_ordinary_store_paths_are_accepted(tmp_path: Path, key: str, ok: str) -> None:
+    proc = run({"version": 1, "model_store": {key: ok}}, tmp_path)
+    assert proc.returncode == 0, proc.stderr
+
+
+@pytest.mark.parametrize("key", _STORE_KEYS)
+def test_symlink_into_a_system_tree_is_refused(tmp_path: Path, key: str) -> None:
+    link = tmp_path / "link"
+    link.symlink_to("/etc")
+    for value in (str(link), f"{link}/hal0/models"):  # the link itself, and below it
+        proc = run({"version": 1, "model_store": {key: value}}, tmp_path)
+        assert proc.returncode == 2 and proc.stdout == "", value
+        assert f"model_store.{key}" in proc.stderr and "/etc" in proc.stderr, value
+
+
+def test_symlink_to_an_ordinary_directory_is_accepted(tmp_path: Path) -> None:
+    target = tmp_path / "real"
+    target.mkdir()
+    link = tmp_path / "link"
+    link.symlink_to(target)
+    assert run({"version": 1, "model_store": {"path": str(link)}}, tmp_path).returncode == 0
+
+
+@pytest.mark.parametrize("key", _STORE_KEYS)
+def test_existing_regular_file_is_refused(tmp_path: Path, key: str) -> None:
+    target = tmp_path / "a-file"
+    target.write_text("x")
+    proc = run({"version": 1, "model_store": {key: str(target)}}, tmp_path)
+    assert proc.returncode == 2
+    assert f"model_store.{key}" in proc.stderr and "not a directory" in proc.stderr
+
+
+def test_existing_directory_and_missing_path_are_accepted(tmp_path: Path) -> None:
+    (tmp_path / "d").mkdir()
+    for value in (str(tmp_path / "d"), str(tmp_path / "not" / "yet")):
+        assert run({"version": 1, "model_store": {"path": value}}, tmp_path).returncode == 0

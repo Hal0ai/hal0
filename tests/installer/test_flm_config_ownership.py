@@ -47,7 +47,9 @@ def test_no_root_chown_of_the_hal0_home_cache(npu_block: str) -> None:
     """The default cache may be hal0's symlink to the store; uid 1000 ownership
     comes from ``doctor perms --fix`` through no-follow fds instead."""
     assert 'chown 1000:hal0 "${FLM_CACHE_DIR}"' not in npu_block
-    assert 'chown 1000:hal0 "${HAL0_FLM_MODELS_DIR}"' in npu_block
+    # The store itself is handed over through `nofollow`, never `chown` by name.
+    assert 'chown 1000:hal0 "${HAL0_FLM_MODELS_DIR}"' not in npu_block
+    assert '--owner 1000:hal0 --mode 2775' in npu_block
 
 
 def test_doctor_perms_backstop_runs_after_the_npu_block() -> None:
