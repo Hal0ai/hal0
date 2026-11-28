@@ -12,7 +12,7 @@ import pytest
 from hal0.config.schema import GPUInfo, HardwareInfo, NPUInfo
 from hal0.install.answers import AnswersError, load_answers
 
-_NEW_KEYS = ("access", "maintenance", "models", "hardware", "memory")
+_NEW_KEYS = ("access", "maintenance", "models", "hardware", "memory", "install", "meta")
 
 
 def _hw():

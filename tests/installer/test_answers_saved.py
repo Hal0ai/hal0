@@ -303,3 +303,24 @@ hal0_collect_answers
     assert "#saved" not in dump and "ewog" not in dump  # nor the base64 of '{\n'
     for name in ("output", "line", "name", "value", "names", "values", "saved"):
         assert f"\n{name}=x\n" in "\n" + dump  # the inherited value, not ours
+
+
+def test_saved_copy_keeps_install_and_meta(tmp_path: Path) -> None:
+    doc = _doc(tmp_path, {
+        "version": 1,
+        "install": {"type": "custom"},
+        "meta": {"saved_at": "2026-11-28T09:30:00Z", "saved_by": "1.9.0"},
+        "models": {"memory": "shared"},
+        "npu": {"opt_in": "auto"},
+        "huggingface": {"token_env": "HF_TOKEN"},
+    })
+    proc = _bash(f'HAL0_ANSWERS_FILE="{doc}"; hal0_collect_answers; hal0_save_answers; echo "rc=$?"', tmp_path)
+    assert "rc=0" in proc.stdout, proc.stderr
+    saved = json.loads((tmp_path / "nofollow.body").read_text(encoding="utf-8"))
+    assert saved == {
+        "version": 1,
+        "install": {"type": "custom"},
+        "meta": {"saved_at": "2026-11-28T09:30:00Z", "saved_by": "1.9.0"},
+        "models": {"memory": "shared"},
+        "npu": {"opt_in": "auto"},
+    }

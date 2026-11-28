@@ -119,18 +119,27 @@ _TOP_KEYS = frozenset(
         "npu",
         "huggingface",
         "slots",
+        "install",
+        "meta",
     }
 )
 _SECTION_KEYS = {
     "model_store": frozenset({"path", "flm_path"}),
     "memory": frozenset({"enabled"}),
     "gen": frozenset({"mode", "models"}),
-    "models": frozenset({"brain", "starter"}),
+    "models": frozenset({"brain", "starter", "memory"}),
     "hardware": frozenset({"allow_cpu_only"}),
     "network": frozenset({"port", "bind_host", "hostname", "public_url", "allowed_origins"}),
     "maintenance": frozenset({"weekly_benchmark"}),
-    "npu": frozenset({"setup"}),
+    "npu": frozenset({"opt_in"}),
+    "install": frozenset({"type"}),
+    "meta": frozenset({"saved_at", "saved_by"}),
 }
+_INSTALL_TYPES = ("recommended", "minimal", "custom")
+# Written by the wizard; fullmatch so a trailing newline cannot slip through.
+_META_SAVED_AT = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z")
+_META_SAVED_BY = re.compile(r"[0-9A-Za-z][0-9A-Za-z.+~_-]{0,63}")
+_HF_TOKEN_ENV = "HF_TOKEN"
 _APP_KEYS = {
     "openwebui": frozenset({"enabled"}),
     "hermes": frozenset({"enabled", "terminal_tool"}),
@@ -773,6 +782,10 @@ def _build(doc: dict[str, Any], origin: str, problems: _Problems,
         if not isinstance(doc["huggingface"], dict):
             problems.error("huggingface: must be a mapping")
         else:
+            hf = doc["huggingface"]
+            if "token_env" in hf and hf["token_env"] != _HF_TOKEN_ENV:
+                problems.error("huggingface.token_env: must be the word 'HF_TOKEN'")
+        if isinstance(doc["huggingface"], dict) and set(doc["huggingface"]) - {"token_env"}:
             problems.warn(
                 "huggingface settings are not read from an answers document; "
                 "set HF_TOKEN/HUGGING_FACE_HUB_TOKEN in the environment instead"
@@ -857,8 +870,19 @@ def _build(doc: dict[str, Any], origin: str, problems: _Problems,
             elif not models:
                 out["HAL0_IMAGE_MODELS"] = "recommended"
 
+    # install and meta: known, validated, emit nothing; kept in the saved copy
+    inst = _section(doc, "install", problems)
+    if "type" in inst and not (isinstance(inst["type"], str) and inst["type"] in _INSTALL_TYPES):
+        problems.error("install.type: must be 'recommended', 'minimal' or 'custom'")
+    meta = _section(doc, "meta", problems)
+    for key, pattern in (("saved_at", _META_SAVED_AT), ("saved_by", _META_SAVED_BY)):
+        if key in meta and not (isinstance(meta[key], str) and pattern.fullmatch(meta[key])):
+            problems.error(f"meta.{key}: not a value this installer writes")
+
     # models
     mdl = _section(doc, "models", problems)
+    if "memory" in mdl and not (isinstance(mdl["memory"], str) and mdl["memory"] == "shared"):
+        problems.error("models.memory: must be the word 'shared'")
     brain = mdl.get("brain")
     if brain is not None:
         if brain == "none":
@@ -939,7 +963,7 @@ def _build(doc: dict[str, Any], origin: str, problems: _Problems,
             if clean_list:
                 out["HAL0_ALLOWED_ORIGINS"] = ",".join(clean_list)
 
-    # access: only the word `create` or `none`; nothing else, ever.
+    # access: only the word `generate` or `none`; nothing else, ever.
     access = doc.get("access")
     if access is not None:
         if not isinstance(access, dict):
@@ -949,10 +973,10 @@ def _build(doc: dict[str, Any], origin: str, problems: _Problems,
                 problems.error(f"access.{_esc(key)}: not allowed (a document carries no key material)")
             mode_word = access.get("admin_key")
             if "admin_key" in access:
-                if mode_word in ("create", "none") and isinstance(mode_word, str):
+                if mode_word in ("generate", "none") and isinstance(mode_word, str):
                     out["HAL0_ADMIN_KEY_MODE"] = mode_word
                 else:
-                    problems.error("access.admin_key: must be the word 'create' or 'none'")
+                    problems.error("access.admin_key: must be the word 'generate' or 'none'")
 
     # maintenance
     bench = _bool(_section(doc, "maintenance", problems), "weekly_benchmark",
@@ -961,12 +985,16 @@ def _build(doc: dict[str, Any], origin: str, problems: _Problems,
         out["HAL0_ENABLE_BENCH_TIMER"] = "1" if bench else "0"
 
     # npu
-    setup = _section(doc, "npu", problems).get("setup")
-    if setup is not None:
-        if setup in ("auto", "off"):
-            out["HAL0_NPU_SETUP"] = setup
+    # `opt_in` is the format's own key (src/hal0/install/answers.py
+    # _resolve_npu_opt_in): the string 'auto', or a boolean.
+    opt_in = _section(doc, "npu", problems).get("opt_in")
+    if opt_in is not None:
+        if isinstance(opt_in, bool):
+            out["HAL0_NPU_SETUP"] = "on" if opt_in else "off"
+        elif isinstance(opt_in, str) and opt_in == "auto":
+            out["HAL0_NPU_SETUP"] = "auto"
         else:
-            problems.error("npu.setup: must be 'auto' or 'off'")
+            problems.error("npu.opt_in: must be 'auto', true or false")
 
     return out
 

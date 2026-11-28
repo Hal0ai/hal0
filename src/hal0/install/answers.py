@@ -40,7 +40,7 @@ from hal0.install.suggest import suggest_models
 #: Top-level sections validated by the installer's reader
 #: (installer/lib/answers_reader.py), not here: this loader checks the type
 #: only (a mapping, or null meaning empty) and otherwise ignores them.
-_MAPPING_ONLY_KEYS = ("access", "maintenance", "models", "hardware", "memory")
+_MAPPING_ONLY_KEYS = ("access", "maintenance", "models", "hardware", "memory", "install", "meta")
 
 #: Top-level keys this loader recognizes at all (wired or not-yet-wired).
 #: Anything outside this set is "unknown" (§4: reject unless strict: false).

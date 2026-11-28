@@ -91,7 +91,7 @@ def build() -> dict:
 
 
 def render() -> str:
-    return json.dumps(build(), indent=2) + "\n"
+    return json.dumps(build(), indent=2, allow_nan=False) + "\n"
 
 
 def main(argv: list[str] | None = None) -> int:

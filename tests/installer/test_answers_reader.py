@@ -53,9 +53,9 @@ FULL = {
         "public_url": "chat.example.com",
         "allowed_origins": ["https://a.example.com", "http://192.0.2.5:8080"],
     },
-    "access": {"admin_key": "create"},
+    "access": {"admin_key": "generate"},
     "maintenance": {"weekly_benchmark": True},
-    "npu": {"setup": "off"},
+    "npu": {"opt_in": False},
 }
 
 
@@ -110,7 +110,7 @@ def test_full_document_maps_every_key(tmp_path: Path) -> None:
         "HAL0_HOSTNAME=box-1",
         "HAL0_PUBLIC_URL=https://chat.example.com",
         "HAL0_ALLOWED_ORIGINS=https://a.example.com,http://192.0.2.5:8080",
-        "HAL0_ADMIN_KEY_MODE=create",
+        "HAL0_ADMIN_KEY_MODE=generate",
         "HAL0_ENABLE_BENCH_TIMER=1",
         "HAL0_NPU_SETUP=off",
     ]
@@ -187,7 +187,9 @@ def test_slots_and_huggingface_are_known_keys(tmp_path: Path) -> None:
            "huggingface": {"token_env": "HF_TOKEN"}}
     proc = run(doc, tmp_path)
     assert lines(proc) == ["HAL0_NONINTERACTIVE=1"]
-    assert "huggingface" in proc.stderr
+    assert "huggingface" not in proc.stderr  # token_env alone is accepted silently
+    proc = run({**doc, "huggingface": {"token_env": "HF_TOKEN", "token": "hf_x"}}, tmp_path)
+    assert proc.returncode == 0 and proc.stderr.count("huggingface settings are not read") == 1
     for bad in ({"slots": {}}, {"huggingface": []}):
         proc = run({"version": 1, **bad}, tmp_path)
         assert proc.returncode == 2 and proc.stdout == ""
@@ -510,13 +512,13 @@ def test_wrong_version_exits_2(tmp_path: Path, version: object) -> None:
 
 
 def test_admin_key_mode_values(tmp_path: Path) -> None:
-    for word in ("create", "none"):
+    for word in ("generate", "none"):
         proc = run({"version": 1, "access": {"admin_key": word}}, tmp_path)
         assert f"HAL0_ADMIN_KEY_MODE={word}" in lines(proc)
-    for bad in ("sk-abcdef0123456789", "", "Create", 1, True, None, ["create"]):
+    for bad in ("sk-abcdef0123456789", "", "Generate", "create", 1, True, None, ["generate"]):
         proc = run({"version": 1, "access": {"admin_key": bad}}, tmp_path)
         assert proc.returncode == 2 and proc.stdout == "", bad
-    proc = run({"version": 1, "access": {"admin_key": "create", "key": "hal0-secret"}}, tmp_path)
+    proc = run({"version": 1, "access": {"admin_key": "generate", "key": "hal0-secret"}}, tmp_path)
     assert proc.returncode == 2 and proc.stdout == ""
     assert "hal0-secret" not in proc.stderr
 
@@ -612,7 +614,7 @@ def test_emit_saved_drops_unknown_keys_at_every_level(tmp_path: Path) -> None:
         "extra_thing": "hf_SECRETSECRET",
         "memory": {"enabled": True, "note": "hf_SECRETSECRET"},
         "apps": {"pi": {"enabled": True, "x": "hf_SECRETSECRET"}, "mystery": {"a": "hf_SECRETSECRET"}},
-        "access": {"admin_key": "create"},
+        "access": {"admin_key": "generate"},
     }
     proc = _emit(doc, tmp_path)
     assert proc.returncode == 0, proc.stderr
@@ -621,7 +623,7 @@ def test_emit_saved_drops_unknown_keys_at_every_level(tmp_path: Path) -> None:
         "version": 1,
         "memory": {"enabled": True},
         "apps": {"pi": {"enabled": True}},
-        "access": {"admin_key": "create"},
+        "access": {"admin_key": "generate"},
     }
 
 
@@ -1423,3 +1425,145 @@ def test_repeated_messages_are_still_shown_once(tmp_path: Path) -> None:
         problems.error("same")
     problems.warn("other")
     assert problems.warnings == ["same", "other"] and problems.errors == ["same"]
+
+
+# ── the wizard's vocabulary (seam contract 2026-11-28) ─────────────────────
+
+WIZARD_META = {"saved_at": "2026-11-28T09:30:00Z", "saved_by": "1.9.0"}
+
+WIZARD_RECOMMENDED = {
+    "version": 1,
+    "strict": True,
+    "install": {"type": "recommended"},
+    "access": {"admin_key": "generate"},
+    "maintenance": {"weekly_benchmark": False},
+    "models": {"starter": "auto", "brain": "auto", "memory": "shared"},
+    "memory": {"enabled": True},
+    "npu": {"opt_in": "auto"},
+    "apps": {
+        "openwebui": {"enabled": True},
+        "hermes": {"enabled": True, "terminal_tool": False},
+        "pi": {"enabled": True},
+    },
+    "gen": {"mode": "scaffold_and_download", "models": []},
+    "model_store": {"path": "/var/lib/hal0/models"},
+    "network": {"hostname": "hal0", "port": 8080, "allowed_origins": ["https://hal0.example.com"]},
+    "huggingface": {"token_env": "HF_TOKEN"},
+    "meta": WIZARD_META,
+}
+
+WIZARD_MINIMAL = {
+    "version": 1,
+    "strict": True,
+    "install": {"type": "minimal"},
+    "access": {"admin_key": "generate"},
+    "maintenance": {"weekly_benchmark": False},
+    "models": {"starter": "none", "brain": "none"},
+    "memory": {"enabled": False},
+    "npu": {"opt_in": False},
+    "apps": {
+        "openwebui": {"enabled": False},
+        "hermes": {"enabled": False, "terminal_tool": False},
+        "pi": {"enabled": False},
+    },
+    "gen": {"mode": "off", "models": []},
+    "model_store": {"path": "/var/lib/hal0/models"},
+    "network": {"hostname": "hal0", "port": 8080, "allowed_origins": []},
+    "huggingface": {"token_env": "HF_TOKEN"},
+    "meta": WIZARD_META,
+}
+
+
+def test_wizard_recommended_document_loads_strict(tmp_path: Path) -> None:
+    proc = run(WIZARD_RECOMMENDED, tmp_path)
+    got = lines(proc)
+    assert proc.stderr == ""
+    assert "HAL0_ADMIN_KEY_MODE=generate" in got and "HAL0_NPU_SETUP=auto" in got
+    saved = saved_of(proc)
+    assert saved["install"] == {"type": "recommended"} and saved["meta"] == WIZARD_META
+    assert saved["models"]["memory"] == "shared" and "huggingface" not in saved
+    assert saved["apps"]["hermes"] == {"enabled": True}
+
+
+def test_wizard_minimal_document_loads_strict(tmp_path: Path) -> None:
+    proc = run(WIZARD_MINIMAL, tmp_path)
+    got = lines(proc)
+    assert proc.stderr == ""
+    assert "HAL0_ADMIN_KEY_MODE=generate" in got and "HAL0_NPU_SETUP=off" in got
+    assert saved_of(proc)["install"] == {"type": "minimal"}
+
+
+def test_old_words_rejected(tmp_path: Path) -> None:
+    proc = run({"version": 1, "access": {"admin_key": "create"}}, tmp_path)
+    assert proc.returncode == 2 and proc.stdout == ""
+    proc = run({"version": 1, "strict": True, "npu": {"setup": "auto"}}, tmp_path)
+    assert proc.returncode == 2 and proc.stdout == "" and "npu.setup" in proc.stderr
+    proc = run({"version": 1, "npu": {"setup": "off"}}, tmp_path)  # non-strict: unknown, ignored
+    assert lines(proc) == ["HAL0_NONINTERACTIVE=1"] and "npu.setup" in proc.stderr
+    assert "npu" not in saved_of(proc) or "setup" not in saved_of(proc)["npu"]
+
+
+@pytest.mark.parametrize(("value", "word"), [("auto", "auto"), (True, "on"), (False, "off")])
+def test_npu_opt_in_values(tmp_path: Path, value: object, word: str) -> None:
+    proc = run({"version": 1, "npu": {"opt_in": value}}, tmp_path)
+    assert f"HAL0_NPU_SETUP={word}" in lines(proc)
+
+
+@pytest.mark.parametrize("bad", ["off", "on", "Auto", "", 1, 0, ["auto"], {}])
+def test_npu_opt_in_rejects(tmp_path: Path, bad: object) -> None:
+    proc = run({"version": 1, "npu": {"opt_in": bad}}, tmp_path)
+    assert proc.returncode == 2 and proc.stdout == ""
+
+
+def test_models_memory(tmp_path: Path) -> None:
+    proc = run({"version": 1, "models": {"memory": "shared"}}, tmp_path)
+    assert lines(proc) == ["HAL0_NONINTERACTIVE=1"]
+    for bad in ("dedicated", "", "Shared", True, 1, ["shared"]):
+        proc = run({"version": 1, "models": {"memory": bad}}, tmp_path)
+        assert proc.returncode == 2 and proc.stdout == "", bad
+
+
+def test_install_type(tmp_path: Path) -> None:
+    for word in ("recommended", "minimal", "custom"):
+        proc = run({"version": 1, "strict": True, "install": {"type": word}}, tmp_path)
+        assert lines(proc) == ["HAL0_NONINTERACTIVE=1"]
+        assert saved_of(proc)["install"] == {"type": word}
+    for bad in ("Recommended", "", "full", 1, None, ["minimal"], "minimal\n"):
+        proc = run({"version": 1, "install": {"type": bad}}, tmp_path)
+        assert proc.returncode == 2 and proc.stdout == "", bad
+    for bad in ("minimal", [], 3):
+        proc = run({"version": 1, "install": bad}, tmp_path)
+        assert proc.returncode == 2 and proc.stdout == "", bad
+    proc = run({"version": 1, "strict": True, "install": {"type": "minimal", "x": 1}}, tmp_path)
+    assert proc.returncode == 2 and proc.stdout == ""
+
+
+def test_meta_values(tmp_path: Path) -> None:
+    proc = run({"version": 1, "strict": True, "meta": WIZARD_META}, tmp_path)
+    assert lines(proc) == ["HAL0_NONINTERACTIVE=1"]
+    for saved_by in ("unknown", "1.9.0-rc.1+g1a2b3c", "0" * 64):
+        proc = run({"version": 1, "meta": {"saved_by": saved_by}}, tmp_path)
+        assert lines(proc)
+    bad_at = ("2026-11-28 09:30:00Z", "2026-11-28T09:30:00", "2026-11-28T09:30:00Z\n",
+              "\u0662026-11-28T09:30:00Z", "", 5, None)
+    for bad in bad_at:
+        proc = run({"version": 1, "meta": {"saved_at": bad}}, tmp_path)
+        assert proc.returncode == 2 and proc.stdout == "", bad
+    bad_by = ("", "-x", ".x", "a b", "a" * 65, "x\n", "a/b", "hf_secret;rm", 1, None)
+    for bad in bad_by:
+        proc = run({"version": 1, "meta": {"saved_by": bad}}, tmp_path)
+        assert proc.returncode == 2 and proc.stdout == "", bad
+    proc = run({"version": 1, "meta": "x"}, tmp_path)
+    assert proc.returncode == 2 and proc.stdout == ""
+
+
+def test_huggingface_token_env(tmp_path: Path) -> None:
+    proc = run({"version": 1, "huggingface": {"token_env": "HF_TOKEN"}}, tmp_path)
+    assert lines(proc) == ["HAL0_NONINTERACTIVE=1"] and proc.stderr == ""
+    for bad in ("MY_TOKEN", "hf_secret_value", "", "hf_token", 1, None):
+        proc = run({"version": 1, "huggingface": {"token_env": bad}}, tmp_path)
+        assert proc.returncode == 2 and proc.stdout == "", bad
+        assert "hf_secret_value" not in proc.stderr
+    proc = run({"version": 1, "huggingface": {"token_env": "HF_TOKEN", "other": 1}}, tmp_path)
+    assert lines(proc) and proc.stderr.count("huggingface settings are not read") == 1
+    assert "huggingface" not in saved_of(proc)
