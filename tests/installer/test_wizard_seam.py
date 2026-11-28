@@ -129,13 +129,14 @@ def _collect(
     args: tuple[str, ...] = (),
     reconfigure: bool = False,
     after: str = "",
+    root: Path = ROOT,
 ) -> subprocess.CompletedProcess[str]:
     """Run hal0_collect_answers with the helpers of install.sh; print the state after it."""
     script = f"""
 set -euo pipefail
 IFS=$'\\n\\t'
 PY="{sys.executable}"
-REPO_ROOT="{ROOT}"
+REPO_ROOT="{root}"
 DEV_MODE=1
 PREFIX="{tmp_path}/prefix"
 VAR_DIR="{tmp_path}/var"
@@ -187,8 +188,56 @@ DOC = json.dumps({"version": 1, "install": {"type": "recommended"}})
 # ── wizard absent: nothing changes ──────────────────────────────────────────
 
 
+def _absent(tmp_path: Path) -> dict[str, str]:
+    """Make the wizard absent whatever the tree holds: both seams name nothing."""
+    nowhere = tmp_path / "no-wizard"
+    return {
+        "HAL0_WIZARD_ENTRY": str(nowhere / "__main__.py"),
+        "HAL0_WIZARD_CATALOG": str(nowhere / "setup-catalog.json"),
+    }
+
+
+def _tree_with_wizard(tmp_path: Path) -> Path:
+    """A release tree that holds the wizard, as the real one does once it is merged."""
+    tree = tmp_path / "tree"
+    entry = tree / "src" / "hal0" / "install" / "wizard" / "__main__.py"
+    entry.parent.mkdir(parents=True)
+    entry.write_text(STUB, encoding="utf-8")
+    catalog = tree / "installer" / "manifests" / "setup-catalog.json"
+    catalog.parent.mkdir(parents=True)
+    catalog.write_text("{}", encoding="utf-8")
+    return tree
+
+
+def test_absent_wizard_tests_do_not_depend_on_the_real_tree(tmp_path: Path) -> None:
+    tree = _tree_with_wizard(tmp_path)
+    log = {"STUB_LOG": str(tmp_path / "stub.log")}
+    bad = tmp_path / "bad.json"
+    bad.write_text('{"version": 7}', encoding="utf-8")
+
+    # control: this tree has the wizard, and without the seams it is found
+    proc = _collect(tmp_path, log, root=tree)
+    assert len(_records(tmp_path)) == 1, proc.stdout + proc.stderr
+    proc = _flag_loop(tmp_path, ["--no-tls"], {}, root=tree)
+    assert proc.returncode == 1, proc.stderr
+    (tmp_path / "stub.log").unlink()
+
+    # the environment the three absent-wizard tests use: the wizard is not called
+    env = {**log, **_absent(tmp_path)}
+    proc = _collect(tmp_path, env, root=tree)
+    assert proc.returncode == 0, proc.stderr
+    assert _state(proc)["RC"] == "0" and _state(proc)["APPLIED"] == "0"
+    proc = _flag_loop(tmp_path, ["--no-tls", "--no-owui"], _absent(tmp_path), root=tree)
+    assert proc.returncode == 0, proc.stderr
+    assert "WARN: unknown flag: --no-tls (ignored)" in proc.stderr
+    proc = _seam_run(tmp_path, {**env, "HAL0_ANSWERS_FILE": str(bad)}, root=tree)
+    assert proc.returncode == 1
+    assert "ERR TRAP" in (tmp_path / "report.log").read_text()
+    assert _records(tmp_path) == []
+
+
 def test_not_run_when_wizard_absent(tmp_path: Path, stub: dict[str, str]) -> None:
-    env = {"STUB_LOG": stub["STUB_LOG"]}
+    env = {"STUB_LOG": stub["STUB_LOG"], **_absent(tmp_path)}
     proc = _collect(tmp_path, env)
     assert proc.returncode == 0, proc.stderr
     assert _state(proc)["RC"] == "0" and _state(proc)["APPLIED"] == "0"
@@ -452,11 +501,13 @@ def test_a_good_saved_copy_is_handed_over_as_a_copy(tmp_path: Path, stub: dict[s
 # ── unknown flags ───────────────────────────────────────────────────────────
 
 
-def _flag_loop(tmp_path: Path, args: list[str], env: dict[str, str]) -> subprocess.CompletedProcess:
+def _flag_loop(
+    tmp_path: Path, args: list[str], env: dict[str, str], root: Path = ROOT
+) -> subprocess.CompletedProcess:
     block = _slice('SUMMARY_JSON_PATH=""', "# Banner first")
     script = f"""
 set -euo pipefail
-REPO_ROOT="{ROOT}"
+REPO_ROOT="{root}"
 source "{ANSWERS_SH}"
 info() {{ printf 'INFO: %s\\n' "$*"; }}
 warn() {{ printf 'WARN: %s\\n' "$*" >&2; }}
@@ -522,7 +573,7 @@ def test_every_accepted_flag_passes_when_wizard_present(
 
 
 def test_unknown_flag_only_warns_when_wizard_absent(tmp_path: Path) -> None:
-    proc = _flag_loop(tmp_path, ["--no-tls", "--no-owui"], {})
+    proc = _flag_loop(tmp_path, ["--no-tls", "--no-owui"], _absent(tmp_path))
     assert proc.returncode == 0, proc.stderr
     assert "WARN: unknown flag: --no-tls (ignored)" in proc.stderr
     assert "LOOP DONE reconfigure=0 args=2" in proc.stdout
@@ -593,9 +644,11 @@ def test_a_document_the_reader_refuses_stops(tmp_path: Path, stub: dict[str, str
 # ── exit codes, through the seam in install.sh ──────────────────────────────
 
 
-def _seam_run(tmp_path: Path, env: dict[str, str]) -> subprocess.CompletedProcess[str]:
+def _seam_run(
+    tmp_path: Path, env: dict[str, str], root: Path = ROOT
+) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
-        ["bash", "-c", _seam_script(tmp_path)],
+        ["bash", "-c", _seam_script(tmp_path, root=root)],
         capture_output=True,
         text=True,
         timeout=60,
@@ -605,13 +658,13 @@ def _seam_run(tmp_path: Path, env: dict[str, str]) -> subprocess.CompletedProces
     )
 
 
-def _seam_script(tmp_path: Path, pre: str = "") -> str:
+def _seam_script(tmp_path: Path, pre: str = "", root: Path = ROOT) -> str:
     seam = _slice("# answers-seam: begin", "# answers-seam: end")
     return f"""
 set -euo pipefail
 IFS=$'\\n\\t'
 PY="{sys.executable}"
-REPO_ROOT="{ROOT}"
+REPO_ROOT="{root}"
 DEV_MODE=1
 PREFIX="{tmp_path}/prefix"
 VAR_DIR="{tmp_path}/var"
@@ -738,7 +791,7 @@ def test_the_installer_sets_no_interrupt_trap_of_its_own() -> None:
 def test_without_the_wizard_a_bad_document_still_goes_through_the_err_trap(tmp_path: Path) -> None:
     bad = tmp_path / "bad.json"
     bad.write_text('{"version": 7}', encoding="utf-8")
-    proc = _seam_run(tmp_path, {"HAL0_ANSWERS_FILE": str(bad)})
+    proc = _seam_run(tmp_path, {**_absent(tmp_path), "HAL0_ANSWERS_FILE": str(bad)})
     assert proc.returncode == 1
     assert "ERR TRAP" in (tmp_path / "report.log").read_text()
 
