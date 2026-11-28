@@ -12,8 +12,8 @@ Facts about the tool surface that differ from what a tool's name suggests. Names
 
 ## Large answers
 
-- `slot_list` returns a compact roster. It leaves out tuning detail and the resolved command; call
-  `slot_status` or `slot_resolved` for those.
+- `slot_list` returns a compact roster. It keeps `tune_effective` but leaves out the rest of the
+  tuning detail and the resolved command; call `slot_status` or `slot_resolved` for those.
 - `model_list` unfiltered is large: pass `fields` (for example `id,type`) and filters (`installed`,
   `type`, `capability`, `device`, `q`, `limit`, `offset`).
 - `capability_list` unfiltered is large: pass `section` (`backends`, `catalogs`, `selections`)
@@ -21,11 +21,13 @@ Facts about the tool surface that differ from what a tool's name suggests. Names
 
 ## Gated tools
 
-Some tools do not run when called: they return `pending_approval` and wait for the person.
+Some tools do not run when called: they return `pending_approval` at once and nothing waits. Tell
+the person, then re-check with a read tool after they approve.
 
 - `logs_tail`, `slot_logs`, `comfyui_logs` and `mcp_server_logs` are gated, because journal text
-  can carry secrets. Ask the person to approve, or use `journalctl -u <unit>` with the terminal
-  tool (the units are system units, so there is no `--user`).
+  can carry secrets. Ask the person to approve, or run `hal0 doctor logs --unit <unit>` with the
+  terminal tool (`journalctl` is denied to you, and the units are system units, so there is no
+  `--user`). A person with root can run `journalctl -u <unit>`.
 - Gated writes include `slot_create`, `slot_delete`, `slot_restart`, `model_pull`, `model_delete`,
   `capability_set`, `config_write`, `provider_credential_write`, `service_action`.
 - Autonomous writes (no approval) include `slot_load`, `slot_unload`, `slot_edit`, `model_swap`,

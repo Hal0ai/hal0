@@ -6,9 +6,11 @@
 `StandardError=journal` in the unit hal0 renders), so the platform connect and error lines are read with:
 
 ```bash
-journalctl -u hermes-gateway -n 100 --no-pager
 hal0 doctor logs --unit hermes-gateway -n 100
 ```
+
+You are not in the `systemd-journal` group, so `journalctl` is denied to you; a person with root can
+run `journalctl -u hermes-gateway -n 100 --no-pager`.
 
 Hermes also keeps a `logs/` directory in its home, `/var/lib/hal0/.hermes/logs/`, which hal0
 creates. hal0 does not document the file names Hermes writes there. Look at what is in it before
@@ -18,10 +20,14 @@ you rely on a name.
 
 Work from the cause outward:
 
-1. **Is the credential set?** You cannot read the vault. Ask the person (see
-   `hermes-gateway-platform-tokens.md`).
-2. **Is the SDK in the live release?** "requirements not met" for the platform in the journal means
-   it is not. `sudo hal0 agent reprovision hermes --repair` builds it in.
+1. **Is the credential set?** You cannot read the vault or any `.env` file. See
+   `hermes-gateway-platform-tokens.md` for the key-names check and for the `$HERMES_HOME/.env`
+   override.
+2. **Is the SDK in the live release?** "requirements not met" for the platform in the log means
+   it is not. Ask the person to run `sudo hal0 agent reprovision hermes`, which builds a release
+   when a configured platform's SDK is missing. `--repair` forces a build and restarts the agent
+   and the gateway (your session drops, and it needs the network); say so before asking for it
+   (see `../SKILL.md`).
 3. **Is the network the problem?** The gateway needs outbound HTTPS to the platform. A firewall,
    proxy or DNS fault on the box or its network shows up as a network error in the journal. Test
    reachability of the platform's public host name from the box with the platform's own public
