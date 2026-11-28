@@ -79,14 +79,27 @@ def test_empty_deques_return_empty_samples(client: TestClient, app: FastAPI) -> 
 # ── test: seeded data ─────────────────────────────────────────────────────────
 
 
-def test_seeded_events_produce_correct_buckets(app: FastAPI, client: TestClient) -> None:
+#: A request time half-way through a 5 s bin (#3915). The route anchors its
+#: bins to wall-clock multiples of ``bucket_s``, so a test that seeds events
+#: "N seconds ago" against the live clock gets a different bin layout
+#: depending on where in a bin the request happens to land. Tests that assert
+#: a bin layout pin the route's clock here; the seeded timestamps and the
+#: route then read the same instant, however long the request takes.
+_MID_BIN_MONO = 1000.0
+_MID_BIN_EPOCH = 1_700_000_002.5
+
+
+def test_seeded_events_produce_correct_buckets(
+    app: FastAPI, client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Two slots with known events land in the expected bins.
 
     Window: 100s, buckets: 20 => bucket_s = 5.0 s
     We place events at now-50s and now-10s (both within window).
     They must fall in different bins; total_tps / per_slot must match.
     """
-    now_mono = time.monotonic()
+    now_mono = _MID_BIN_MONO
+    _freeze_clock(monkeypatch, now_mono, _MID_BIN_EPOCH)
     # slot A: 100 tokens at now-50s
     # slot B: 200 tokens at now-50s (same bin as A)
     # slot A: 50 tokens at now-10s (different bin)
@@ -144,9 +157,12 @@ def test_seeded_events_produce_correct_buckets(app: FastAPI, client: TestClient)
     assert pytest.approx(per_slot["slotB"][i1], abs=0.01) == 0.0
 
 
-def test_events_outside_window_excluded(app: FastAPI, client: TestClient) -> None:
+def test_events_outside_window_excluded(
+    app: FastAPI, client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Events older than window_s must not appear in output."""
-    now_mono = time.monotonic()
+    now_mono = _MID_BIN_MONO
+    _freeze_clock(monkeypatch, now_mono, _MID_BIN_EPOCH)
     ts_inside = now_mono - 5.0  # within 30s window
     ts_outside = now_mono - 200.0  # outside 30s window
 
@@ -166,6 +182,30 @@ def test_events_outside_window_excluded(app: FastAPI, client: TestClient) -> Non
     assert len(samples) == 1
     bucket_s = 30.0 / 6  # = 5.0
     assert pytest.approx(samples[0]["total_tps"], abs=0.01) == 100.0 / bucket_s
+
+
+def test_an_event_just_before_an_edge_is_followed_by_an_empty_newest_bin(
+    app: FastAPI, client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The layout that made the test above fail at random (#3915), on purpose.
+
+    Bins are anchored to the wall clock. The old test seeded an event "5 s
+    ago" and then made the request; when an edge fell between the two, the
+    event was more than one whole bin behind the newest closed edge. Here the
+    request is 0.4 s past an edge and the event 5.5 s old, so it sits in the
+    SECOND-newest closed bin, and the newest closed bin, which holds nothing,
+    is emitted as a measured zero. That is the route's intended answer; it was
+    only a failure when a test expecting one sample met it by chance.
+    """
+    now_mono = 1000.0
+    _freeze_clock(monkeypatch, now_mono, 1_700_000_000.4)
+    _seed_store(app, {"slotA": [(now_mono - 200.0, 9999), (now_mono - 5.5, 100)]})
+
+    body = client.get("/api/stats/throughput/history?buckets=6&window_s=30").json()
+
+    assert [s["total_tps"] for s in body["samples"]] == [20.0, 0.0]
+    assert [s["serving_slots"] for s in body["samples"]] == [1, 0]
+    assert body["samples"][-1]["ts"] == 1_700_000_000.0
 
 
 # ── test: param clamping ──────────────────────────────────────────────────────

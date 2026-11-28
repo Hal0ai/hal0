@@ -179,7 +179,9 @@ in order:
     fits; the review screen lists it, with its download size, before anything
     is downloaded.
 12. **NPU prerequisites** — installs the FastFlowLM runtime on
-    AMDXDNA/apt hosts (fail-soft elsewhere).
+    AMDXDNA/apt hosts (fail-soft elsewhere). A box with no NPU device skips
+    this step and installs nothing; see `HAL0_NPU_SETUP` in
+    [installer environment variables](/docs/reference/env-vars-install/).
 13. **Bundle picker manifests** — writes the dashboard's first-run bundle
     catalog.
 14. **Bundled agent skills** — installs the shipped agent skill set.

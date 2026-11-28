@@ -9,7 +9,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 ;(globalThis as any).IS_REACT_ACT_ENVIRONMENT = true
 ;(globalThis as any).React = React
 
-const state: { notifs: any[]; diagnoses: any[]; doctor: any; restartPending: boolean; failing: string[]; drift: any; updates: any } = {
+const HEALTH_OK = { data: { status: 'ok', checks: { disk_state: { ok: true, free_mb: 124429 } } } }
+const SLOTS_OK = { data: [{ name: 'a', state: 'ready' }, { name: 'b', state: 'offline' }] }
+
+const state: { notifs: any[]; diagnoses: any[]; doctor: any; restartPending: boolean; failing: string[]; drift: any; updates: any; health: any; slots: any } = {
   notifs: [],
   diagnoses: [],
   doctor: {},
@@ -17,6 +20,8 @@ const state: { notifs: any[]; diagnoses: any[]; doctor: any; restartPending: boo
   failing: [],
   drift: { count: 0, slots: [] },
   updates: { hal0: { current: '1.7.1', available: null, channel: 'nightly' } },
+  health: HEALTH_OK,
+  slots: SLOTS_OK,
 }
 const run = vi.fn()
 const restart = vi.fn()
@@ -25,7 +30,7 @@ vi.mock('../../notifications.jsx', () => ({ useNotifications: () => ({ actionabl
 vi.mock('@/api/hooks/useDiagnoses', () => ({ useDiagnoses: () => ({ diagnoses: state.diagnoses, verdict: 'ok', isLoading: false, isError: false, doctorFeedPending: false, ...state.doctor }) }))
 vi.mock('../../diagnostics/useNextStepRunner.js', () => ({ useNextStepRunner: () => ({ run }) }))
 vi.mock('@/api/hooks/useRuntime', () => ({
-  useHealthSystem: () => ({ data: { status: 'ok', checks: { disk_state: { ok: true, free_mb: 124429 } } } }),
+  useHealthSystem: () => state.health,
   failingChecks: () => state.failing,
 }))
 vi.mock('@/api/hooks/useUpdates', () => ({
@@ -34,7 +39,7 @@ vi.mock('@/api/hooks/useUpdates', () => ({
   useUpdateState: () => ({ data: state.updates }),
 }))
 vi.mock('@/api/hooks/useSlots', () => ({
-  useSlots: () => ({ data: [{ name: 'a', state: 'ready' }, { name: 'b', state: 'offline' }] }),
+  useSlots: () => state.slots,
 }))
 
 await import('../shell.jsx')
@@ -62,6 +67,8 @@ beforeEach(() => {
   state.restartPending = false
   state.failing = []
   state.drift = { count: 0, slots: [] }
+  state.health = HEALTH_OK
+  state.slots = SLOTS_OK
   run.mockClear()
   restart.mockClear()
 })
@@ -128,6 +135,64 @@ describe('OvNeedsYou', () => {
     expect(host.textContent).toContain('1 item')
     act(() => button('open doctor')!.click())
     expect(onGo).toHaveBeenCalledWith('settings/doctor')
+  })
+
+  it('does not say All clear while the health feed is still loading (#4124)', () => {
+    state.health = { data: undefined, isLoading: true }
+    state.slots = { data: undefined, isLoading: true }
+    mount()
+    const line = host.querySelector('[data-testid="ov-inbox-clear"]')!
+    expect(line.getAttribute('data-state')).toBe('checking')
+    expect(line.textContent).toContain('Checking…')
+    expect(line.textContent).not.toContain('All clear')
+    expect(line.textContent).not.toContain('0/0')
+  })
+
+  it('says Status unknown when the health feed failed with nothing to show', () => {
+    state.health = { data: undefined, isLoading: false, isError: true }
+    mount()
+    const line = host.querySelector('[data-testid="ov-inbox-clear"]')!
+    expect(line.getAttribute('data-state')).toBe('unknown')
+    expect(line.textContent).toContain('Status unknown')
+    expect(line.textContent).not.toContain('All clear')
+  })
+
+  it('keeps All clear when a refresh fails but the last answer is still held', () => {
+    state.health = { ...HEALTH_OK, isLoading: false, isError: true }
+    mount()
+    expect(host.querySelector('[data-testid="ov-inbox-clear"]')!.getAttribute('data-state')).toBe('known')
+    expect(host.textContent).toContain('All clear')
+  })
+
+  it('Status unknown does not stick: the next good answer reads All clear', () => {
+    state.health = { data: undefined, isLoading: false, isError: true }
+    mount()
+    expect(host.querySelector('[data-testid="ov-inbox-clear"]')!.getAttribute('data-state')).toBe('unknown')
+    // The health feed recovers; the hook now returns data and no error.
+    state.health = HEALTH_OK
+    act(() => {
+      root.render(<OvNeedsYou onGo={() => {}} />)
+    })
+    const line = host.querySelector('[data-testid="ov-inbox-clear"]')!
+    expect(line.getAttribute('data-state')).toBe('known')
+    expect(line.textContent).toContain('All clear')
+    expect(line.textContent).not.toContain('Status unknown')
+  })
+
+  it('a box with no slots settles to All clear, without a slot count, and never stays Checking', () => {
+    state.slots = { data: [], isLoading: false }
+    mount()
+    const line = host.querySelector('[data-testid="ov-inbox-clear"]')!
+    expect(line.getAttribute('data-state')).toBe('known')
+    expect(line.textContent).toContain('All clear')
+    expect(line.textContent).not.toContain('Checking')
+    expect(line.textContent).not.toContain('slots healthy')
+  })
+
+  it('a slot list that failed to load does not hold the banner at Checking', () => {
+    state.slots = { data: undefined, isLoading: false, isError: true }
+    mount()
+    expect(host.querySelector('[data-testid="ov-inbox-clear"]')!.getAttribute('data-state')).toBe('known')
   })
 
   it('does not claim doctor ok while the doctor feed is loading', () => {

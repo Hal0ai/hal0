@@ -130,11 +130,39 @@ function view(initial: Sel = { provider: null, model: null }) {
   return { ...m, onSelect, onAdd }
 }
 
-// react-query hands results to React through a zero-delay timer, so waiting is real time.
-async function settle() {
-  await act(async () => {
+const tick = () =>
+  act(async () => {
     await new Promise((r) => setTimeout(r, 4))
   })
+
+// Wait for what the test set in motion, not for a fixed time (#3953). react-query hands results
+// to React through a zero-delay timer, so waiting is real time; how much depends on the machine.
+// One 4 ms tick was enough on an idle one and not on a loaded CI runner, where the provider list
+// arrived late and every read of it found nothing. So: tick until no query or mutation is in
+// flight, then once more for the result to reach React.
+//
+// Bounded at SETTLE_TICKS. Hitting the bound is a failure that names what never finished: a
+// request that hangs must not pass as "nothing arrived", and must not hang the suite either.
+const SETTLE_TICKS = 250
+
+function unfinished(): string {
+  const queries = qc
+    .getQueryCache()
+    .findAll({ fetchStatus: 'fetching' })
+    .map((query) => JSON.stringify(query.queryKey))
+  const mutations = qc.isMutating()
+  return [...queries, ...(mutations ? [`${mutations} mutation(s)`] : [])].join(', ')
+}
+
+async function settle() {
+  for (let i = 0; i < SETTLE_TICKS; i++) {
+    await tick()
+    if (!qc.isFetching() && !qc.isMutating()) {
+      await tick()
+      return
+    }
+  }
+  throw new Error(`settle(): still waiting after ${SETTLE_TICKS} ticks for ${unfinished()}`)
 }
 
 const q = <T extends Element = HTMLElement>(sel: string) => document.querySelector(sel) as T | null
@@ -336,7 +364,8 @@ describe('search', () => {
   it('while searching the chevron shows the open state, not the remembered one', async () => {
     view()
     await settle()
-    const chev = () => q('[data-testid="prov-head-openrouter"] .prov-chev')!.textContent
+    // Not `q(...)!`: a header that is not there must fail as an assertion, not as a TypeError.
+    const chev = () => q('[data-testid="prov-head-openrouter"] .prov-chev')?.textContent ?? '(no header)'
     expect(chev()).toBe('▸')
     await type('input[aria-label="Search models"]', 'm299')
     await later(300)
@@ -651,5 +680,13 @@ describe('provider without a key slot', () => {
     expect(q('[data-testid="prov-banner-key-openai"]')).toBeNull()
     expect(qa('button').find((b) => b.textContent === 'Add key')).toBeUndefined()
     expect(q('[data-testid="prov-no-key-slot-openai"]')!.textContent).toContain('This provider has no key slot configured.')
+  })
+})
+
+describe('settle()', () => {
+  it('fails, naming the request, when one never finishes', async () => {
+    vi.mocked(client.apiGet).mockImplementation(() => new Promise<never>(() => {}))
+    view()
+    await expect(settle()).rejects.toThrow(/still waiting after 250 ticks for .*upstream/i)
   })
 })

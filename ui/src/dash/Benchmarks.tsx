@@ -449,6 +449,7 @@ const Benchmarks: React.FC<{ param?: string | null }> = ({ param = null }) => {
   const [rosterErr, setRosterErr] = useState<string | null>(null);
   const [rosterLoading, setRosterLoading] = useState(true);
   const [queue, setQueue] = useState<QueueState | null>(null);
+  const [queueErr, setQueueErr] = useState<string | null>(null);
   const [regressions, setRegressions] = useState<RegressionFlag[]>([]);
 
   const loadRoster = useCallback(() => {
@@ -462,8 +463,21 @@ const Benchmarks: React.FC<{ param?: string | null }> = ({ param = null }) => {
       .catch(() => setRegressions([]));
   }, []);
 
+  // One queue request at a time: the 3 s poll, a Retry pressed repeatedly and the refresh after
+  // an action all come through here, and none may stack behind a slow answer.
+  // A request older than QUEUE_BUSY_MAX_MS no longer holds the others back, so one that never
+  // answers cannot stop the page from refreshing for good.
+  const queueBusySince = useRef<number | null>(null);
   const loadQueue = useCallback(() => {
-    apiGet<QueueState>('/api/benchmarks/queue').then(setQueue).catch(() => {});
+    const now = Date.now();
+    if (queueBusySince.current !== null && now - queueBusySince.current < QUEUE_BUSY_MAX_MS) return;
+    queueBusySince.current = now;
+    const mine = now;
+    apiGet<QueueState>('/api/benchmarks/queue')
+      .then(d => { setQueue(d); setQueueErr(null); })
+      // Keep the last good queue on screen; say that the refresh failed.
+      .catch(e => setQueueErr(errText(e)))
+      .finally(() => { if (queueBusySince.current === mine) queueBusySince.current = null; });
   }, []);
 
   useEffect(() => { loadRoster(); }, [loadRoster]);
@@ -476,7 +490,7 @@ const Benchmarks: React.FC<{ param?: string | null }> = ({ param = null }) => {
   const enqueueBench = useCallback(async (id: string, opt: BenchOption) => {
     try {
       await apiPost('/api/benchmarks/queue', { model: id, ...opt.body });
-      toast(`Queued ${opt.label} for ${cleanName(id)} — start the worker on the Run tab`, 'ok');
+      toast(`Queued ${opt.label} for ${cleanName(id)} — start the worker on the Run Queue tab`, 'ok');
       loadQueue();
     } catch (e: any) { toast(`Queue failed: ${e.message}`, 'err'); }
   }, [loadQueue]);
@@ -533,7 +547,7 @@ const Benchmarks: React.FC<{ param?: string | null }> = ({ param = null }) => {
           ['roster', 'Roster', `${measured}/${roster.length}`],
           ['runs', 'Runs', null],
           ['evals', 'Evals', null],
-          ['queue', 'Run Queue', String(queue?.items?.length ?? 0)],
+          ['queue', 'Run Queue', queue ? String(queue.items?.length ?? 0) : queueErr ? '!' : '…'],
         ] as [typeof tab, string, string | null][]).map(([id, label, ct]) => (
           <button
             key={id}
@@ -563,7 +577,7 @@ const Benchmarks: React.FC<{ param?: string | null }> = ({ param = null }) => {
         {tab === 'runs' && <RunsTab regressions={regressions} />}
         {tab === 'evals' && <EvalsTab />}
         {tab === 'queue' && (
-          <QueueTab queue={queue} roster={roster} refresh={loadQueue} onQueueModel={enqueueBench} />
+          <QueueTab queue={queue} queueError={queueErr} roster={roster} refresh={loadQueue} onQueueModel={enqueueBench} />
         )}
       </div>
     </div>
@@ -1290,12 +1304,15 @@ function RunsTab({ regressions }: { regressions: RegressionFlag[] }) {
   const [expanded, setExpanded] = useState<string | null>(null);
   const [recordCache, setRecordCache] = useState<Record<string, any>>({});
 
-  useEffect(() => {
+  const [runsErr, setRunsErr] = useState<string | null>(null);
+  const loadRuns = useCallback(() => {
+    setLoading(true);
     apiGet<{ runs: RunSummary[] }>('/api/benchmarks/runs?limit=200')
-      .then(d => { setRuns(d.runs || []); })
-      .catch(() => {})
+      .then(d => { setRuns(d.runs || []); setRunsErr(null); })
+      .catch(e => setRunsErr(errText(e)))
       .finally(() => setLoading(false));
   }, []);
+  useEffect(() => { loadRuns(); }, [loadRuns]);
 
   const toggle = useCallback(async (rid: string) => {
     if (expanded === rid) { setExpanded(null); return; }
@@ -1308,6 +1325,7 @@ function RunsTab({ regressions }: { regressions: RegressionFlag[] }) {
   }, [expanded, recordCache]);
 
   if (loading) return <div style={{ color: 'var(--fg-3)' }}>Loading runs&hellip;</div>;
+  if (runsErr) return <LoadError what="runs" error={runsErr} onRetry={loadRuns} />;
 
   const filtered = filter
     ? runs.filter(r => `${r.model} ${r.suite} ${r.lane} ${r.kind} ${r.outcome} ${r.trigger}`.toLowerCase().includes(filter.toLowerCase()))
@@ -1669,11 +1687,18 @@ function EvalsTab() {
   const [data, setData] = useState<any>(null);
   const [loading, setLoading] = useState(true);
 
-  useEffect(() => {
-    apiGet<any>('/api/benchmarks/evals').then(setData).catch(() => {}).finally(() => setLoading(false));
+  const [evalsErr, setEvalsErr] = useState<string | null>(null);
+  const loadEvals = useCallback(() => {
+    setLoading(true);
+    apiGet<any>('/api/benchmarks/evals')
+      .then(d => { setData(d); setEvalsErr(null); })
+      .catch(e => setEvalsErr(errText(e)))
+      .finally(() => setLoading(false));
   }, []);
+  useEffect(() => { loadEvals(); }, [loadEvals]);
 
   if (loading) return <div style={{ color: 'var(--fg-3)' }}>Loading evals&hellip;</div>;
+  if (evalsErr) return <LoadError what="evals" error={evalsErr} onRetry={loadEvals} />;
   if (!data || !data.models?.length) {
     return (
       <div style={{ color: 'var(--fg-4)', fontStyle: 'italic' }}>
@@ -1728,6 +1753,30 @@ function EvalsTab() {
 
 /** Recent queue items the worker dropped without running (failed.json, newest
  *  last), so a run that never started doesn't just vanish (#2387). */
+/**
+ * A failed load, shown where the data would be (#4118).
+ *
+ * The page used to swallow these and render the empty state, so a signed-out session or a server
+ * error read as "nothing has been benchmarked". An empty state is for an answer that is empty.
+ */
+export function LoadError({ what, error, onRetry }: { what: string; error: string; onRetry?: () => void }) {
+  return (
+    <div
+      role="alert"
+      data-testid={`bench-load-error-${what.replace(/\s+/g, '-')}`}
+      style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap', color: 'var(--warn)', fontFamily: mono, fontSize: 11, padding: '0.4rem 0' }}
+    >
+      <span>Could not load {what}: {error}</span>
+      {onRetry && <button className="btn ghost sm" onClick={onRetry}>Retry</button>}
+    </div>
+  );
+}
+
+/** How long one run-queue request may hold back the next (#4118). */
+export const QUEUE_BUSY_MAX_MS = 15_000;
+
+const errText = (e: unknown) => (e instanceof Error && e.message ? e.message : 'request failed');
+
 export function QueueFailures({ failed }: { failed: FailedQueueItem[] }) {
   if (!failed.length) return null;
   return (
@@ -1751,8 +1800,9 @@ export function QueueFailures({ failed }: { failed: FailedQueueItem[] }) {
   );
 }
 
-function QueueTab({ queue, roster, refresh, onQueueModel }: {
+function QueueTab({ queue, queueError, roster, refresh, onQueueModel }: {
   queue: QueueState | null;
+  queueError: string | null;
   roster: RosterModel[];
   refresh: () => void;
   onQueueModel: (id: string, opt: BenchOption) => void;
@@ -1763,9 +1813,15 @@ function QueueTab({ queue, roster, refresh, onQueueModel }: {
   const [modelPick, setModelPick] = useState('');
   const busyRef = useRef(false);
 
-  useEffect(() => {
-    apiGet<any>('/api/benchmarks/plan').then(setPlan).catch(() => {}).finally(() => setPlanLoading(false));
+  const [planErr, setPlanErr] = useState<string | null>(null);
+  const loadPlan = useCallback(() => {
+    setPlanLoading(true);
+    apiGet<any>('/api/benchmarks/plan')
+      .then(d => { setPlan(d); setPlanErr(null); })
+      .catch(e => setPlanErr(errText(e)))
+      .finally(() => setPlanLoading(false));
   }, []);
+  useEffect(() => { loadPlan(); }, [loadPlan]);
 
   const control = async (body: Record<string, unknown>, msg: string) => {
     if (busyRef.current) return;
@@ -1806,6 +1862,7 @@ function QueueTab({ queue, roster, refresh, onQueueModel }: {
   return (
     <div style={{ display: 'grid', gap: '1.2rem', gridTemplateColumns: 'minmax(340px, 1fr) 1.4fr' }}>
       <div>
+        {queueError && <LoadError what="run queue" error={queueError} onRetry={refresh} />}
         {/* worker control */}
         <h4 style={h4Style}>worker</h4>
         <div className="card" style={{ padding: '0.8rem 0.9rem' }}>
@@ -1918,6 +1975,8 @@ function QueueTab({ queue, roster, refresh, onQueueModel }: {
         ))}
         {planLoading ? (
           <div style={{ color: 'var(--fg-3)' }}>computing plan&hellip;</div>
+        ) : planErr ? (
+          <LoadError what="plan" error={planErr} onRetry={loadPlan} />
         ) : plan?.cells?.length ? (
           <>
             <div style={{ fontFamily: mono, fontSize: 11, color: 'var(--fg-3)', marginBottom: 8 }}>

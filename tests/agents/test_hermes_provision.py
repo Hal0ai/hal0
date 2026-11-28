@@ -6556,12 +6556,24 @@ def test_wire_named_profiles_gives_up_on_a_config_that_keeps_changing(
     def churn(dir_fd):
         n[0] += 1
         if n[0] % 2 == 0:
-            cfg.write_text(f"model:\n  default: agent\nrev: {n[0]}\n")
+            # Every rewrite is a different LENGTH (#4128). The sweep tells an
+            # edit by device, inode, size and mtime. "rev: 2" and "rev: 4" are
+            # the same size, so only the mtime separated them, and two writes
+            # inside one tick of a coarse filesystem clock (tmpfs) share one:
+            # the sweep then saw no edit and the test failed about half the
+            # time on a busy machine. A growing pad makes each one differ in
+            # size, whatever the clock does.
+            before = cfg.stat()
+            cfg.write_text(f"model:\n  default: agent\nrev: {'x' * n[0]}\n")
+            # And hold the mtime still, so the test passes on the size alone
+            # and would have failed here, every time, with same-size rewrites.
+            os.utime(cfg, ns=(before.st_atime_ns, before.st_mtime_ns))
         return real_open(dir_fd)
 
     monkeypatch.setattr(hp, "_open_config_nofollow", churn)
     report = hp.wire_named_profiles(home)
     assert report["errors"] == {"coder": "config.yaml kept changing during the sweep"}
+    assert n[0] >= 4, "the sweep must have retried, not stopped at the first edit"
 
 
 def test_wire_named_profiles_refuses_to_stamp_a_renamed_profile(

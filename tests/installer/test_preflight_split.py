@@ -256,6 +256,8 @@ resolve_main_python() {{
     printf '#!/bin/sh\nexit 0\n' > "{bin_dir}/python3.12"; "{chmod}" 755 "{bin_dir}/python3.12"
     echo python3.12; }}
 hal0_collect_answers() {{ echo seam >> "$LOG"; }}
+hal0_wizard_present() {{ return 1; }}
+hal0_answers_python() {{ return 1; }}
 DEV_MODE=0
 PY={py}
 VAR_DIR=/var/lib/hal0

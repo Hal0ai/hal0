@@ -127,7 +127,23 @@ export function mergeAttention(input: AttentionInput): InboxItem[] {
   return items.sort((a, b) => TONE_RANK[a.tone] - TONE_RANK[b.tone])
 }
 
+/**
+ * Whether the banner may say "All clear" (#4124).
+ *
+ * `checking`: the health feed has not answered yet. An empty list then means "nothing loaded",
+ * not "nothing wrong". `unknown`: it failed, and nothing was measured. `known`: it answered.
+ */
+export type ClearState = 'checking' | 'known' | 'unknown'
+
+const CLEAR_LEAD: Record<ClearState, string> = {
+  checking: 'Checking…',
+  known: 'All clear',
+  unknown: 'Status unknown',
+}
+
 export interface AllClearInput {
+  /** Defaults to `known`. */
+  state?: ClearState
   /** True only when the doctor feed answered; otherwise the line must not claim `doctor ok`. */
   doctorKnown: boolean
   slotsHealthy: [number, number]
@@ -144,7 +160,10 @@ export function allClearLine(i: AllClearInput): string {
     typeof i.diskFreeMb === 'number' && Number.isFinite(i.diskFreeMb)
       ? `${freeGb(i.diskFreeMb)} GB`
       : '—'
-  const parts = ['All clear', i.doctorKnown ? 'doctor ok' : 'doctor unavailable']
+  const state = i.state ?? 'known'
+  // While checking, the doctor feed is simply not in yet: saying "unavailable" would be a guess.
+  const doctor = i.doctorKnown ? 'doctor ok' : state === 'checking' ? 'doctor pending' : 'doctor unavailable'
+  const parts = [CLEAR_LEAD[state], doctor]
   // No slot list yet (still loading, or none configured): say nothing rather than "0/0".
   if (i.slotsHealthy[1] > 0) parts.push(`${i.slotsHealthy[0]}/${i.slotsHealthy[1]} slots healthy`)
   parts.push(`disk ${disk} free`)

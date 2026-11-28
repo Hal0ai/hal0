@@ -72,7 +72,15 @@ export function OvNeedsYou({ onGo }) {
     const slots = slotsQ.data ?? []
     const healthy = slots.filter((s) => slotIndicatorFromPhase(s).cls !== 'error').length
     const hal0 = updates.data?.hal0
+    // #4124: an empty list is "All clear" only once the health feed and the slot list have
+    // answered. Before that nothing was measured; after a failure nothing could be.
+    const state = health.isLoading || slotsQ.isLoading
+      ? 'checking'
+      : health.isError && !health.data
+        ? 'unknown'
+        : 'known'
     const line = allClearLine({
+      state,
       doctorKnown: !isLoading && !isError && !doctorFeedPending,
       slotsHealthy: [healthy, slots.length],
       diskFreeMb: health.data?.checks?.disk_state?.free_mb ?? null,
@@ -83,7 +91,7 @@ export function OvNeedsYou({ onGo }) {
     const parts = line.split(' · ')
     return (
       <section className="ov-card ov-inbox">
-        <div className="ov-inbox-clear">
+        <div className="ov-inbox-clear" data-state={state} data-testid="ov-inbox-clear">
           <b>{parts[0]}</b>
           <span>{parts.slice(1, -1).join(' · ')}</span>
           <span className="sp" />
