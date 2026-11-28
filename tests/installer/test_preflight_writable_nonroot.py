@@ -21,6 +21,7 @@ exposes stubbed after sourcing (``_preflight_is_root`` and
 
 from __future__ import annotations
 
+import shlex
 import subprocess
 from pathlib import Path
 
@@ -44,8 +45,8 @@ def _run(tmp_path: Path, *, root: bool, unwritable: tuple[str, ...]) -> tuple[in
     script = (
         "set -uo pipefail\n"
         "export HAL0_PLAIN=1\n"
-        f"source {_UI!s}\n"
-        f"source {_PREFLIGHT!s}\n"
+        f"source {shlex.quote(str(_UI))}\n"
+        f"source {shlex.quote(str(_PREFLIGHT))}\n"
         f"_preflight_is_root() {{ return {0 if root else 1}; }}\n"
         f"_deny=({deny})\n"
         '_preflight_path_writable() { local x; for x in "${_deny[@]}"; do\n'

@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import os
 import re
+import shlex
 import shutil
 import stat
 import subprocess
@@ -76,7 +77,7 @@ def _run_prereqs(
     "wrong OS" reproducible independent of the host running the suite.
     """
     script = (
-        "set -euo pipefail\n" + _STUBS + f"source {_PREFLIGHT!s}\n"
+        "set -euo pipefail\n" + _STUBS + f"source {shlex.quote(str(_PREFLIGHT))}\n"
         "rc=0\n"
         "preflight_bootstrap_prereqs || rc=$?\n"
         "exit $rc\n"

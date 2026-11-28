@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import re
+import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -73,10 +74,10 @@ def _run(
         "set -euo pipefail\n"
         + _STUBS
         + f"DEV_MODE={dev_mode}\n"
-        + f"CURRENT_LINK={root / 'current'!s}\n"
-        + f"VENV_DIR={root / 'venv'!s}\n"
-        + f"REPO_ROOT={repo_root!s}\n"
-        + f"PY={sys.executable}\n"
+        + f"CURRENT_LINK={shlex.quote(str(root / 'current'))}\n"
+        + f"VENV_DIR={shlex.quote(str(root / 'venv'))}\n"
+        + f"REPO_ROOT={shlex.quote(str(repo_root))}\n"
+        + f"PY={shlex.quote(sys.executable)}\n"
         + "VERSION=1.6.0\n"
         + _function_source()
         + "check_upgrade_floor\n"

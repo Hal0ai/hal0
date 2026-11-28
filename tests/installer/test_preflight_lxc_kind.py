@@ -21,6 +21,7 @@ returns one of the three admitted values on the machine running the suite.
 
 from __future__ import annotations
 
+import shlex
 import subprocess
 from pathlib import Path
 
@@ -33,7 +34,7 @@ _ADMITTED = {"none", "box", "lxc-privileged", "lxc-unprivileged"}
 
 
 def _run(snippet: str, env_extra: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
-    script = f"source {_PREFLIGHT!s} >/dev/null 2>&1\n{snippet}\n"
+    script = f"source {shlex.quote(str(_PREFLIGHT))} >/dev/null 2>&1\n{snippet}\n"
     env = {"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "HOME": "/tmp"}
     env.update(env_extra or {})
     return subprocess.run(
