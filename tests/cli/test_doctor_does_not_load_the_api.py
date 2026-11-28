@@ -57,6 +57,39 @@ def test_the_helpers_the_doctor_uses_do_not_load_the_api_package() -> None:
     assert proc.stdout.strip().splitlines()[-1] == "False"
 
 
+def test_running_every_doctor_check_does_not_load_the_api_package(tmp_path: Path) -> None:
+    """The import checks above see only what the doctor modules import at the
+    top. A lazy ``import hal0.api...`` inside a function two calls away, a
+    ``from hal0 import api`` or an ``importlib`` call would pass them. So run
+    the whole check list in a fresh interpreter, against an empty home with no
+    API to talk to, and look at what got loaded."""
+    code = (
+        "import sys\n"
+        "import hal0.cli.doctor_all as doctor\n"
+        "checks = doctor.build_all_checks()\n"
+        "assert len(checks) > 20, len(checks)\n"
+        "loaded = sorted(m for m in sys.modules if m == 'hal0.api' or m.startswith('hal0.api.'))\n"
+        "print(loaded)\n"
+    )
+    env = {
+        "PATH": "/usr/bin:/bin",
+        "HOME": str(tmp_path),
+        "HAL0_HOME": str(tmp_path / "hal0"),
+        # Nothing listens here: every check that asks the API gets a refusal.
+        "HAL0_API_URL": "http://127.0.0.1:9",
+    }
+    proc = subprocess.run(
+        [sys.executable, "-c", code],
+        capture_output=True,
+        text=True,
+        timeout=180,
+        check=False,
+        env=env,
+    )
+    assert proc.returncode == 0, proc.stderr[-2000:]
+    assert proc.stdout.strip().splitlines()[-1] == "[]"
+
+
 def test_the_api_modules_still_offer_the_same_names() -> None:
     from hal0.api import _env_store, _redact
     from hal0.config import env_guard
