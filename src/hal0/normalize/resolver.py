@@ -31,8 +31,10 @@ DEFAULT_CHAINS: dict[str, tuple[str, ...]] = {
     "hal0/agent": (_ANCHOR_NAME,),
     # ADR-0053: an empty or absent memory slot shares the agent anchor.
     "hal0/memory": ("memory", _ANCHOR_NAME),
-    # hal0/utility → the cheap helper slot (loaded on demand when cold); falls
-    # back to the anchor only when utility has no bound model (#2741).
+    # hal0/utility → a box's own `utility` slot (loaded on demand when cold);
+    # falls back to the anchor only when utility has no bound model (#2741). A box
+    # without a utility slot reads these two chains through `_without_utility`.
+    # HAL0-SUNSET: v2.0.0  — the `hal0/utility` alias and `utility` in the `hal0/npu` chain; delete both entries and `_without_utility` once every supported box has moved off the `utility` slot name.
     "hal0/utility": ("utility", _ANCHOR_NAME),
     "hal0/npu": ("npu", "utility", _ANCHOR_NAME),
     # hal0/brain → the dashboard agent-chat persona. No installer seeds a `brain`
@@ -40,6 +42,25 @@ DEFAULT_CHAINS: dict[str, tuple[str, ...]] = {
     # name through unresolved and every chat turn would 404 on a stock box.
     "hal0/brain": ("brain", _ANCHOR_NAME),
 }
+
+
+# HAL0-SUNSET: v2.0.0  — see DEFAULT_CHAINS; delete this function with the `hal0/utility` alias.
+def _without_utility(
+    virtual_name: str, chain: tuple[str, ...], slots: list[SlotView]
+) -> tuple[str, ...]:
+    """Read a chain naming ``utility`` for a box that has no such slot.
+
+    New installs seed ``memory``, not ``utility``. ``hal0/utility`` there means
+    the helper lane, which is what ``hal0/memory`` resolves, so it takes that
+    chain. ``hal0/npu`` is not an alias of the helper lane: it only loses the
+    ``utility`` step, which on such a box could never match. A box that does have
+    a ``utility`` slot keeps the chain unchanged.
+    """
+    if "utility" not in chain or any(_slot_matches_name(s, "utility") for s in slots):
+        return chain
+    if virtual_name == "hal0/utility":
+        return DEFAULT_CHAINS["hal0/memory"]
+    return tuple(name for name in chain if name != "utility")
 
 
 def _chain_for(virtual_name: str, slots: list[SlotView]) -> tuple[str, ...] | None:
@@ -53,7 +74,7 @@ def _chain_for(virtual_name: str, slots: list[SlotView]) -> tuple[str, ...] | No
     """
     canonical = DEFAULT_CHAINS.get(virtual_name)
     if canonical is not None:
-        return canonical
+        return _without_utility(virtual_name, canonical, slots)
     if virtual_name.startswith(_VIRTUAL_PREFIX):
         slot = virtual_name[len(_VIRTUAL_PREFIX) :]
         if slot and any(_slot_matches_name(s, slot) for s in slots):
@@ -169,7 +190,7 @@ def resolve_chain(
                 needs_load=needs_load,
             )
 
-    # No chain entry has a model-bound slot (e.g. a model-less utility on a
+    # No chain entry has a model-bound slot (e.g. a model-less memory slot on a
     # fresh install, #2716): fall back to the configured primary.
     primary = _configured_primary(slots)
     if primary is not None:

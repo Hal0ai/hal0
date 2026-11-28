@@ -91,6 +91,7 @@ _EVICT_AFTER_S: float = 300.0
 # still wins for the idle-TTL path (lets an operator opt a named anchor
 # back into TTL eviction); the operator-pin field (below) is the
 # unconditional override for both TTL and pressure eviction.
+# HAL0-SUNSET: v2.0.0  — `utility` in this set covers a box whose existing `utility` slot has not been given an explicit pin (`hal0.config.migrations.utility_pin`); delete the entry once every supported box has run that pass.
 _PINNED_BY_DEFAULT: frozenset[str] = frozenset({"agent", "utility", "npu"})
 
 

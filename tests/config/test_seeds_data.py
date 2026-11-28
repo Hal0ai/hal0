@@ -144,8 +144,8 @@ class TestSeedStacksToml:
         assert embed_row.model == "qwen3-embedding-0-6b-q8-0"
         assert embed_row.device == "gpu-rocm"
         # The sibling slot never carried the marker -> no capabilities.
-        utility_slot = next(s for s in saber.slots if s.slot == "utility")
-        assert utility_slot.capabilities == []
+        helper_slot = next(s for s in saber.slots if s.slot == "memory")
+        assert helper_slot.capabilities == []
 
 
 class TestProfileBenchToml:

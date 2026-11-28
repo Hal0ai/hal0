@@ -4033,7 +4033,7 @@ def _phase_config_write(ctx: _StepCtx) -> PhaseResult:
         extraction_model = graph_config.extraction_model
     except Exception as exc:
         log.warning("hermes_provision.memory_target_unreadable", error=str(exc))
-        extraction_slot, extraction_model = "utility", None
+        extraction_slot, extraction_model = "memory", None
     auxiliary_tasks = _resolve_auxiliary_tasks(
         slots_all,
         hal0_base_url=hal0_v1_base,
@@ -7719,9 +7719,9 @@ def _collect_chat_slots(
 # flips back to v0.22.4 runs that task on its default route, the main model.
 
 # The hal0-routed side-tasks (everything that should run on the cheap
-# `utility` slot). vision is intentionally excluded — it keeps an empty
-# model so it inherits the chat model (which may carry a vision
-# label) rather than the tiny utility model.
+# helper slot, `memory` on a new install). vision is intentionally excluded — it
+# keeps an empty model so it inherits the chat model (which may carry a vision
+# label) rather than the tiny helper model.
 _UTILITY_AUX_TASKS: tuple[str, ...] = (
     "compression",
     "title_generation",
@@ -7827,18 +7827,23 @@ def _resolve_delegation(
     }
 
 
+def _slot_is_named(slot: Any, name: str) -> bool:
+    return isinstance(slot, dict) and str(slot.get("name") or "").lower() == name
+
+
 def _resolve_auxiliary_tasks(
     slots: list[dict[str, Any]],
     *,
     hal0_base_url: str,
-    extraction_slot: str = "utility",
+    extraction_slot: str = "memory",
     extraction_model: str | None = None,
 ) -> dict[str, dict[str, Any]]:
     """Build the ``auxiliary_tasks`` template dict (task → {provider, model, base_url}).
 
     The typed adapter preserves stable IDs and explicit role hints, then the
     shared resolver applies the configured extraction target and main fallback.
-    Custom extraction targets keep the prior utility preference.
+    A custom extraction target prefers a ``utility`` slot when the box still has
+    one, and the ``memory`` slot otherwise.
     This function only translates resolved roles back into the
     existing Hermes auxiliary overlay keys.
     """
@@ -7849,7 +7854,8 @@ def _resolve_auxiliary_tasks(
     elif not extraction_model and extraction_slot == "agent":
         auxiliary_slot = None
     else:
-        auxiliary_slot = "utility"
+        # HAL0-SUNSET: v2.0.0  — prefer an existing `utility` slot for a custom or `utility` extraction target; delete the `utility` branch once every supported box has moved off that slot name.
+        auxiliary_slot = "utility" if any(_slot_is_named(s, "utility") for s in slots) else "memory"
     role_map = resolve_role_slots(
         "hermes",
         candidates,

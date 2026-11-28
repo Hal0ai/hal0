@@ -2056,7 +2056,11 @@ def test_read_delegation_slot(tmp_path) -> None:
 
 
 def test_resolve_auxiliary_tasks_routes_utility_group_to_utility_slot() -> None:
-    aux = hp._resolve_auxiliary_tasks(_ROLE_SLOTS, hal0_base_url=_HAL0_V1)
+    # The shape of a box upgraded from before `memory` replaced `utility`: the
+    # v4 migration left memory.graph.extraction_slot = "utility".
+    aux = hp._resolve_auxiliary_tasks(
+        _ROLE_SLOTS, hal0_base_url=_HAL0_V1, extraction_slot="utility"
+    )
     # Utility group → custom provider on the utility slot's model.
     for task in ("compression", "title_generation", "mcp"):
         assert aux[task] == {
@@ -2172,7 +2176,9 @@ def test_resolve_auxiliary_tasks_keeps_the_npu_lane_when_memory_is_unbound() -> 
 
 def test_overlay_emits_delegation_and_auxiliary_keys() -> None:
     deleg = hp._resolve_delegation(_ROLE_SLOTS, hal0_base_url=_HAL0_V1)
-    aux = hp._resolve_auxiliary_tasks(_ROLE_SLOTS, hal0_base_url=_HAL0_V1)
+    aux = hp._resolve_auxiliary_tasks(
+        _ROLE_SLOTS, hal0_base_url=_HAL0_V1, extraction_slot="utility"
+    )
     keys = _build_overlay_keys(
         primary={"model_id": "chat-m", "backend_url": _HAL0_V1, "context_length": 32768},
         chat_slots=hp._collect_chat_slots(_ROLE_SLOTS),

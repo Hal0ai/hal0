@@ -429,7 +429,7 @@ async def hal0_slot_alias_models(
 
     Each chat slot (``type == "llm"``) with a configured model
     surfaces as one model object whose ``id`` is the slot **alias = slot
-    name** (e.g. ``chat``, ``agent``, ``utility``). The alias is the stable
+    name** (e.g. ``agent``, ``brain``, ``memory``). The alias is the stable
     handle: it does not change when the underlying model is swapped, so
     callers can pin a co-resident slot without tracking the GGUF filename.
 
@@ -515,7 +515,7 @@ async def hal0_chat_slot_alias_map(slot_manager: SlotManager) -> dict[str, str]:
     """Return ``{slot_alias: model_id}`` for model-bound llm slots.
 
     The slot **alias** is the slot name. ADR-0023: the canonical llm roles
-    are ``agent`` (default anchor) + ``utility`` (helper); any other bound
+    are ``agent`` (default anchor) + ``memory`` (helper); any other bound
     llm slot is included by its own name.
     Used by the ``/v1`` route layer to translate an alias-addressed request
     into the slot's configured model id before routing, so dispatch resolves
@@ -581,7 +581,7 @@ async def hal0_llm_slot_views(
         # advertised catalog of native ``family:size`` tags) and returns the
         # model id dispatched downstream. Both must be the colon tag
         # (``gemma4-it:e2b``), not hal0's ``-FLM`` catalog id — otherwise
-        # ``hal0/utility``/``hal0/npu`` never match the slot and fall through
+        # ``hal0/memory``/``hal0/npu`` never match the slot and fall through
         # to the chat slot. Translate via the same map as the FLM provider.
         from hal0.slots.activation import is_xdna_slot, slot_binary
 

@@ -64,9 +64,9 @@ host{% if env.container.kind %} (container: {{ env.container.kind }}){% endif %}
 4. **Respect peer agents.** Other agents (Claude Code and other coding
    agents) share this memory. Each owns its `agent-identity` card in
    shared memory; never overwrite their cards.
-5. **Smallest model that works.** The utility slot on the NPU exists
-   for cheap work; the primary on the iGPU is for reasoning-heavy
-   turns. Match the cost to the task.
+5. **Smallest model that works.** The `memory` slot is the small model
+   for cheap background work; `agent` is for reasoning-heavy turns.
+   Match the cost to the task.
 
 # Boundaries
 
