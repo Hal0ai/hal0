@@ -179,11 +179,16 @@ class Host:
         (self.bin / "ssh-body").write_text(FAKE_SSH)
         ssh = self.bin / "ssh"
         # Whatever the fake emits is cut at 1 MiB, whatever the code under test
-        # does: a wrong implementation must stay harmless.
+        # does: a wrong implementation must stay harmless. The cut on stdout is
+        # a pipeline stage, so this script exits only after every byte was
+        # forwarded: a relay left running after the exit would be hung up with
+        # the output unread when the pty's session leader (this script) is gone.
+        # stderr's relay ignores that hang-up for the same reason.
         ssh.write_text(
             "#!/usr/bin/env bash\n"
-            "exec > >(head -c 1048576) 2> >(head -c 1048576 >&2)\n"
-            f'exec bash {self.bin}/ssh-body "$@"\n'
+            "set -o pipefail\n"
+            "exec 2> >(trap '' HUP; head -c 1048576 >&2)\n"
+            f'bash {self.bin}/ssh-body "$@" | head -c 1048576\n'
         )
         ssh.chmod(0o755)
         for name in ("pct", "pveam", "pvesm", "pvesh"):
@@ -1063,6 +1068,21 @@ def test_successful_terminal_run(host):
     assert any("-tt" in c and "pct exec 172" in c for c in host.calls())
     tty = next(c for c in host.calls() if "-tt" in c)
     assert "-o ServerAliveInterval=15 -o ServerAliveCountMax=4" in tty
+
+
+def test_terminal_transcript_keeps_output_of_an_ssh_that_exits_at_once(host):
+    # The fake ssh prints and exits; a real terminal hangs up whatever is still
+    # running in the session when its leader exits. So the fake must not leave
+    # its output cap running after it exits: a `head` that is slow to start
+    # (a busy CI machine) would be hung up with the output unread and the
+    # transcript would be empty. This `head` is slow whenever it writes to a
+    # terminal, which makes that ordering happen every time.
+    slow = host.bin / "head"
+    slow.write_text('#!/bin/sh\n[ ! -t 1 ] || sleep 0.5\nexec /usr/bin/head "$@"\n')
+    slow.chmod(0o755)
+    r = host.run("u2604-cpu-terminal", "--vmid", "172", "--out", str(host.out))
+    assert r.returncode == 0, r.stderr
+    assert "installing hal0" in (host.out / "transcript.txt").read_text()
 
 
 def test_the_terminal_ssh_has_no_escape_character(host):
