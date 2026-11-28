@@ -358,6 +358,34 @@ ct_owned() {
   return "$found"
 }
 
+# ct_mark_state <vmid> <nonce>: prints mine, other or unknown. mine: the guest's
+# description is `hal0-matrix run <nonce>`; other: the config was read and the
+# description is not that; unknown: it could not be read. Read only. The reply
+# is untrusted text and is only compared, never evaluated.
+ct_mark_state() {
+  local vmid="${1:-}" nonce="${2:-}" conf line desc="" host="" _PVE_DEADLINE
+  _PVE_DEADLINE="$(_pve_t READ 60)"
+  if ! _pve_in_range "$vmid" || [[ ! "$nonce" =~ ^[0-9a-f]{16}$ ]]; then
+    printf 'unknown\n'
+    return 0
+  fi
+  conf="$(pve_run "pct config ${vmid}")" || { printf 'unknown\n'; return 0; }
+  while IFS= read -r line; do
+    case "$line" in
+      hostname:*) host="${line#hostname:}" ;;
+      description:*) desc="${line#description:}" ;;
+    esac
+  done <<<"$conf"
+  if [[ -z "${host// /}" ]]; then
+    printf 'unknown\n'
+    return 0
+  fi
+  desc="${desc//%20/ }"
+  desc="${desc# }"
+  desc="${desc% }"
+  if [[ "$desc" == "hal0-matrix run ${nonce}" ]]; then printf 'mine\n'; else printf 'other\n'; fi
+}
+
 # ct_guard <vmid> [nonce]: remote shell text that ends in `&& ` and succeeds
 # only for a guest this harness created: hostname hal0-mx-<vmid>, tag
 # hal0-matrix, and with a nonce the description `hal0-matrix run <nonce>`.

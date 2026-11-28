@@ -196,6 +196,7 @@ ART=""             # artifact directory (the real --out, or scratch on a dry run
 SCRATCH=""         # dry-run artifact directory, removed on exit
 TREE_TAR=""        # packed local tree, removed on exit
 CT_MAYBE=0         # set once ct_create got as far as running pct create
+CT_CREATED=0       # ct_create returned 0: this run certainly made the guest
 GUEST_UP=0         # ct_start succeeded
 WATCH_PID=""       # the memory watchdog, while a container exists
 WATCH_FILE=""      # where the watchdog leaves its verdict
@@ -458,13 +459,13 @@ on_watchdog() {
 
 # ── cleanup: runs once, on EXIT and (via on_signal) on INT, TERM and HUP ─────
 cleanup() {
-  local rc=$? state="absent"
+  local rc=$? state="absent" foreign=0
   trap '' INT TERM HUP USR1
   trap - EXIT
   set +e +u
   [[ "$CLEANED" == "0" ]] || exit "$rc"
   CLEANED=1
-  [[ "$CT_MAYBE" != "1" ]] || announce_container
+  [[ "$CT_CREATED" != "1" ]] || announce_container
   # The watchdog may have ended the call in progress before its USR1 was acted on.
   [[ -n "$ABORT_REASON" ]] || load_verdict || true
   stop_watchdog
@@ -483,14 +484,22 @@ cleanup() {
       # An interrupted create may still be running on the host: let it finish
       # (bounded) before looking, and note a lock it left behind.
       ct_wait_create_done "$VMID" || log "a pct create for ${VMID} may still be running; checking anyway"
-      if ct_lock_held "$VMID"; then
+      state="$(_ct_presence "$VMID")"
+      # A guest this run did not create (it lost a race for the VMID) is not
+      # named, announced or given a destroy command: it belongs to someone else.
+      if [[ "$state" != "absent" && "$CT_CREATED" != "1" ]]; then
+        [[ "$(ct_mark_state "$VMID" "$NONCE")" != "other" ]] || foreign=1
+      fi
+      if [[ "$foreign" != "1" ]] && ct_lock_held "$VMID"; then
         GUEST_LOCKED=1
         announce_container
       fi
-      state="$(_ct_presence "$VMID")"
     fi
     if [[ "$state" == "absent" ]]; then
       log "no container ${VMID} exists; nothing to clean up"
+    elif [[ "$foreign" == "1" ]]; then
+      log "this run created no container: what exists at the VMID it tried was made by someone else and was left alone"
+      [[ -z "$ART" ]] || printf 'created_nothing=1\n' >>"${ART}/run.txt"
     else
       if [[ -n "$ABORT_REASON" ]]; then
         # The host is short of memory or gone: the container goes first and
@@ -617,6 +626,7 @@ trap 'on_signal 1' HUP
 # Only a run that got as far as `pct create` may clean anything up; a refusal
 # (status 90) created nothing, and what is at that VMID is not ours.
 [[ "$create_rc" == "$_CT_REFUSED" ]] || CT_MAYBE=1
+[[ "$create_rc" != "0" ]] || CT_CREATED=1
 [[ -z "$HELD_SIG" ]] || on_signal "$HELD_SIG"
 [[ "$create_rc" == "0" ]] || { log "could not create container ${VMID}"; exit 1; }
 announce_container

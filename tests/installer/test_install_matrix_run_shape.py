@@ -482,6 +482,26 @@ def test_a_refused_create_never_destroys_the_guest_it_found(host):
     assert (host.state / "present").exists()
 
 
+def test_a_lost_race_for_the_vmid_names_no_container_and_no_destroy_command(host):
+    """N5: another run's guest appears at the VMID after this run's checks, and
+    this run's own pct create fails. It created nothing: no LEFT BEHIND, no
+    destroy command, no VMID named, and the other guest is not touched."""
+    r = host.run(
+        "u2404-cpu", "--vmid", "172", "--out", str(host.out),
+        FAKE_PRESENT_AFTER="2", FAKE_CREATE_FAILS="1",
+    )  # fmt: skip
+    assert r.returncode == 1, r.stderr
+    assert "LEFT BEHIND" not in r.stderr
+    assert "destroy it with" not in r.stderr
+    assert "pct destroy" not in r.stderr
+    assert "created no container" in r.stderr
+    assert "left_behind" not in (host.out / "run.txt").read_text()
+    assert not any("pct destroy" in c for c in host.calls())
+    assert (host.state / "present").exists()
+    said = [x for x in r.stderr.splitlines() if "created no container" in x]
+    assert said and "172" not in said[0]
+
+
 def test_the_guest_this_run_created_carries_its_nonce(host):
     r = host.run("u2404-cpu", "--vmid", "172", "--out", str(host.out))
     assert r.returncode == 0, r.stderr
