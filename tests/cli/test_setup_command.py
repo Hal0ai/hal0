@@ -10,22 +10,6 @@ from hal0.config.schema import GPUInfo, HardwareInfo, NPUInfo
 from hal0.install.extensions import ExtensionOutcome
 
 
-def test_headless_interactive_prints_stage2_command(monkeypatch):
-    """Two-stage handoff (issue #1112): a piped / non-TTY `hal0 setup` (no
-    --auto) must NOT launch rich prompts — it prints the command to run and
-    exits 0 without probing hardware or applying anything."""
-    monkeypatch.delenv("HAL0_FORCE_INTERACTIVE", raising=False)
-
-    def boom(*a, **k):  # would blow up if the probe were reached
-        raise AssertionError("hardware probe should not run on the headless guard path")
-
-    monkeypatch.setattr("hal0.cli.setup_command.HardwareProbe", boom)
-    result = CliRunner().invoke(app, [])
-    assert result.exit_code == 0
-    assert "hal0 setup" in result.output
-    assert "--auto" in result.output
-
-
 def _hw(ram_gb=96):
     return HardwareInfo(
         platform="strix-halo",
@@ -371,124 +355,42 @@ def test_plan_without_image_models_prints_no_image_table(capsys):
     assert "Image models" not in capsys.readouterr().out
 
 
-# ── the guided flow's image-model prompt ─────────────────────────────────────
+# ── `hal0 setup` with no flags asks nothing ──────────────────────────────────
+
+_POINTER = (
+    "hal0 setup asks nothing itself. To change what was chosen at install, "
+    "run the installer again with --reconfigure."
+)
 
 
 @pytest.fixture
-def guided(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> dict:
-    """`run_interactive` with every side effect stubbed; returns what it asked and did.
-
-    `seen["answers"]` is the list of answers handed to the image-model prompt in order;
-    once it is empty the prompt gets its own default, as an operator pressing Enter does.
-    """
-    seen: dict = {"asked": [], "defaults": {}, "events": [], "installed": [], "answers": []}
-
-    def fake_prompt(question, default, *, console):
-        seen["asked"].append(question)
-        seen["defaults"][question] = default
-        if question.startswith("Image models") and seen["answers"]:
-            return seen["answers"].pop(0)
-        return default
-
-    def fake_confirm(question, default, *, console):
-        return False if "verification" in question else default
-
-    async def fake_run_auto(sel, hw, *, no_pull=False):
-        seen["events"].append("apply")
-        seen["selection"] = sel
-
-    def fake_install_image_models(model_ids):
-        seen["events"].append("install")
-        seen["installed"].append(tuple(model_ids))
-
-    monkeypatch.setenv("HAL0_COMFYUI_DATA_ROOT", str(tmp_path / "comfyui"))
-    monkeypatch.setattr("hal0.capabilities.catalog.comfyui_backends", lambda: ["gpu-vulkan"])
-    monkeypatch.setattr(setup_command, "_prompt", fake_prompt)
-    monkeypatch.setattr(setup_command, "_confirm", fake_confirm)
-    monkeypatch.setattr(setup_command, "_run_auto", fake_run_auto)
-    monkeypatch.setattr(setup_command, "_existing_slot_names", lambda: frozenset())
-    monkeypatch.setattr(setup_command, "_install_image_models", fake_install_image_models)
-    return seen
+def runner() -> CliRunner:
+    return CliRunner()
 
 
-def _guided(tmp_path: Path, pool_gb: int = 96) -> None:
-    setup_command.run_interactive(_hw(pool_gb), storage_dir=str(tmp_path))
+def test_no_flags_prints_the_pointer_and_exits_zero(runner):
+    r = runner.invoke(app, [])
+    assert r.exit_code == 0
+    assert r.stdout.strip() == _POINTER
 
 
-def test_run_interactive_prompts_for_image_models(guided, tmp_path, capsys):
-    guided["answers"] = ["recommended"]
+def test_no_flags_reads_nothing_from_the_terminal(runner, monkeypatch):
+    def asked(*args):
+        raise AssertionError("asked")
 
-    _guided(tmp_path)
-
-    image_prompts = [q for q in guided["asked"] if q.startswith("Image models")]
-    assert len(image_prompts) == 1
-    out = capsys.readouterr().out
-    assert "qwen-image-lightning" in out  # the 96 GB pick, listed in the table
-    assert "recommended" in out
-    assert guided["installed"] == [("qwen-image-lightning",)]
-    assert guided["selection"].image_models == ("qwen-image-lightning",)
-    assert guided["events"] == ["apply", "install"]  # downloads follow the slot apply
+    monkeypatch.setattr("builtins.input", asked)
+    assert runner.invoke(app, []).exit_code == 0
 
 
-def test_run_interactive_asks_after_the_scaffold_question(monkeypatch, guided, tmp_path):
-    order: list[str] = []
-    real_confirm = setup_command._confirm
-
-    def tracking_confirm(question, default, *, console):
-        order.append(question)
-        return real_confirm(question, default, console=console)
-
-    def tracking_prompt(question, default, *, console):
-        order.append(question)
-        return default
-
-    monkeypatch.setattr(setup_command, "_confirm", tracking_confirm)
-    monkeypatch.setattr(setup_command, "_prompt", tracking_prompt)
-
-    _guided(tmp_path)
-
-    kinds = [
-        "scaffold" if "Scaffold" in q else "images" if q.startswith("Image models") else "other"
-        for q in order
-    ]
-    assert kinds.index("images") == kinds.index("scaffold") + 1
-    assert "verification" in order[-1]  # the report question stays last
+def test_force_interactive_variable_no_longer_does_anything(runner, monkeypatch):
+    monkeypatch.setenv("HAL0_FORCE_INTERACTIVE", "1")
+    r = runner.invoke(app, [])
+    assert r.exit_code == 0
+    assert "asks nothing itself" in r.stdout
 
 
-def test_run_interactive_image_prompt_defaults_to_skip(guided, tmp_path):
-    _guided(tmp_path)  # Enter at every prompt
-
-    question = next(q for q in guided["asked"] if q.startswith("Image models"))
-    assert guided["defaults"][question] == "none"
-    assert guided["installed"] == []
-    assert guided["selection"].image_models == ()
-
-
-def test_run_interactive_reprompts_on_an_invalid_image_answer(guided, tmp_path, capsys):
-    guided["answers"] = ["bogus", "1"]
-
-    _guided(tmp_path)
-
-    assert len([q for q in guided["asked"] if q.startswith("Image models")]) == 2
-    assert "bogus" in capsys.readouterr().out  # said why, before asking again
-    assert guided["installed"] == [("sdxl-lightning",)]  # offer 1, catalog order
-
-
-def test_run_interactive_accepts_several_models(guided, tmp_path):
-    guided["answers"] = ["1,3"]
-
-    _guided(tmp_path)
-
-    assert guided["installed"] == [("sdxl-lightning", "sd-1.5-pruned-emaonly")]
-
-
-def test_run_interactive_offers_no_image_models_without_a_rocm_lane(
-    guided, tmp_path, monkeypatch, capsys
-):
-    monkeypatch.setattr("hal0.capabilities.catalog.comfyui_backends", lambda: [])
-
-    _guided(tmp_path)
-
-    assert not any(q.startswith("Image models") for q in guided["asked"])
-    assert "no ROCm lane on this host" in capsys.readouterr().out
-    assert guided["installed"] == []
+def test_the_module_has_no_prompt_code():
+    text = Path(setup_command.__file__).read_text()
+    assert "rich.prompt" not in text
+    assert "run_interactive" not in text
+    assert "input(" not in text

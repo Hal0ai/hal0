@@ -7,12 +7,9 @@ for the installer, the install test harness, and support/debug runs, but it is
 deliberately absent from `hal0 --help` and from the docs. Don't re-advertise it,
 and don't reimplement its seeding logic elsewhere.
 
-`run_interactive` below is the guided flow of up to six prompts (five when no NPU is
-detected, because the NPU question is only asked then). `install.sh` no longer
-offers to launch it (every answer it collects is now either asked by the
-installer or already performed by it), so it survives only as a hand-run
-recovery path — spec §17.8, NOT the "two-column terminal app with curated
-per-model pickers" older docs described. There is no such TUI and never was.
+Run with none of `--auto`, `--answers`, `--plan` or `--emit-answers`, it asks
+nothing and prints one line pointing at the installer's `--reconfigure`: every
+question is asked up front by the installer's setup wizard.
 
 Hybrid execution: in-process ``apply_setup`` when hal0-api is unreachable
 (install time), through ``POST /api/install/apply`` when it is up (so the
@@ -22,16 +19,9 @@ spec §11)."""
 from __future__ import annotations
 
 import asyncio
-import os
-import sys
-from pathlib import Path
 
 import httpx
 import typer
-from rich.console import Console
-from rich.markup import escape
-from rich.prompt import Confirm, Prompt
-from rich.table import Table
 
 from hal0.cli._shared import _api_base, _auth_headers, _client_kwargs
 from hal0.config import paths
@@ -40,7 +30,6 @@ from hal0.hardware.probe import HardwareProbe, HardwareProbeError
 from hal0.install.extensions import EXTENSIONS, get_extension
 from hal0.install.orchestrate import Selections, SlotSelection
 from hal0.install.profile_derive import npu_healthy
-from hal0.registry.model_store import describe_store_state
 
 #: capability → (slot_name, port) for the slots first-run provisions. Mirrors
 #: installer.py:_SLOT_META for the shared capabilities (chat/coder/embed/stt/
@@ -234,19 +223,14 @@ def setup(
         help="Resolve + print the plan; write nothing (no slots, sentinel, pulls, or extensions).",
     ),
 ) -> None:
-    # Two-stage handoff (issue #1112): the guided Stage-2 flow is interactive
-    # (rich prompts on a real TTY). When it is requested (no --auto / --answers /
-    # --plan / --emit-answers) but stdin is NOT a terminal — a piped/headless
-    # `curl … | hal0 setup` or CI run — DON'T launch rich prompts (they would
-    # EOF immediately). Print the exact command to run instead, mirroring what
-    # install.sh's Stage-1 tail prints on a headless install. HAL0_FORCE_INTERACTIVE
-    # bypasses the guard so tests can drive the flow over a pipe.
-    interactive = not (auto or plan or answers is not None or emit_answers is not None)
-    if interactive and not sys.stdin.isatty() and not os.environ.get("HAL0_FORCE_INTERACTIVE"):
-        typer.echo("hal0 setup is interactive — run it from a terminal:")
-        typer.echo("  hal0 setup")
-        typer.echo("or run non-interactively with recommended defaults:")
-        typer.echo("  hal0 setup --auto")
+    # The installer's wizard asks every question, so the bare form asks nothing:
+    # it prints this one line and stops, before any hardware probe, file access
+    # or privilege check, whatever the terminal is.
+    if not (auto or plan or answers is not None or emit_answers is not None):
+        typer.echo(
+            "hal0 setup asks nothing itself. To change what was chosen at install, "
+            "run the installer again with --reconfigure."
+        )
         return
 
     probe = HardwareProbe()
@@ -316,7 +300,6 @@ def setup(
         )
         asyncio.run(_run_auto(sel, hw, no_pull=no_pull))
         return
-    run_interactive(hw, storage_dir=storage_dir)
 
 
 def _install_image_models(model_ids: tuple[str, ...]) -> None:
@@ -349,177 +332,6 @@ async def _run_auto(sel: Selections, hw: HardwareInfo, *, no_pull: bool = False)
     from hal0.cli.setup_install import run_install
 
     await run_install(sel, hw, no_pull=no_pull)
-
-
-# ── Minimal interactive wizard (§17.8) ──────────────────────────────────────
-#
-# Up to six `rich.prompt` questions (five without an NPU) feed the same `build_auto_selections` scaffold that
-# `--auto` uses (pick-free but for the optional starter image models); there is no
-# bespoke TUI, no raw-tty key-reading, and no LLM picker. On a non-tty stdin (spec
-# risk R8 — e.g. a test that sets HAL0_FORCE_INTERACTIVE to drive the flow over a
-# pipe) prompts fall back to plain `input()` with the shown default instead of
-# rich's terminal-aware rendering.
-
-
-def _prompt(question: str, default: str, *, console: Console) -> str:
-    """Text prompt: `rich.prompt.Prompt` on a real terminal, `input()` (or the
-    default on EOF) otherwise."""
-    if console.is_terminal:
-        return Prompt.ask(question, default=default, console=console)
-    try:
-        answer = input(f"{question} [{default}]: ").strip()
-    except EOFError:
-        answer = ""
-    return answer or default
-
-
-def _confirm(question: str, default: bool, *, console: Console) -> bool:
-    """Yes/no prompt: `rich.prompt.Confirm` on a real terminal, `input()` (or
-    the default on EOF) otherwise."""
-    if console.is_terminal:
-        return Confirm.ask(question, default=default, console=console)
-    hint = "Y/n" if default else "y/N"
-    try:
-        answer = input(f"{question} [{hint}]: ").strip().lower()
-    except EOFError:
-        answer = ""
-    if not answer:
-        return default
-    return answer in ("y", "yes")
-
-
-def _validate_store(path: str) -> tuple[bool, str]:
-    """Return ``(ok, reason)``. A store is usable when it is an absolute path
-    that — if it already exists — is a writable directory. A not-yet-created
-    path is accepted (the installer / apply step own creation) as long as its
-    nearest existing ancestor is reachable (non-zero free space)."""
-    path = (path or "").strip()
-    if not path:
-        return False, "a model store path is required (nothing downloads without one)"
-    if not Path(path).is_absolute():
-        return False, f"store path {path!r} must be absolute"
-    probe = describe_store_state(path)
-    if probe.exists and not probe.is_dir:
-        return False, f"{path} exists but is not a directory"
-    if probe.exists and not probe.writable:
-        return False, f"{path} is not writable by this user"
-    if not probe.exists and probe.free_bytes == 0:
-        return False, f"cannot reach {path} — no writable parent directory exists yet"
-    return True, ""
-
-
-def _ask_image_models(hw: HardwareInfo, *, console: Console) -> tuple[str, ...]:
-    """Offer the starter image models and return the ids chosen (none by default).
-
-    The offer is the API-renderable catalog with the model that suits this box's memory
-    marked recommended; an answer that cannot be resolved is explained and asked again.
-    Nothing is asked on a host that cannot run ComfyUI.
-    """
-    from hal0.install.image_models import image_offers, no_offer_reason, resolve_selection
-
-    offers = image_offers(hw)
-    if not offers:
-        console.print(f"[dim]Starter image models are not offered: {no_offer_reason(hw)}[/dim]")
-        return ()
-
-    table = Table(title="Starter image models (optional)")
-    table.add_column("#", justify="right")
-    table.add_column("Id", no_wrap=True)
-    table.add_column("Model")
-    table.add_column("Download", justify="right")
-    table.add_column("Per image", justify="right")
-    table.add_column("")
-    for number, offer in enumerate(offers, start=1):
-        table.add_row(
-            str(number),
-            offer.id,
-            escape(offer.label),
-            "on disk" if offer.missing_gb == 0 else f"{offer.missing_gb:.1f} GB",
-            f"~{offer.est_seconds}s",
-            "[green]recommended[/green]" if offer.recommended else "",
-        )
-    console.print(table)
-
-    while True:
-        answer = _prompt(
-            "Image models to download (numbers, ids, 'recommended' or 'none')",
-            "none",
-            console=console,
-        )
-        try:
-            return tuple(resolve_selection(answer, offers))
-        except ValueError as exc:
-            console.print(f"[red]✗ {escape(str(exc))}[/red]")
-
-
-def run_interactive(hw: HardwareInfo, *, storage_dir: str) -> None:
-    """The guided setup flow (§17.8): up to six prompts — storage dir, NPU opt-in
-    (only when an NPU is detected), extensions default set, scaffold slots y/n,
-    starter image models, launch-on-completion y/n — then apply runs exactly as `--auto` does
-    (`build_auto_selections` + `_run_auto`) and any image models chosen download.
-    No LLM picking, no network/HF-token step, no raw-tty widgets."""
-    console = Console()
-    console.print("[bold yellow]hal0 setup[/bold yellow] — guided install\n")
-
-    # 1. Model storage directory — mandatory, validated (gates every download).
-    current = storage_dir
-    while True:
-        chosen = _prompt("Model storage directory", current, console=console)
-        ok, reason = _validate_store(chosen)
-        if ok:
-            storage_dir = chosen
-            break
-        console.print(f"[red]✗ {reason}[/red]")
-        current = chosen
-
-    # 2. NPU opt-in — only asked when an NPU was actually detected; default
-    # mirrors `--auto`'s present-and-healthy check.
-    npu_opt_in = False
-    if hw.npu.present:
-        npu_opt_in = _confirm(
-            "Enable NPU inference (STT offload)?", npu_healthy(hw), console=console
-        )
-
-    # 3. Extensions default set.
-    with_extensions = _confirm(
-        "Install the default extension set (Apps + Agents)?", True, console=console
-    )
-
-    # 4. Scaffold capability slots now (pick-free — models chosen later).
-    with_slots = _confirm(
-        "Scaffold capability slots now (choose models later)?", True, console=console
-    )
-
-    # 5. Starter image models — offered, never assumed: the catalog models the API
-    # can render, the one that suits this box's memory marked recommended. Enter skips.
-    image_models = _ask_image_models(hw, console=console)
-
-    # 6. Launch on completion — run the post-apply verification report (health
-    # checks + the URLs to open) once the apply finishes.
-    launch_on_completion = _confirm(
-        "Show the verification report when setup completes?", True, console=console
-    )
-
-    sel = build_auto_selections(
-        hw,
-        storage_dir=storage_dir,
-        with_extensions=with_extensions,
-        with_slots=with_slots,
-        existing_slots=_existing_slot_names(),
-        npu_opt_in=npu_opt_in,
-        image_models=image_models,
-    )
-    asyncio.run(_run_auto(sel, hw, no_pull=False))
-    if sel.image_models:
-        _install_image_models(sel.image_models)
-
-    if launch_on_completion:
-        try:
-            from hal0.cli.doctor_verify import run_verify
-
-            run_verify(console=console)
-        except Exception as exc:  # pragma: no cover — defensive, never fail setup
-            console.print(f"[dim]setup verify skipped ({exc})[/dim]")
 
 
 def _build_offline_deps():
