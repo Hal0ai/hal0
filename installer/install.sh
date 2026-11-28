@@ -717,7 +717,11 @@ if [[ "${DEV_MODE}" -eq 0 ]]; then
     HAL0_GPU_GATE=1 preflight_gpu || gpu_rc=$?
     if (( gpu_rc == HAL0_GPU_RC_BROKEN_GID )); then
         err "GPU passthrough is broken: the render device is visible but its gid does not map to the render group in this container (no group, or the wrong one)."
-        err "Every GPU slot would silently fall back to CPU. Apply the dev0/gid fix shown above on the Proxmox host, then re-run install.sh."
+        if [[ "$(hal0_lxc_kind)" == "container" ]]; then
+            err "Every GPU slot would silently fall back to CPU. Apply the device group fix shown above where this container is started, then re-run install.sh."
+        else
+            err "Every GPU slot would silently fall back to CPU. Apply the dev0/gid fix shown above on the Proxmox host, then re-run install.sh."
+        fi
         exit 1
     elif (( gpu_rc == HAL0_GPU_RC_NO_KFD )); then
         # AMD GPU with NO usable GPU lane at all. preflight_gpu only returns
@@ -791,6 +795,11 @@ if [[ "${DEV_MODE}" -eq 0 ]]; then
                     warn "  host's dev entry — check that /dev is writable, that gid ${_render_gid:-?} exists, and that no"
                     warn "  LSM denial is logged. See hal0 issue #1953."
                     ;;
+                container)
+                    warn "  Container: the node's ownership comes from the machine that runs this container. If chgrp is"
+                    warn "  refused, pass ${_kfd_path} into this container with group id ${_render_gid:-<render gid inside the container>}"
+                    warn "  (the id INSIDE the container), then restart the container. See hal0 issue #1953."
+                    ;;
                 *)
                     warn "  Set the owning group of ${_kfd_path} to ${_render_gid:-<render node gid>} (matching the render"
                     warn "  node) so hal0-user probes can open it. See hal0 issue #1953."
@@ -805,7 +814,11 @@ if [[ "${DEV_MODE}" -eq 0 ]]; then
             _cpu_only_image_gate || exit 1
             warn "Proceeding with a CPU-only install (confirmed at the prompt)."
         else
-            err "No GPU devices inside this container. Forward them from the Proxmox host (remedy above), then re-run install.sh."
+            if [[ "$(hal0_lxc_kind)" == "container" ]]; then
+                err "No GPU devices inside this container. Pass them in from the machine that runs this container (remedy above), then re-run install.sh."
+            else
+                err "No GPU devices inside this container. Forward them from the Proxmox host (remedy above), then re-run install.sh."
+            fi
             _cpu_only_remedy_lines
             exit 1
         fi

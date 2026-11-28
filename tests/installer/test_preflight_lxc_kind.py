@@ -1,8 +1,9 @@
 """Contract tests for ``hal0_lxc_kind`` in ``installer/lib/preflight.sh``.
 
-The classifier answers "where is this install running" with one of three
-values — ``none``, ``lxc-privileged``, ``lxc-unprivileged`` — because the
-answer decides which remedies are even possible from inside the guest:
+The classifier answers "where is this install running" with one of five
+values — ``none``, ``box``, ``lxc-privileged``, ``lxc-unprivileged`` and
+``container`` (any non-LXC container, see test_preflight_container_kind.py) —
+because the answer decides which remedies are even possible from inside the guest:
 
 * a PRIVILEGED LXC can ``chgrp`` a forwarded device node and repair a
   mis-mapped ``/dev/kfd`` itself (#1953),
@@ -16,7 +17,7 @@ of privileged containers to change something that was never the cause.
 The classifier reads ``/proc/1/environ`` and ``/proc/self/uid_map``, neither
 of which a test can fake, so the shape under test is driven through the
 ``HAL0_LXC_KIND_OVERRIDE`` seam plus a direct check that the real probe
-returns one of the three admitted values on the machine running the suite.
+returns one of the admitted values on the machine running the suite.
 """
 
 from __future__ import annotations
@@ -30,7 +31,7 @@ import pytest
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _PREFLIGHT = _REPO_ROOT / "installer" / "lib" / "preflight.sh"
 
-_ADMITTED = {"none", "box", "lxc-privileged", "lxc-unprivileged"}
+_ADMITTED = {"none", "box", "lxc-privileged", "lxc-unprivileged", "container"}
 
 
 def _run(snippet: str, env_extra: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
@@ -66,6 +67,7 @@ def test_in_lxc_predicate_agrees_with_the_classifier() -> None:
         ("box", 1),
         ("lxc-privileged", 0),
         ("lxc-unprivileged", 0),
+        ("container", 1),
     ):
         result = _run("hal0_in_lxc", {"HAL0_LXC_KIND_OVERRIDE": kind})
         assert result.returncode == expected_rc, f"{kind}: {result.stderr}"

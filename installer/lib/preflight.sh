@@ -11,7 +11,8 @@
 # Provides (all functions return 0 on success, non-zero on failure; none
 # of them exit the calling shell):
 #   hal0_lxc_kind              — platform classification: none | box |
-#                                lxc-privileged | lxc-unprivileged. Decides
+#                                lxc-privileged | lxc-unprivileged | container.
+#                                Decides
 #                                which remedies are possible from inside (a
 #                                privileged LXC can repair a forwarded device
 #                                node itself; an unprivileged one cannot).
@@ -143,8 +144,8 @@ fi
 
 # hal0_lxc_kind — where is this install running?
 #
-#   none              — bare metal, a VM, or any container that is not LXC
-#                       or a podman box
+#   none              — bare metal, a VM, or a host with no container
+#                       marker at all
 #   box               — a rootless podman box (the hal0 box): detected from
 #                       /etc/hal0-box-release, which only the box image
 #                       carries, together with /run/.containerenv or
@@ -159,6 +160,18 @@ fi
 #                       that created the box, never at Proxmox `devN:` entries.
 #   lxc-privileged    — an LXC whose root IS host root (no uid remap)
 #   lxc-unprivileged  — an LXC behind a uid/gid remap
+#   container         — any other container that systemd recognises (Docker
+#                       with systemd, systemd-nspawn, an OCI runtime, or a
+#                       marker file that is empty or unreadable). It is not a
+#                       Proxmox container, so remedies must not name `pct`,
+#                       `devN:` lines or a Proxmox host: they say the device
+#                       has to be passed in from the machine that runs the
+#                       container. Gates treat it like an LXC container.
+#
+# LXC is told apart by the CONTENT of /run/systemd/container ("lxc" is what
+# Proxmox, LXD and Incus write), falling back to PID 1's environment when the
+# file is absent or empty. The file merely existing proves a container, not
+# which one.
 #
 # The distinction is not cosmetic: it decides which remedies are even
 # possible from inside. A privileged container can chgrp a forwarded device
@@ -173,6 +186,8 @@ fi
 # host offset ("0 100000 65536").
 #
 # HAL0_LXC_KIND_OVERRIDE is a test seam (unit tests cannot fake /proc).
+# HAL0_PID1_ENVIRON_FILE (default /proc/1/environ) and HAL0_UID_MAP_FILE
+# (default /proc/self/uid_map) are test seams for the two /proc reads.
 # HAL0_CONTAINER_RUN_DIR (default /run) and HAL0_BOX_RELEASE_FILE (default
 # /etc/hal0-box-release) are seams for the box markers.
 hal0_lxc_kind() {
@@ -182,19 +197,36 @@ hal0_lxc_kind() {
     fi
     local run_dir="${HAL0_CONTAINER_RUN_DIR:-/run}"
     local release="${HAL0_BOX_RELEASE_FILE:-/etc/hal0-box-release}"
+    local pid1_environ="${HAL0_PID1_ENVIRON_FILE:-/proc/1/environ}"
+    local uid_map="${HAL0_UID_MAP_FILE:-/proc/self/uid_map}"
     if [[ -f "${release}" ]] \
         && { [[ -e "${run_dir}/.containerenv" ]] \
             || grep -qx 'podman' "${run_dir}/systemd/container" 2>/dev/null; }; then
         printf 'box\n'
         return 0
     fi
-    if [[ ! -f "${run_dir}/systemd/container" ]] \
-        && ! grep -qa 'container=lxc' /proc/1/environ 2>/dev/null; then
+    local marker_present=0 pid1_lxc=0
+    [[ -f "${run_dir}/systemd/container" ]] && marker_present=1
+    grep -qa 'container=lxc' "${pid1_environ}" 2>/dev/null && pid1_lxc=1
+    if (( marker_present == 0 && pid1_lxc == 0 )); then
         printf 'none\n'
         return 0
     fi
+    # What does systemd say this container is? An empty or unreadable file
+    # says nothing, so PID 1's environment decides then.
+    local marker=""
+    if (( marker_present == 1 )); then
+        IFS= read -r marker < "${run_dir}/systemd/container" 2>/dev/null || true
+        marker="${marker//[[:space:]]/}"
+    fi
+    if [[ -n "${marker}" ]]; then
+        [[ "${marker}" == "lxc" ]] || { printf 'container\n'; return 0; }
+    elif (( pid1_lxc == 0 )); then
+        printf 'container\n'
+        return 0
+    fi
     local inside outside length
-    if read -r inside outside length < /proc/self/uid_map 2>/dev/null \
+    if read -r inside outside length < "${uid_map}" 2>/dev/null \
         && [[ "${inside}" == "0" && "${outside}" == "0" && "${length}" == "4294967295" ]]; then
         printf 'lxc-privileged\n'
         return 0
@@ -918,6 +950,12 @@ _container_runtime_gate() {
         warn "  than the uid map. Enable them on the container HOST: Proxmox: set 'features: nesting=1,keyctl=1,fuse=1,mknod=1'"
         warn "  in /etc/pve/lxc/<CTID>.conf, then: pct stop <CTID> && pct start <CTID>; Incus/LXD: set"
         warn "  'security.nesting=true' on the instance, then restart it"
+    elif [[ "$(hal0_lxc_kind)" == "container" ]]; then
+        warn "  ${rt} run: ${_HAL0_CONTAINER_SMOKE_OUTPUT}"
+        warn "  ${rt} info works but '${rt} run' fails inside this container. Running containers inside a container"
+        warn "  usually needs nesting and extra privileges allowed for this container by the machine that runs it,"
+        warn "  so check how this container was started, then restart it. Causes seen, with the check for each:"
+        _warn_runtime_run_failure_checks "${rt}"
     else
         warn "  inspect the error above (cgroup/mount-namespace setup, subuid/newuidmap, or a daemon issue)"
     fi
@@ -1242,6 +1280,7 @@ preflight_gpu() {
     case "${lxc_kind}" in
         lxc-privileged | lxc-unprivileged) in_container="lxc" ;;
         box) in_container="box" ;;
+        container) in_container="container" ;;
     esac
     # Test seam: force the container classification (unit tests can't fake
     # /proc/1/environ). Never set in production.
@@ -1288,6 +1327,13 @@ preflight_gpu() {
             warn "  device group, then re-create the box."
             # Same opt-in CPU-only case as an LXC with nothing forwarded.
             [[ "${gate}" == "1" ]] && return "${HAL0_GPU_RC_NO_DEVICE}"
+        elif [[ "${in_container}" == "container" ]]; then
+            warn "gpu: no /dev/dri/renderD* inside this container — GPU slots will run CPU-only"
+            warn "  The GPU devices have to be passed into this container from the machine that runs it: the render"
+            warn "  node, and /dev/kfd and /dev/accel/accel0 for ROCm and the NPU, readable by a group that exists"
+            warn "  inside this container. Then restart the container."
+            # Same opt-in CPU-only case as an LXC with nothing forwarded.
+            [[ "${gate}" == "1" ]] && return "${HAL0_GPU_RC_NO_DEVICE}"
         else
             warn "gpu: no /dev/dri/renderD* — no GPU driver bound (CPU-only install?)"
             warn "  AMD: check 'lspci -nnk' shows 'Kernel driver in use: amdgpu'. Strix Halo needs"
@@ -1327,6 +1373,10 @@ preflight_gpu() {
             elif [[ "${in_container}" == "box" ]]; then
                 warn "  Fix on the HOST (device group / udev rule for the render node), then re-create the box."
                 [[ "${gate}" == "1" ]] && return "${HAL0_GPU_RC_BROKEN_GID}"
+            elif [[ "${in_container}" == "container" ]]; then
+                warn "  Fix where this container is started: pass the render node in with a group id that exists inside"
+                warn "  this container (the id inside the container, not the machine's), then restart the container."
+                [[ "${gate}" == "1" ]] && return "${HAL0_GPU_RC_BROKEN_GID}"
             fi
         elif [[ "${grpname}" != "${want_group}" ]]; then
             # M3: the gid resolves to a REAL group, just not the render one —
@@ -1345,6 +1395,10 @@ preflight_gpu() {
                 [[ "${gate}" == "1" ]] && return "${HAL0_GPU_RC_BROKEN_GID}"
             elif [[ "${in_container}" == "box" ]]; then
                 warn "  Fix on the HOST (device group / udev rule for the render node), then re-create the box."
+                [[ "${gate}" == "1" ]] && return "${HAL0_GPU_RC_BROKEN_GID}"
+            elif [[ "${in_container}" == "container" ]]; then
+                warn "  Fix where this container is started: pass the render node in with the '${want_group}' group's id"
+                warn "  inside this container (not the machine's), then restart the container."
                 [[ "${gate}" == "1" ]] && return "${HAL0_GPU_RC_BROKEN_GID}"
             fi
         else
@@ -1405,6 +1459,9 @@ preflight_gpu() {
                 info "  (/etc/pve/lxc/<CTID>.conf):  dev1: /dev/kfd   then pct stop/start."
             elif [[ "${in_container}" == "box" ]]; then
                 info "  To ALSO enable the ROCm lane, expose /dev/kfd to the box on the host, then re-create it."
+            elif [[ "${in_container}" == "container" ]]; then
+                info "  To ALSO enable the ROCm lane, pass /dev/kfd into this container from the machine that runs it,"
+                info "  then restart the container."
             fi
         else
             warn "gpu: AMD GPU visible but /dev/kfd is MISSING — no ROCm compute node"
@@ -1422,6 +1479,9 @@ preflight_gpu() {
                 warn "  then: pct stop <CTID> && pct start <CTID>"
             elif [[ "${in_container}" == "box" ]]; then
                 warn "  Expose /dev/kfd to the box on the HOST (load amdkfd there if absent), then re-create the box."
+            elif [[ "${in_container}" == "container" ]]; then
+                warn "  Pass /dev/kfd into this container from the machine that runs it (load amdkfd there if absent),"
+                warn "  then restart the container."
             else
                 warn "  Load the amdkfd driver (it ships with amdgpu; check 'dmesg | grep -i kfd')."
             fi
@@ -1475,6 +1535,11 @@ preflight_gpu() {
             if [[ "${in_container}" == "box" ]]; then
                 warn "  A box cannot change a host device's group. Fix it on the HOST (device group / udev rule"
                 warn "  so ${kfd_path} is group-readable by the render group), then re-create the box."
+            elif [[ "${in_container}" == "container" ]]; then
+                warn "  Fix IN PLACE (no re-forward, no reboot):"
+                warn "    chgrp ${render_gid} ${kfd_path} && chmod 0660 ${kfd_path}"
+                warn "  If chgrp is refused, pass ${kfd_path} into this container from the machine that runs it with"
+                warn "  group id ${render_gid} (the id INSIDE the container), then restart the container."
             else
                 warn "  Fix IN PLACE (no re-forward, no reboot):"
                 warn "    chgrp ${render_gid} ${kfd_path} && chmod 0660 ${kfd_path}"
