@@ -4322,6 +4322,11 @@ else
                 warn "  check 'journalctl -u hindsight-api -n 40' and '${HAL0_BIN} doctor all'; hal0-api seeds the memory banks once the engine is up"
             fi
         fi
+    elif [[ "${HAL0_SKIP_HINDSIGHT:-0}" -ne 1 ]]; then
+        # Memory was wanted but the unit this installer ships is not in the
+        # tree. Say so here: the closing memory-engine check points back at
+        # "the warnings above", and without this line there are none (#4007).
+        warn "memory engine not installed — installer/systemd/hindsight-api.service is missing from this install tree; re-download the installer, or set HAL0_SKIP_HINDSIGHT=1 to leave memory out"
     fi
 
     # Escape hatch: HAL0_SKIP_OPENWEBUI=1 for operators who don't want the

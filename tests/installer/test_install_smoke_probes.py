@@ -88,7 +88,10 @@ def test_update_check_probe_exists() -> None:
 # ── Behavior: driven through fakes ─────────────────────────────────────────
 
 
-def _drive(tmp_path: Path, script_body: str) -> subprocess.CompletedProcess[str]:
+def _drive(
+    tmp_path: Path, script_body: str, smoke_src: str | None = None
+) -> subprocess.CompletedProcess[str]:
+    smoke = smoke_src if smoke_src is not None else _extract("run_post_install_smoke")
     script = tmp_path / "drive.sh"
     script.write_text(
         "#!/usr/bin/env bash\nset -uo pipefail\n"
@@ -99,7 +102,7 @@ def _drive(tmp_path: Path, script_body: str) -> subprocess.CompletedProcess[str]
         f"{_extract('smoke_structured_output')}\n"
         f"{_extract('smoke_update_check')}\n"
         f"{_extract('smoke_memory_engine_version')}\n"
-        f"{_extract('run_post_install_smoke')}\n"
+        f"{smoke}\n"
         "SMOKE_FAILED=()\n"
         f"{script_body}\n",
         encoding="utf-8",
@@ -191,23 +194,30 @@ def test_memory_engine_probe_returns_3_when_the_unit_is_missing(tmp_path: Path) 
 
 
 def _memory_run(
-    tmp_path: Path, setup: str, version: str | None = None
+    tmp_path: Path,
+    setup: str,
+    version: str | None = None,
+    tail: str | None = None,
+    smoke_src: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Run the whole smoke with the other probes passing; ``setup`` shapes the
-    memory-engine inputs, ``version`` is what a fake :9177/version answers."""
+    memory-engine inputs, ``version`` is what a fake :9177/version answers.
+    Every curl call is logged to ``curl.calls``. ``tail`` replaces the default
+    script ending, ``smoke_src`` the ``run_post_install_smoke`` text."""
     _write_exec(tmp_path / "hal0", "exit 0")
     (tmp_path / "reply.json").write_text(_chat_completion('{"ok": true}'), encoding="utf-8")
     (tmp_path / "slots.json").write_text(json.dumps(_LOADED), encoding="utf-8")
     ver = f'echo \'{{"api_version": "{version}"}}\'; exit 0' if version else "exit 7"
     _write_exec(
         tmp_path / "curl",
+        f'echo "$@" >> {shlex.quote(f"{tmp_path}/curl.calls")}\n'
         'for a in "$@"; do\n'
         f'  case "$a" in */api/slots) cat {shlex.quote(f"{tmp_path}/slots.json")}; exit 0 ;; esac\n'
         f'  case "$a" in */version) {ver} ;; esac\n'
         "done\n"
         f"cat {shlex.quote(f'{tmp_path}/reply.json')}",
     )
-    return _drive(tmp_path, f"{setup}\n{_SHOW}")
+    return _drive(tmp_path, f"{setup}\n{tail if tail is not None else _SHOW}", smoke_src)
 
 
 def test_no_memory_run_says_skipped_not_ok(tmp_path: Path) -> None:
@@ -226,7 +236,106 @@ def test_missing_unit_with_memory_wanted_warns_and_is_recorded(tmp_path: Path) -
     assert "see the warnings above for the cause" in res.stderr
     assert "memory-engine version probe ok" not in res.stdout
     assert "FAILED:memory-engine-version" in res.stdout
-    assert res.returncode == 0, "recording a failed probe must not change the exit status"
+
+
+# The installer runs the smoke under `set -euo pipefail` with an ERR trap that
+# aborts the install. The caller reads the probe's status with `|| _me_rc=$?`,
+# so a non-zero status must be recorded, never raised.
+_STRICT_SETUP = (
+    "set -euo pipefail\n"
+    "trap 'echo ERR_TRAP >&2; exit 99' ERR\n"
+    "smoke_memory_engine_version() { return %d; }\n"
+)
+_STRICT_TAIL = "run_post_install_smoke\necho REACHED_AFTER_SMOKE"
+
+
+def test_nonzero_probe_status_does_not_abort_the_install(tmp_path: Path) -> None:
+    for status in (1, 2, 3):
+        run_dir = tmp_path / f"s{status}"
+        run_dir.mkdir()
+        res = _memory_run(run_dir, _STRICT_SETUP % status, tail=_STRICT_TAIL)
+        assert "REACHED_AFTER_SMOKE" in res.stdout, f"status {status}: {res.stderr}"
+        assert "ERR_TRAP" not in res.stderr, f"status {status}"
+        assert res.returncode == 0, f"status {status}: {res.stderr}"
+
+
+def test_the_strict_harness_catches_a_call_that_raises_the_status(tmp_path: Path) -> None:
+    """Red proof for the test above: with `|| _me_rc=$?` dropped from a COPY of
+    the function, the same run must die before the marker."""
+    src = _extract("run_post_install_smoke")
+    call = "smoke_memory_engine_version || _me_rc=$?"
+    assert call in src
+    for status in (1, 2, 3):
+        run_dir = tmp_path / f"s{status}"
+        run_dir.mkdir()
+        res = _memory_run(
+            run_dir,
+            _STRICT_SETUP % status,
+            tail=_STRICT_TAIL,
+            smoke_src=src.replace(call, "smoke_memory_engine_version"),
+        )
+        assert "REACHED_AFTER_SMOKE" not in res.stdout, f"status {status}"
+        assert res.returncode != 0, f"status {status}"
+
+
+def test_no_memory_run_with_a_unit_file_skips_without_probing(tmp_path: Path) -> None:
+    """Memory turned off, no reason set, and the engine's unit file exists on
+    the box: skipped by choice, nothing recorded, and :9177 is never asked."""
+    unit = tmp_path / "hindsight-api.service"
+    unit.write_text("[Service]\n", encoding="utf-8")
+    setup = f"HAL0_SKIP_HINDSIGHT=1\nHINDSIGHT_UNIT_DST={shlex.quote(str(unit))}"
+    res = _memory_run(tmp_path, setup, version="9.9.9")
+    assert "INFO: memory-engine check skipped — memory was turned off for this run" in res.stdout
+    assert "memory-engine version probe ok" not in res.stdout
+    assert "FAILED:memory-engine-version" not in res.stdout
+    assert "memory-engine" not in res.stderr
+    calls = (tmp_path / "curl.calls").read_text(encoding="utf-8")
+    assert "/version" not in calls and "9177" not in calls
+
+
+# ── #4007: a missing shipped unit file must be named where it is detected ──
+
+
+def _unit_guard_region() -> str:
+    """The memory-engine install block, from the unit-source assignment to the
+    next section's comment."""
+    start = _TEXT.index('HINDSIGHT_UNIT_SRC="${REPO_ROOT}/installer/systemd/hindsight-api.service"')
+    end = _TEXT.index("    # Escape hatch: HAL0_SKIP_OPENWEBUI=1", start)
+    return _TEXT[start:end]
+
+
+def _run_unit_guard(tmp_path: Path, setup: str) -> subprocess.CompletedProcess[str]:
+    tree = tmp_path / "tree"
+    tree.mkdir()  # an install tree without installer/systemd/hindsight-api.service
+    script = tmp_path / "guard.sh"
+    script.write_text(
+        "#!/usr/bin/env bash\nset -euo pipefail\n"
+        'info() { echo "INFO: $*"; }\nwarn() { echo "WARN: $*" >&2; }\n'
+        f"REPO_ROOT={shlex.quote(str(tree))}\n{setup}\n"
+        f"{_unit_guard_region()}\necho REGION_DONE\n",
+        encoding="utf-8",
+    )
+    return subprocess.run(
+        ["bash", str(script)],
+        env={"PATH": "/usr/bin:/bin", "HOME": str(tmp_path)},
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+
+
+def test_missing_shipped_unit_file_is_named_in_a_warning(tmp_path: Path) -> None:
+    res = _run_unit_guard(tmp_path, "unset HAL0_SKIP_HINDSIGHT")
+    assert "REGION_DONE" in res.stdout, res.stderr
+    assert "installer/systemd/hindsight-api.service is missing" in res.stderr
+    assert "setting up Hindsight" not in res.stdout
+
+
+def test_missing_shipped_unit_file_is_silent_when_memory_is_off(tmp_path: Path) -> None:
+    res = _run_unit_guard(tmp_path, "HAL0_SKIP_HINDSIGHT=1")
+    assert "REGION_DONE" in res.stdout, res.stderr
+    assert res.stderr == ""
 
 
 def test_no_usable_python_with_no_unit_is_a_failed_check(tmp_path: Path) -> None:
