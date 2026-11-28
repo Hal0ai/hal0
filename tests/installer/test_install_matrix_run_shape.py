@@ -253,6 +253,9 @@ def test_watchdog_stops_the_install_when_host_memory_falls(host):
     assert "host memory fell below 12 GB (5 GB available)" in r.stderr
     note = (host.out / "run.txt").read_text().splitlines()
     assert "aborted=host_memory_low" in note
+    result = json.loads((host.out / "result.json").read_text())
+    assert result["aborted"] == "host_memory_low"
+    assert result["abort_detail"] == "host memory fell below 12 GB (5 GB available)"
     assert not (host.state / "present").exists(), "the normal cleanup destroyed it"
     assert "LEFT BEHIND" not in r.stderr
     assert (host.out / "result.json").exists(), "what was measured is still saved"
@@ -265,6 +268,7 @@ def test_watchdog_aborts_after_three_unreadable_readings_in_a_row(host):
     )  # fmt: skip
     assert r.returncode == 1, r.stderr
     assert "aborted=host_unreachable" in (host.out / "run.txt").read_text().splitlines()
+    assert json.loads((host.out / "result.json").read_text())["aborted"] == "host_unreachable"
     assert not (host.state / "present").exists()
     assert int((host.state / "free-reads").read_text()) == 4  # the guard + three
 
@@ -276,6 +280,7 @@ def test_one_unreadable_reading_is_not_a_reason_to_abort(host):
     )  # fmt: skip
     assert r.returncode == 0, r.stderr
     assert "aborted=" not in (host.out / "run.txt").read_text()
+    assert json.loads((host.out / "result.json").read_text())["aborted"] is None
 
 
 def test_refuses_a_vmid_that_already_exists(host):

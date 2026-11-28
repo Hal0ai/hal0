@@ -157,5 +157,43 @@ def test_output_keys_are_exactly_the_documented_set(tmp_path):
         "timed_out", "idle_timed_out", "questions_asked", "elapsed_seconds",
         "step_durations_seconds", "last_step", "disk_used_bytes", "bytes_downloaded",
         "slot_count", "slots", "doctor", "failed_units", "api_health_seconds", "chat", "memory",
-        "hermes", "harness_prereqs", "warnings", "errors", "components",
+        "hermes", "harness_prereqs", "warnings", "errors", "components", "aborted",
+        "abort_detail",
     }  # fmt: skip
+
+
+def run_note(tmp_path: Path, text: str | None) -> dict:
+    path = tmp_path / "run.txt"
+    if text is not None:
+        path.write_text(text)
+    out = tmp_path / "result.json"
+    cmd = [
+        sys.executable, "-I", str(RESULT), "assemble",
+        "--shape", "u2604-cpu-unattended", "--source", "stable", "--vmid", "172",
+        "--started", "2026-11-28T10:00:00Z", "--out", str(out), "--run", str(path),
+    ]  # fmt: skip
+    proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
+    assert proc.returncode == 0, proc.stderr
+    return json.loads(out.read_text())
+
+
+def test_run_note_gives_the_abort_reason_and_detail(tmp_path):
+    res = run_note(
+        tmp_path,
+        "vmid=172\naborted=host_memory_low\n"
+        "abort_detail=host memory fell below 12 GB (5 GB available)\n",
+    )
+    assert res["aborted"] == "host_memory_low"
+    assert res["abort_detail"] == "host memory fell below 12 GB (5 GB available)"
+
+
+def test_run_note_without_an_abort_gives_nulls(tmp_path):
+    res = run_note(tmp_path, "vmid=172\nuninstall_ok=1\n")
+    assert res["aborted"] is None and res["abort_detail"] is None
+
+
+def test_missing_run_note_or_option_gives_nulls(tmp_path):
+    res = run_note(tmp_path, None)
+    assert res["aborted"] is None and res["abort_detail"] is None
+    _, res = assemble(tmp_path)  # no --run at all
+    assert res["aborted"] is None and res["abort_detail"] is None

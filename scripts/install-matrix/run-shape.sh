@@ -328,7 +328,7 @@ write_result() {
   python3 -I "${HERE}/result.py" assemble \
     --shape "$SHAPE_ID" --source "$SOURCE" --vmid "$VMID" \
     --pre "${ART}/pre.txt" --post "${ART}/post.txt" --probe "${ART}/probe.txt" \
-    --driver "${ART}/driver.json" --summary "${ART}/summary.json" \
+    --driver "${ART}/driver.json" --summary "${ART}/summary.json" --run "${ART}/run.txt" \
     --prereqs "$PREREQS" --started "$STARTED" --out "${ART}/result.json" \
     || log "could not write result.json"
 }

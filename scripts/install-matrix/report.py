@@ -144,6 +144,9 @@ def row(res: dict) -> list[str]:
 def why_failed(res: dict) -> str | None:
     """Why a run counts as failed, or None when it does not."""
     code = res.get("install_exit_code")
+    if res.get("aborted") is not None:
+        detail = res.get("abort_detail")
+        return f"aborted: {d(res.get('aborted'))}" + (f" ({d(detail)})" if detail else "")
     if res.get("idle_timed_out"):
         return "idle timeout"
     if res.get("timed_out"):

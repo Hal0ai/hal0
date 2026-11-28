@@ -181,3 +181,27 @@ def test_exit_zero_with_failed_units_listed(tmp_path):
     assert "failed units" in failures
     assert "hal0-x.service" in failures
     assert "u2604-cpu-terminal" not in failures
+
+
+def test_an_aborted_run_is_failed_and_shows_reason_and_detail(tmp_path):
+    put(
+        tmp_path, "aborted",
+        make_result(
+            "u2604-gpu", "2026-11-28T11:00:00Z", aborted="host_memory_low",
+            abort_detail="host memory fell below 12 GB (5 GB available)",
+        ),
+    )  # fmt: skip
+    put(tmp_path, "clean", make_result("u2604-cpu-terminal", "2026-11-28T10:00:00Z"))
+    failures = run(tmp_path).stdout.split("\n\n", 1)[1]
+    assert "u2604-gpu" in failures
+    assert "aborted: host_memory_low" in failures
+    assert "host memory fell below 12 GB (5 GB available)" in failures
+    assert "u2604-cpu-terminal" not in failures
+
+
+def test_a_null_abort_does_not_fail_a_clean_run(tmp_path):
+    put(
+        tmp_path, "ok",
+        make_result("u2604-gpu", "2026-11-28T11:00:00Z", aborted=None, abort_detail=None),
+    )  # fmt: skip
+    assert "None." in run(tmp_path).stdout

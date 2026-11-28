@@ -4,10 +4,12 @@
     python3 -I result.py assemble --shape ID --source S --vmid N \
         --pre FILE --post FILE --probe FILE --driver FILE --summary FILE \
         --prereqs LIST --started ISO --out result.json \
-        [--install-sh PATH]
+        [--run FILE] [--install-sh PATH]
 
 ``--pre``, ``--post`` and ``--probe`` are ``key=value`` files printed by
-collect.sh. ``--driver`` is the JSON tty_drive.py
+collect.sh. ``--run`` is the harness's own ``run.txt`` (also ``key=value``); it
+gives ``aborted`` (why the watchdog stopped the run) and ``abort_detail``, both
+null when absent. ``--driver`` is the JSON tty_drive.py
 (or run-shape.sh, for an unattended run) wrote. ``--summary`` is the installer's
 ``--summary-json`` file. Any input may be missing or unreadable: its fields
 come out as null. A number collect.sh could not measure (-1) is also null.
@@ -132,6 +134,7 @@ def assemble(args: argparse.Namespace) -> dict:
     pre, post, probe = read_kv(args.pre), read_kv(args.post), read_kv(args.probe)
     driver, summary = read_json(args.driver), read_json(args.summary)
     summary = summary or {}
+    note = read_kv(args.run)
     durations = summary.get("step_durations_seconds")
     prereqs = [p for p in re.split(r"[,\s]+", args.prereqs or "") if p]
     return {
@@ -185,6 +188,8 @@ def assemble(args: argparse.Namespace) -> dict:
         "warnings": summary.get("warnings"),
         "errors": summary.get("errors"),
         "components": summary.get("components"),
+        "aborted": text(note, "aborted") or None,
+        "abort_detail": text(note, "abort_detail") or None,
     }
 
 
@@ -208,7 +213,7 @@ def main(argv: list[str]) -> int:
     a.add_argument("--shape", required=True)
     a.add_argument("--source", required=True)
     a.add_argument("--vmid", type=int, required=True)
-    for name in ("pre", "post", "probe", "driver", "summary"):
+    for name in ("pre", "post", "probe", "driver", "summary", "run"):
         a.add_argument(f"--{name}", default=None)
     a.add_argument("--prereqs", default="")
     a.add_argument("--started", required=True)
