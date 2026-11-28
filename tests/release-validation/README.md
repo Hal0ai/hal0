@@ -59,6 +59,12 @@ Invoke the `rc-validate` workflow with args:
 * `mode: "file"` — the above, plus a GitHub issue per confirmed finding. **Default.**
 * `lanes: ["api","cli",…]` — restrict the run (smoke re-check after a hotfix).
 
+The box ids are fixed in the script's `BOX_ROLES` table and mirrored in `boxes.example.toml`. Your
+own `boxes.toml` is untracked, so a rename in the kit does not reach it: its `[boxes.<id>]` keys
+must match. A box id the script does not know stops the run before any agent starts. A known id
+with no table in your `boxes.toml` stops the run at preflight for that box. Neither is skipped
+in silence.
+
 The fix wave is deliberately a **separate** workflow (`rc-fix-fleet`) and only runs when the
 operator asks for it. It takes the filed issue numbers, works ~6 agents wide (see *Process
 lessons*), and monitors each PR to a conclusion.

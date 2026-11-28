@@ -164,3 +164,24 @@ def test_fleet_file_carries_the_coverage_note_the_script_points_at() -> None:
         "boxes.example.toml has no FLEET COVERAGE note, but rc-validate.js tells the report "
         "agent to read it"
     )
+
+
+def test_an_unknown_box_id_stops_the_run_before_any_agent_starts() -> None:
+    script = _script()
+    check = script.find("unknown box id(s)")
+    first_phase = script.find("phase('Preflight')")
+    assert check != -1, "rc-validate.js no longer rejects a box id missing from BOX_ROLES"
+    assert first_phase != -1, "rc-validate.js lost its Preflight phase marker"
+    assert check < first_phase, (
+        "the unknown-box check runs after Preflight has already spawned one agent per box; "
+        "a renamed id must stop the run before that (#4084)"
+    )
+
+
+def test_preflight_blocks_on_a_fleet_file_without_the_box_table() -> None:
+    script = _script()
+    assert "has no\n[boxes.${boxId}] table, set ready=false" in script, (
+        "the preflight prompt no longer tells the agent to block when the operator's "
+        "boxes.toml has no table for its box; without it the agent guesses from a "
+        "similarly named table"
+    )
