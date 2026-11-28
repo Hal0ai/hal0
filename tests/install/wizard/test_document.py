@@ -229,27 +229,97 @@ def test_install_type_comes_from_the_highest_layer(catalog: Catalog) -> None:
     assert get(doc, "memory.enabled") is False
 
 
-def test_an_unknown_install_type_is_refused(catalog: Catalog) -> None:
-    with pytest.raises(DocumentError, match="bogus"):
-        effective(
-            catalog,
-            chosen={},
-            saved={"install": {"type": "bogus"}},
-            given=None,
-            over=[],
-            hal0_version="1.9.0",
-            now="t",
-        )
-    with pytest.raises(DocumentError, match=r"install\.type"):
-        effective(
-            catalog,
-            chosen={"install.type": 3},
-            saved=None,
-            given=None,
-            over=[],
-            hal0_version="1.9.0",
-            now="t",
-        )
+def test_an_unknown_install_type_from_saved_falls_back_to_recommended(catalog: Catalog) -> None:
+    doc = effective(
+        catalog,
+        chosen={},
+        saved={"install": {"type": "bogus"}, "network": {"port": 9000}},
+        given=None,
+        over=[],
+        hal0_version="1.9.0",
+        now="t",
+    )
+    assert get(doc, "install.type") == "bogus"
+    assert get(doc, "network.port") == 9000
+    assert get(doc, "apps.hermes.enabled") is True
+    doc = effective(
+        catalog,
+        chosen={},
+        saved={"install": {"type": 3}},
+        given=None,
+        over=[],
+        hal0_version="1.9.0",
+        now="t",
+    )
+    assert get(doc, "apps.hermes.enabled") is True
+
+
+def test_an_unknown_install_type_from_anywhere_else_is_refused(catalog: Catalog) -> None:
+    for kwargs in (
+        {"given": {"install": {"type": "bogus"}}},
+        {"chosen": {"install.type": "bogus"}},
+        {"over": [Override("install.type", "bogus", "--bare")]},
+        {"chosen": {"install.type": 3}},
+    ):
+        args: dict[str, object] = {"chosen": {}, "saved": None, "given": None, "over": []}
+        args.update(kwargs)
+        with pytest.raises(DocumentError, match=r"bogus|install\.type"):
+            effective(catalog, hal0_version="1.9.0", now="t", **args)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    ("layer", "over", "key", "value"),
+    [
+        (
+            {"given": {"apps": {"hermes": {"terminal_tool": {"on": 1}}}}},
+            [Override("apps.hermes.terminal_tool", False, "HAL0_HERMES_TERMINAL")],
+            "apps.hermes.terminal_tool",
+            False,
+        ),
+        (
+            {"saved": {"apps": {"hermes": {"enabled": {"x": 1}}}}},
+            [Override("apps.hermes.enabled", False, "--no-hermes")],
+            "apps.hermes.enabled",
+            False,
+        ),
+        (
+            {"saved": {"network": {"port": {}}}},
+            [Override("network.port", 9090, "HAL0_PORT")],
+            "network.port",
+            9090,
+        ),
+    ],
+)
+def test_an_override_replaces_an_object_valued_leaf(
+    catalog: Catalog,
+    layer: dict[str, dict[str, object]],
+    over: list[Override],
+    key: str,
+    value: object,
+) -> None:
+    doc = effective(
+        catalog,
+        chosen={},
+        saved=layer.get("saved"),
+        given=layer.get("given"),
+        over=over,
+        hal0_version="1.9.0",
+        now="t",
+    )
+    assert get(doc, key) == value
+
+
+def test_a_choice_replaces_an_object_valued_leaf(catalog: Catalog) -> None:
+    doc = effective(
+        catalog,
+        chosen={"network.port": 7000},
+        saved={"network": {"port": {"x": 1}}},
+        given=None,
+        over=[],
+        hal0_version="1.9.0",
+        now="t",
+    )
+    assert get(doc, "network.port") == 7000
 
 
 def test_terminal_tool_is_never_taken_from_a_saved_document(catalog: Catalog) -> None:

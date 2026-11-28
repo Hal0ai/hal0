@@ -214,15 +214,17 @@ def _chosen_items(chosen: Mapping[str, object]) -> list[tuple[str, object]]:
     return [(key, value) for key, value in chosen.items() if not key.startswith("_")]
 
 
-def _install_type(layers: Sequence[Document]) -> str:
-    """The install type from the highest layer that names one."""
-    for layer in reversed(layers):
+def _install_type(layers: Sequence[tuple[str, Document]]) -> tuple[str, str]:
+    """The install type and the name of the highest layer that names one."""
+    for name, layer in reversed(layers):
         named = get(layer, TYPE_KEY)
         if named is not None:
             if not isinstance(named, str):
+                if name == "saved":
+                    return "recommended", name
                 raise DocumentError(f"{TYPE_KEY} must be text")
-            return named
-    return "recommended"
+            return named, name
+    return "recommended", "preset"
 
 
 def effective(
@@ -247,14 +249,27 @@ def effective(
     chosen_layer = _layer_of(_chosen_items(chosen))
     over_layer = _layer_of([(o.key, o.value) for o in over])
 
-    install_type = _install_type([saved_layer, given_layer, chosen_layer, over_layer])
+    install_type, source = _install_type(
+        [
+            ("saved", saved_layer),
+            ("given", given_layer),
+            ("chosen", chosen_layer),
+            ("override", over_layer),
+        ]
+    )
+    if source == "saved" and install_type not in (*catalog.presets, "custom"):
+        # An older or newer saved document loads tolerantly: use the defaults.
+        install_type = "recommended"
     doc = preset(catalog, install_type)
     if install_state != "fresh":
         access = doc.get("access")
         if isinstance(access, dict):
             access.pop("admin_key", None)
-    for layer in (saved_layer, given_layer, chosen_layer, over_layer):
+    for layer in (saved_layer, given_layer):
         _merge_layer(doc, layer)
+    # Choices and overrides always replace what a document holds at a key.
+    for layer in (chosen_layer, over_layer):
+        _merge_replacing(doc, layer)
     doc["version"] = DOCUMENT_VERSION
     doc["meta"] = {"saved_at": now, "saved_by": hal0_version}
     return doc
