@@ -1,6 +1,6 @@
 """installer/install.sh needs the setup screens and has no path without them.
 
-A release tree that lacks the wizard (its entry point or its catalog) stops
+A release tree that lacks the wizard (its entry point, its catalog or its models list) stops
 with one line before anything runs; a tree that has it stops on every unknown
 flag. The tests run the real ``install.sh`` out of a scratch tree whose
 ``installer/`` entries are links to this checkout's files, so ``REPO_ROOT`` is
@@ -38,6 +38,7 @@ def _tree(root: Path, *, wizard: bool) -> Path:
         catalog = inst / "manifests" / "setup-catalog.json"
         catalog.parent.mkdir()
         catalog.write_text("{}", encoding="utf-8")
+        (inst / "manifests" / "setup-models.json").write_text("{}", encoding="utf-8")
     return root
 
 
@@ -101,12 +102,13 @@ def test_a_tree_without_the_wizard_stops_with_one_line(tmp_path: Path, args: lis
     assert not (tree / ".hal0ai").exists()
 
 
-@pytest.mark.parametrize("missing", ["entry", "catalog"])
+@pytest.mark.parametrize("missing", ["entry", "catalog", "models"])
 def test_a_tree_missing_one_wizard_file_stops_too(tmp_path: Path, missing: str) -> None:
     tree = _tree(tmp_path / "tree", wizard=True)
     victim = {
         "entry": tree / "src" / "hal0" / "install" / "wizard" / "__main__.py",
         "catalog": tree / "installer" / "manifests" / "setup-catalog.json",
+        "models": tree / "installer" / "manifests" / "setup-models.json",
     }[missing]
     victim.unlink()
     before = _install_logs()

@@ -338,13 +338,14 @@ _hal0_wizard_paths() {
     fi
 }
 
-# hal0_wizard_present: true when this release tree has the wizard (both its
-# entry point and its catalog). When it is false the installer behaves exactly
-# as it did before the wizard existed.
+# hal0_wizard_present: true when this release tree has everything the seam
+# hands the wizard: its entry point, its catalog and its models list (--models).
+# install.sh stops at the top when it is false.
 hal0_wizard_present() {
     _hal0_wizard_paths
     [[ -n "${REPO_ROOT:-}" || "${EUID}" -ne 0 ]] || return 1
-    [[ -f "${_HAL0_WIZARD_ENTRY_PATH}" && -f "${_HAL0_WIZARD_CATALOG_PATH}" ]]
+    [[ -f "${_HAL0_WIZARD_ENTRY_PATH}" && -f "${_HAL0_WIZARD_CATALOG_PATH}" \
+        && -f "${_HAL0_WIZARD_MODELS_PATH}" ]]
 }
 
 # _hal0_wizard_lstat PATH: look at PATH itself (stat without -L is lstat). Sets

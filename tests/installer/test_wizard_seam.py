@@ -230,6 +230,76 @@ def _state(proc: subprocess.CompletedProcess[str]) -> dict[str, str]:
 DOC = json.dumps({"version": 1, "install": {"type": "recommended"}})
 
 
+# ── the tree has what the seam needs ────────────────────────────────────────
+
+WIZARD_FILES = {
+    "entry": Path("src/hal0/install/wizard/__main__.py"),
+    "catalog": Path("installer/manifests/setup-catalog.json"),
+    "models": Path("installer/manifests/setup-models.json"),
+}
+
+
+def _tree_with_the_three_files(tmp_path: Path) -> Path:
+    tree = tmp_path / "tree"
+    for rel in WIZARD_FILES.values():
+        (tree / rel).parent.mkdir(parents=True, exist_ok=True)
+        (tree / rel).write_text("{}", encoding="utf-8")
+    return tree
+
+
+def _is_present(tmp_path: Path, tree: Path) -> bool:
+    proc = _run_group(
+        [
+            "bash",
+            "-c",
+            f'REPO_ROOT="{tree}"\nsource "{ANSWERS_SH}"\n'
+            "if hal0_wizard_present; then echo PRESENT; else echo ABSENT; fi",
+        ],
+        timeout=30,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env={"PATH": os.environ["PATH"]},
+        cwd=tmp_path,
+    )
+    assert proc.returncode == 0, proc.stderr
+    return proc.stdout.strip() == "PRESENT"
+
+
+def test_a_tree_with_all_three_files_has_the_setup_screens(tmp_path: Path) -> None:
+    assert _is_present(tmp_path, _tree_with_the_three_files(tmp_path))
+
+
+@pytest.mark.parametrize("missing", sorted(WIZARD_FILES))
+def test_a_tree_missing_any_one_of_the_three_files_has_no_setup_screens(
+    tmp_path: Path, missing: str
+) -> None:
+    tree = _tree_with_the_three_files(tmp_path)
+    (tree / WIZARD_FILES[missing]).unlink()
+    assert not _is_present(tmp_path, tree)
+
+
+def test_the_models_file_checked_is_the_one_the_seam_passes(tmp_path: Path) -> None:
+    # the seam hands the wizard `--models ${_HAL0_WIZARD_MODELS_PATH}`; the check
+    # must look at that same path
+    proc = _run_group(
+        [
+            "bash",
+            "-c",
+            f'REPO_ROOT="{ROOT}"\nsource "{ANSWERS_SH}"\n_hal0_wizard_paths\n'
+            'echo "${_HAL0_WIZARD_MODELS_PATH}"',
+        ],
+        timeout=30,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env={"PATH": os.environ["PATH"]},
+        cwd=tmp_path,
+    )
+    assert proc.stdout.strip() == str(ROOT / WIZARD_FILES["models"])
+    assert (ROOT / WIZARD_FILES["models"]).is_file()
+
+
 def test_the_test_seams_are_not_honoured_as_root() -> None:
     text = ANSWERS_SH.read_text(encoding="utf-8")
     assert text.count("HAL0_WIZARD_ENTRY") >= 1 and text.count("HAL0_WIZARD_CATALOG") >= 1
