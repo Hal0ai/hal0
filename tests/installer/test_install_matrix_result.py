@@ -182,7 +182,7 @@ def run_note(tmp_path: Path, text: str | None) -> dict:
         "--shape", "u2604-cpu-unattended", "--source", "stable", "--vmid", "172",
         "--started", "2026-11-28T10:00:00Z", "--out", str(out), "--run", str(path),
     ]  # fmt: skip
-    proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
+    proc = subprocess.run(cmd, capture_output=True, text=True, check=False, timeout=30)
     assert proc.returncode == 0, proc.stderr
     return json.loads(out.read_text())
 

@@ -155,8 +155,15 @@ class Host:
         self.state.mkdir()
         self.log = self.state / "ssh.log"
         self.log.write_text("")
+        (self.bin / "ssh-body").write_text(FAKE_SSH)
         ssh = self.bin / "ssh"
-        ssh.write_text(FAKE_SSH)
+        # Whatever the fake emits is cut at 1 MiB, whatever the code under test
+        # does: a wrong implementation must stay harmless.
+        ssh.write_text(
+            "#!/usr/bin/env bash\n"
+            "exec > >(head -c 1048576) 2> >(head -c 1048576 >&2)\n"
+            f'exec bash {self.bin}/ssh-body "$@"\n'
+        )
         ssh.chmod(0o755)
         for name in ("pct", "pveam", "pvesm", "pvesh"):
             p = self.bin / name

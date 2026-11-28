@@ -43,6 +43,7 @@ def _run(*args):
         capture_output=True,
         text=True,
         check=False,
+        timeout=30,
     )
 
 

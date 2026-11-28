@@ -9,9 +9,11 @@ ever tried to run them locally.
 
 from __future__ import annotations
 
+import os
 import re
 import shlex
 import subprocess
+import threading
 from pathlib import Path
 
 import pytest
@@ -68,6 +70,11 @@ class Fake:
             'has_n=0; for a in "$@"; do [[ "$a" == -n ]] && has_n=1; [[ "$a" == -- ]] && break; done\n'
             f'[[ "$has_n" == 1 ]] || cat > {shlex.quote(str(self.stdin_dump))}\n'
             'cmd="${*: -1}"\n'
+            # Whatever the handler emits is cut at 1 MiB here, whatever the code
+            # under test does: a wrong implementation must stay harmless.
+            # (the cut sits inside the process, not in a pipe, so that killing
+            # the fake on a deadline kills what is hanging, too)
+            "exec > >(head -c 1048576) 2> >(head -c 1048576 >&2)\n"
             f'exec bash {shlex.quote(str(self.dir / "handler.sh"))} "$cmd"\n'
         )
         ssh.chmod(0o755)
@@ -1107,6 +1114,7 @@ def _host_devices(tmp_path: Path, arg: str):
         capture_output=True,
         text=True,
         check=False,
+        timeout=30,
     )
 
 
@@ -1386,6 +1394,7 @@ CAP = "4096"
 def _noisy_ssh(fake: Fake, out: int = 0, err: int = 0, rc: int = 0) -> None:
     """Replace the fake ssh with one that prints ``out`` bytes to stdout and
     ``err`` bytes to stderr, whatever it is asked."""
+    assert out <= 1048576 and err <= 1048576, "a test source is at most 1 MiB"
     ssh = fake.bin / "ssh"
     ssh.write_text(
         "#!/usr/bin/env bash\n"
@@ -1490,7 +1499,9 @@ def _running_ssh(fake: Fake) -> None:
         "esac\n"
         'pct() { shift 3; "$@"; }\n'
         "export -f pct\n"
-        # Bounded: a read of a FIFO must end by itself, not hang the test.
+        # Bounded in time (a read of a FIFO must end by itself) and in size
+        # (1 MiB, whatever the command does), so a wrong pull stays harmless.
+        "exec > >(head -c 1048576) 2> >(head -c 1048576 >&2)\n"
         'exec timeout -s KILL 5 bash -c "$cmd"\n'
     )
 
@@ -1505,27 +1516,54 @@ def test_a_pull_takes_a_regular_file(fake, tmp_path):
     assert dst.read_bytes() == b"the report\n"
 
 
-@pytest.mark.parametrize("kind", ["char-device", "fifo", "symlink-to-device", "directory"])
-def test_a_pull_never_follows_a_guest_path_to_a_device_or_fifo(fake, tmp_path, kind):
-    import os
+def _fifo_with_a_writer(path: Path) -> threading.Thread:
+    """A FIFO whose writer sends 64 KiB and closes, once somebody reads it. If
+    nobody ever opens it for reading the writer is released by the caller."""
+    os.mkfifo(path)
 
+    def write() -> None:
+        with open(path, "wb") as fh:
+            fh.write(b"x" * 65536)
+
+    t = threading.Thread(target=write, daemon=True)
+    t.start()
+    return t
+
+
+@pytest.mark.parametrize(
+    "kind", ["char-device", "symlink-to-char-device", "fifo", "symlink-to-fifo", "directory"]
+)
+def test_a_pull_never_follows_a_guest_path_to_a_device_or_fifo(fake, tmp_path, kind):
+    # Harmless when the code is WRONG: no endless source is used (/dev/null is
+    # empty, the FIFO carries 64 KiB), and the fake ssh cuts all output at 1 MiB.
     _running_ssh(fake)
     target = tmp_path / "chosen"
+    writer = None
     if kind == "char-device":
-        target = Path("/dev/zero")
+        target = Path("/dev/null")
+    elif kind == "symlink-to-char-device":
+        target.symlink_to("/dev/null")
     elif kind == "fifo":
-        os.mkfifo(target)
-    elif kind == "symlink-to-device":
-        target.symlink_to("/dev/zero")
+        writer = _fifo_with_a_writer(target)
+    elif kind == "symlink-to-fifo":
+        writer = _fifo_with_a_writer(tmp_path / "pipe")
+        target.symlink_to(tmp_path / "pipe")
     else:
         target.mkdir()
     dst = tmp_path / "out.txt"
-    r = fake.run(
-        f"ct_pull 172 {shlex.quote(str(target))} {shlex.quote(str(dst))}; echo rc=$?",
-        env=_cap_env(HAL0_MATRIX_TIMEOUT_PULL="8"),
-    )
+    try:
+        r = fake.run(
+            f"ct_pull 172 {shlex.quote(str(target))} {shlex.quote(str(dst))}; echo rc=$?",
+            env=_cap_env(HAL0_MATRIX_TIMEOUT_PULL="8"),
+        )
+    finally:
+        if writer is not None and writer.is_alive():  # nobody read it: release the writer
+            fd = os.open(
+                tmp_path / ("pipe" if kind == "symlink-to-fifo" else "chosen"),
+                os.O_RDONLY | os.O_NONBLOCK,
+            )
+            os.close(fd)
+            writer.join(timeout=5)
     assert "rc=0" not in r.stdout, "the pull must fail"
     assert not dst.exists()
-    assert sorted(p.name for p in tmp_path.iterdir() if p.name != "fake") == sorted(
-        [target.name] if target.parent == tmp_path else []
-    )
+    assert not list(tmp_path.glob("out.txt.*")), "no temporary file is left"

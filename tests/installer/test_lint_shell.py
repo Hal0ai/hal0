@@ -53,6 +53,7 @@ def run(root: Path, tmp_path: Path, *args: str, path: str | None = None, cwd: Pa
         env=env,
         capture_output=True,
         text=True,
+        timeout=120,
     )
 
 
