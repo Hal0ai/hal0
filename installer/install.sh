@@ -100,6 +100,14 @@ source "$(dirname "${BASH_SOURCE[0]}")/lib/distro.sh"
 # shellcheck source=lib/preflight.sh
 source "$(dirname "${BASH_SOURCE[0]}")/lib/preflight.sh"
 
+# Pre-flight detection facts (the facts file a wizard reads) and the one place
+# answers enter the install (hal0_collect_answers). Both come after
+# preflight.sh because they call its detection helpers.
+# shellcheck source=lib/facts.sh
+source "$(dirname "${BASH_SOURCE[0]}")/lib/facts.sh"
+# shellcheck source=lib/answers.sh
+source "$(dirname "${BASH_SOURCE[0]}")/lib/answers.sh"
+
 # Non-interactive apt for every apt-get call in this installer (FLM
 # runtime libs, FLM .deb) — without this a debconf prompt can hang a
 # tty install or fail a CI/non-tty run. Only meaningful on apt hosts;
@@ -190,6 +198,10 @@ gateway_install_note() {
 
 DEV_MODE=0
 NO_START=0
+# The release tree this script runs from (set before the flag loop: whether the
+# setup screens are part of it decides how an unknown flag is treated).
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
 # ROCmFP4 + MTP note: the old `--rocmfp4` power pack (a host-side fork
 # binary wired into the retired daemon runtime) is gone. FP4/MTP now
 # ships as container profiles (`rocm` / `rocm-mtp` in
@@ -208,6 +220,11 @@ MODELS_DIR="${HAL0_MODELS_DIR:-}"
 # Set when --models-dir / HAL0_MODELS_DIR supplied the value: an EXPLICIT
 # choice is never re-asked at the TTY prompt below.
 MODELS_DIR_EXPLICIT=0
+# Set by the --models-dir flag only; the answers document must not override it.
+MODELS_DIR_FLAG_GIVEN=0
+# Set to 1 below when an answers document (not a flag or the environment) chose
+# MODELS_DIR: the folder is then created without following links.
+MODELS_DIR_FROM_DOC=0
 [[ -n "${MODELS_DIR}" ]] && MODELS_DIR_EXPLICIT=1
 # --summary-json=PATH: write a machine-readable install summary (schema
 # hal0.install-summary.v1) at PATH once the install finishes successfully.
@@ -218,12 +235,36 @@ SUMMARY_JSON_PATH=""
 # down already honour. COMPONENT_FLAG_GIVEN=1 tells the interactive component
 # picker that the operator already chose on the command line.
 COMPONENT_FLAG_GIVEN=0
+# The installer's own arguments, kept as given: the setup screens
+# (hal0_run_wizard) get the flags they know after their `--`.
+_HAL0_INSTALL_ARGS=("$@")
+# --reconfigure: ask the setup questions again on an upgrade. Set by the flag
+# only, never from the environment.
+_HAL0_RECONFIGURE=0
+# When this release tree has the setup screens, a flag the installer does not
+# know stops the run before anything else happens: a mistyped flag must not
+# silently mean the defaults. A tree without them keeps the old warn-and-ignore.
+if hal0_wizard_present 2>/dev/null; then
+    for arg in "$@"; do
+        case "$arg" in
+            --dev | --no-start | --models-dir=* | --summary-json=* | --answers=* | --no-owui \
+                | --no-comfyui | --no-hermes | --no-pi | --no-agents | --no-memory \
+                | --no-brain-model | --bare | --bare-inference | --help | -h | --reconfigure) ;;
+            *)
+                err "unknown flag: ${arg//[^[:print:]]/?} (run with --help for the list)"
+                exit 1
+                ;;
+        esac
+    done
+fi
 for arg in "$@"; do
     case "$arg" in
         --dev) DEV_MODE=1 ;;
+        --reconfigure) _HAL0_RECONFIGURE=1 ;;
         --no-start) NO_START=1 ;;
-        --models-dir=*) MODELS_DIR="${arg#--models-dir=}" ;;
+        --models-dir=*) MODELS_DIR="${arg#--models-dir=}"; MODELS_DIR_FLAG_GIVEN=1 ;;
         --summary-json=*) SUMMARY_JSON_PATH="${arg#--summary-json=}" ;;
+        --answers=*) HAL0_ANSWERS_FILE="${arg#--answers=}" ;;
         --no-owui) export HAL0_SKIP_OPENWEBUI=1; COMPONENT_FLAG_GIVEN=1 ;;
         --no-comfyui) export HAL0_IMAGE_MODELS=none; COMPONENT_FLAG_GIVEN=1 ;;
         --no-hermes) export HAL0_SKIP_HERMES=1; COMPONENT_FLAG_GIVEN=1 ;;
@@ -242,6 +283,7 @@ for arg in "$@"; do
         --help|-h)
             cat <<EOF
 Usage: install.sh [--dev] [--no-start] [--models-dir=PATH] [--summary-json=PATH]
+                  [--answers=PATH] [--reconfigure]
                   [--bare] [--no-owui] [--no-comfyui] [--no-hermes] [--no-pi]
                   [--no-agents] [--no-memory] [--no-brain-model]
   --dev               install under \$PWD/.hal0ai/, no systemd setup
@@ -249,12 +291,23 @@ Usage: install.sh [--dev] [--no-start] [--models-dir=PATH] [--summary-json=PATH]
   --models-dir=PATH   absolute path where HuggingFace pulls land
                       (default: /var/lib/hal0/models — or \$PWD/.hal0ai/var/lib/hal0/models
                       under --dev). Can also be set with HAL0_MODELS_DIR=PATH.
-                      Omit it and the installer asks on an interactive terminal;
-                      a piped (\`curl … | bash\`) or headless run takes the default.
+                      Omit it and the installer asks on an interactive terminal.
+                      With the setup screens in this release, a piped
+                      (\`curl … | bash\`) run shows them too when the terminal
+                      can be opened; a headless run (HAL0_NONINTERACTIVE=1, or
+                      no terminal) takes the default. Without the setup screens
+                      a piped or headless run takes the default.
   --summary-json=PATH write a machine-readable install summary (versions,
                       ports, bind host, model pulled, per-step durations,
                       warning count) to PATH as JSON, atomically. See
                       docs/getting-started/install.mdx.
+  --answers=PATH      read the install choices from a JSON answers document
+                      instead of asking (HAL0_ANSWERS_FILE=PATH). The file is
+                      checked in full first; a bad one stops the install
+                      before anything changes. It never carries a key or a
+                      token, and cannot turn on the Hermes terminal tool.
+  --reconfigure       on an upgrade, ask the setup questions again instead of
+                      reusing the answers saved by the last install.
 
 Components (each flag skips one optional piece; env twin in parentheses):
   --no-owui           skip Open WebUI (HAL0_SKIP_OPENWEBUI=1)
@@ -275,7 +328,16 @@ force the flag/env values everywhere.
 
 HAL0_HERMES_TERMINAL=1 gives the bundled Hermes agent a terminal tool, letting
 it run commands as the hal0 user (root-equivalent on this box). It is OFF by
-default and a non-interactive install never enables it.
+default. An unattended install leaves it off unless HAL0_HERMES_TERMINAL=1 is
+set in the environment, which is the explicit opt-in.
+
+Turning the assistant off on the setup screens, on a box that already has it,
+stops it; it stays installed and stays stopped, also across upgrades, until it
+is turned on there again or started by hand (\`systemctl enable --now
+hal0-agent@hermes\`, and \`hermes-gateway\` for the messaging bridge). A skip
+flag or variable alone (--no-hermes, --no-agents, --bare, HAL0_SKIP_HERMES=1)
+does not stop an installed assistant: only setup screens that a person
+confirmed do.
 EOF
             exit 0
             ;;
@@ -312,8 +374,6 @@ PY="${HAL0_PYTHON:-python3}"
 # ==========================================================================
 API_BIND_HOST="0.0.0.0"
 
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-
 # Root-run chown/chmod/mkdir/write under ${VAR_DIR} goes through this (#2975).
 # ${VAR_DIR} is hal0-owned and not sticky, so the hal0 account can swap any
 # entry in it for a symlink, or rename another directory into its name,
@@ -325,6 +385,301 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 nofollow() {
     "${PY}" -I "${REPO_ROOT}/src/hal0/security/nofollow.py" "$@"
 }
+
+# doc-path-helpers: begin
+# Folders an answers document chose. The answers reader checked their TEXT only
+# (installer/lib/answers_reader.py never looks at the disk); every rule about
+# what is on disk there lives here, at the moment root creates or uses the
+# folder, and creation goes through `nofollow` (no link is followed below a
+# directory someone other than root could change).
+#
+# For a document's path, no component may be a symbolic link, wherever it sits
+# and wherever it leads: `nofollow` follows a link that sits in a root-only
+# folder, and the folders the link's TARGET runs through may belong to someone
+# else (root's /data/models -> /var/lib/hal0/models hands the hal0 account the
+# choice of where root creates). Every component is looked at with lstat.
+#
+# hal0_path_norm PATH: print PATH in normal form, by text alone (no filesystem
+# call): repeated slashes collapsed, `.` components dropped, a trailing slash
+# dropped. `..` is left as it is. Used to tell whether two spellings name the
+# same folder (the setup screens hand back a folder without a trailing slash).
+hal0_path_norm() {
+    local p="${1:-}" two='//' one='/' dot='/./'
+    while [[ "${p}" == *//* ]]; do p="${p//"${two}"/"${one}"}"; done
+    while [[ "${p}" == */./* ]]; do p="${p//"${dot}"/"${one}"}"; done
+    while [[ "${p}" == */. ]]; do p="${p%/.}"; done
+    [[ -n "${p}" || "${1:-}" != /* ]] || p=/
+    while [[ "${p}" == ?*/ ]]; do p="${p%/}"; done
+    printf '%s' "${p}"
+}
+
+# _hal0_trusted_owner UID: "root" for these rules: uid 0, or the uid running
+# the installer (a non-root --dev run), the set src/hal0/security/nofollow.py
+# (_trusted_uids) follows links through. On a real install both are 0.
+_hal0_trusted_owner() {
+    [[ "${1:-}" == 0 || "${1:-}" == "$(id -u)" ]]
+}
+
+# _hal0_doc_entry PATH: look at PATH itself, never through a link (stat without
+# -L is lstat). Sets _HAL0_ENTRY to missing, dir, link or other, and for an
+# existing entry _HAL0_ENTRY_UID and _HAL0_ENTRY_PERM (octal permission bits).
+# Returns 1 when PATH exists but cannot be inspected.
+_HAL0_ENTRY="" _HAL0_ENTRY_UID="" _HAL0_ENTRY_PERM=""
+_hal0_doc_entry() {
+    local raw mode kind
+    _HAL0_ENTRY=missing _HAL0_ENTRY_UID="" _HAL0_ENTRY_PERM=""
+    [[ -e "${1}" || -L "${1}" ]] || return 0
+    raw="$(stat -c '%f %u' -- "${1}" 2>/dev/null)" || return 1
+    [[ "${raw}" =~ ^([0-9a-fA-F]{1,8})\ ([0-9]{1,10})$ ]] || return 1
+    mode=$(( 16#${BASH_REMATCH[1]} ))
+    _HAL0_ENTRY_UID="${BASH_REMATCH[2]}"
+    _HAL0_ENTRY_PERM="$(printf '%o' $(( mode & 8#7777 )))"
+    kind=$(( mode & 8#170000 ))
+    if (( kind == 8#040000 )); then
+        _HAL0_ENTRY="dir"
+    elif (( kind == 8#120000 )); then
+        _HAL0_ENTRY="link"
+    else
+        _HAL0_ENTRY="other"
+    fi
+}
+
+# _hal0_root_only UID PERM: owned by root, no group-write and no other-write bit
+# (a POSIX ACL that grants a write shows in the group bits, its mask).
+_hal0_root_only() {
+    _hal0_trusted_owner "${1}" && (( (8#${2} & 8#022) == 0 ))
+}
+
+# _hal0_doc_walk PATH STRICT: walk a document's PATH from / down, one component
+# at a time. Every existing component, the last one included, must be a real
+# directory; a symbolic link anywhere is refused (_HAL0_DOC_LINK=1). With
+# STRICT=1, / and every existing ancestor of PATH (not PATH itself) must also be
+# root-only. On success _HAL0_DOC_MISSING lists the missing components top-down,
+# and _HAL0_DOC_LAST is "dir" (owner and mode in _HAL0_DOC_LAST_UID/_PERM) or
+# "missing". On refusal it returns 1 with the reason in _HAL0_DOC_WHY.
+_HAL0_DOC_WHY="" _HAL0_DOC_LINK=0 _HAL0_DOC_LAST="" _HAL0_DOC_LAST_UID="" _HAL0_DOC_LAST_PERM=""
+_HAL0_DOC_MISSING=()
+_hal0_doc_walk() {
+    local path="${1:-}" strict="${2:-1}" cur="" part i
+    local -a parts=() comps=()
+    _HAL0_DOC_LINK=0 _HAL0_DOC_LAST=missing _HAL0_DOC_LAST_UID="" _HAL0_DOC_LAST_PERM=""
+    _HAL0_DOC_MISSING=()
+    _HAL0_DOC_WHY="it is not an absolute path"
+    [[ "${path}" == /* ]] || return 1
+    IFS=/ read -r -a parts <<<"${path}"
+    for part in "${parts[@]+"${parts[@]}"}"; do
+        [[ -n "${part}" ]] || continue
+        if [[ "${part}" == "." || "${part}" == ".." ]]; then
+            _HAL0_DOC_WHY="it has a '.' or '..' part"
+            return 1
+        fi
+        comps+=("${part}")
+    done
+    _HAL0_DOC_WHY="it is the root folder"
+    (( ${#comps[@]} > 0 )) || return 1
+    if [[ "${strict}" == 1 ]]; then
+        if ! _hal0_doc_entry / || [[ "${_HAL0_ENTRY}" != dir ]] \
+            || ! _hal0_root_only "${_HAL0_ENTRY_UID}" "${_HAL0_ENTRY_PERM}"; then
+            _HAL0_DOC_WHY="/ is not a folder only root can change"
+            return 1
+        fi
+    fi
+    for i in "${!comps[@]}"; do
+        cur="${cur}/${comps[i]}"
+        # Below a missing folder everything is missing too.
+        if (( ${#_HAL0_DOC_MISSING[@]} > 0 )); then
+            _HAL0_DOC_MISSING+=("${cur}")
+            continue
+        fi
+        if ! _hal0_doc_entry "${cur}"; then
+            _HAL0_DOC_WHY="${cur} cannot be inspected"
+            return 1
+        fi
+        case "${_HAL0_ENTRY}" in
+            missing)
+                _HAL0_DOC_MISSING+=("${cur}")
+                continue
+                ;;
+            link)
+                _HAL0_DOC_LINK=1
+                _HAL0_DOC_WHY="a link is on the path (${cur} is a symbolic link)"
+                return 1
+                ;;
+            other)
+                _HAL0_DOC_WHY="${cur} is not a folder"
+                return 1
+                ;;
+        esac
+        if (( i == ${#comps[@]} - 1 )); then
+            _HAL0_DOC_LAST=dir
+            _HAL0_DOC_LAST_UID="${_HAL0_ENTRY_UID}"
+            _HAL0_DOC_LAST_PERM="${_HAL0_ENTRY_PERM}"
+        elif [[ "${strict}" == 1 ]] && ! _hal0_trusted_owner "${_HAL0_ENTRY_UID}"; then
+            _HAL0_DOC_WHY="${cur} is not owned by root"
+            return 1
+        elif [[ "${strict}" == 1 ]] && (( (8#${_HAL0_ENTRY_PERM} & 8#022) != 0 )); then
+            _HAL0_DOC_WHY="${cur} can be changed by a group or by other users"
+            return 1
+        fi
+    done
+}
+
+# hal0_doc_store_prepare PATH DEFAULT: make the model store PATH from a document
+# safe to use, or fail with the reason in _HAL0_STORE_WHY (nothing created
+# then). DEFAULT is the installer's own store, ${VAR_DIR}/models.
+#   - No component of PATH may be a symbolic link (_hal0_doc_walk).
+#   - Outside DEFAULT, every existing ancestor from / down must be root-only;
+#     the missing components are made root:root 0755 in one
+#     `nofollow dir --create --expect root` call.
+#   - Inside DEFAULT (the hal0 account's own tree, which the step's `mkdir -p`
+#     has made by now), the missing components below it are made the way the
+#     default store itself ends up, hal0:hal0 2775, through `nofollow`, which
+#     refuses a link planted below a folder root does not own alone.
+#   - An existing PATH must be root-only or owned by the hal0 account: root's
+#     later downloads write by name below it, where a folder others can write
+#     (/var/tmp) would let anyone plant a link.
+# Existing components are never re-moded.
+_HAL0_STORE_WHY=""
+hal0_doc_store_prepare() {
+    local path="${1:-}" default="${2:-}" inside=0 hal0_uid
+    local -a own=()
+    while [[ "${default}" == */ && "${default}" != / ]]; do default="${default%/}"; done
+    if [[ "${default}" == /?* && ( "${path}" == "${default}" || "${path}" == "${default}/"* ) ]]; then
+        inside=1
+    fi
+    if ! _hal0_doc_walk "${path}" "$(( 1 - inside ))"; then
+        _HAL0_STORE_WHY="${_HAL0_DOC_WHY}"
+        return 1
+    fi
+    hal0_uid="$(id -u hal0 2>/dev/null)" || hal0_uid=""
+    if [[ "${_HAL0_DOC_LAST}" == dir ]] \
+        && ! _hal0_root_only "${_HAL0_DOC_LAST_UID}" "${_HAL0_DOC_LAST_PERM}" \
+        && [[ -z "${hal0_uid}" || "${_HAL0_DOC_LAST_UID}" != "${hal0_uid}" ]]; then
+        _HAL0_STORE_WHY="it already exists and is not a folder only root can change, nor one the hal0 account owns"
+        return 1
+    fi
+    (( ${#_HAL0_DOC_MISSING[@]} > 0 )) || { _HAL0_STORE_WHY=""; return 0; }
+    if (( inside )); then
+        if [[ "${_HAL0_DOC_MISSING[0]}" != "${default}/"?* ]]; then
+            _HAL0_STORE_WHY="the installer's own model store ${default} does not exist"
+            return 1
+        fi
+        if [[ "${DEV_MODE:-0}" -eq 0 && -n "${hal0_uid}" ]]; then
+            own=(--owner hal0:hal0 --mode 2775)
+        else
+            own=(--mode 0755)
+        fi
+        if ! nofollow dir --create "${own[@]}" --expect adopt "${_HAL0_DOC_MISSING[@]}"; then
+            _HAL0_STORE_WHY="${_HAL0_DOC_MISSING[0]} could not be created safely"
+            return 1
+        fi
+    elif ! nofollow dir --create --owner root:root --mode 0755 --expect root "${_HAL0_DOC_MISSING[@]}"; then
+        _HAL0_STORE_WHY="${_HAL0_DOC_MISSING[0]} could not be created safely"
+        return 1
+    fi
+    _HAL0_STORE_WHY=""
+}
+
+# hal0_store_is_operator_choice STORE: is the model store STORE, which came from
+# an answers document, the operator's own choice, as if it had been given with
+# --models-dir? The one place this is decided; both sinks (the model store's in
+# "Filesystem layout", the NPU folder's below) ask it. Two reasons, and only
+# these (operator decision, Decision comment on issue #4031, 2026-11-28: a
+# folder in a person's own home may be chosen from the setup screens):
+#   1. The person changed the folder on the setup screens in this very run, and
+#      the wizard's chosen-folder file names exactly the text the reader
+#      exported as the document's store (_HAL0_WIZARD_CHOSEN_STORE).
+#   2. It is the store this box already uses: the one named in the saved
+#      answers, a file only root writes, read only when it is root-owned 0600
+#      in a folder only root can change (_HAL0_SAVED_STORE). A reinstall or
+#      upgrade that reuses the saved answers never shows the folder screen
+#      again, so it never earns reason 1.
+# Both values are set only by hal0_run_wizard in this process (answers.sh
+# unsets them when it is sourced), never taken from the environment, a document
+# or hal0.toml (/etc/hal0 is the service account's after an install).
+# Never for the installer's own store, ${VAR_DIR}/models, or a folder inside it
+# (compared in normal form, hal0_path_norm): that tree is the hal0 account's,
+# which can plant links in it, so a store there always takes the strict rule,
+# which handles it (made through `nofollow`, owned as the service needs).
+hal0_store_is_operator_choice() {
+    local store="${1:-}" norm default
+    while [[ "${store}" == */ && "${store}" != / ]]; do store="${store%/}"; done
+    [[ "${store}" == /?* ]] || return 1
+    norm="$(hal0_path_norm "${store}")"
+    default="$(hal0_path_norm "${VAR_DIR:-/var/lib/hal0}/models")"
+    [[ "${norm}" != "${default}" && "${norm}" != "${default}/"* ]] || return 1
+    [[ -n "${_HAL0_WIZARD_CHOSEN_STORE:-}" && "${store}" == "${_HAL0_WIZARD_CHOSEN_STORE}" ]] && return 0
+    [[ -n "${_HAL0_SAVED_STORE:-}" && "${store}" == "${_HAL0_SAVED_STORE}" ]] && return 0
+    return 1
+}
+
+# hal0_doc_flm_prepare FLM STORE DEFAULT: create the NPU model folder FLM from a
+# document, which must lie strictly inside the model store STORE (the reader
+# required it; checked again here by text). It is created in two cases only:
+#   - FLM is inside DEFAULT, the installer's own store (the hal0 account's
+#     tree, where `nofollow` refuses a link planted later), or
+#   - STORE is the operator's own choice (hal0_store_is_operator_choice).
+# In every other case one warning and nothing is created: a document alone
+# cannot have root make a folder anywhere else (finding C3 of the security
+# review). Either way, right before creating anything, this walks FLM from /
+# itself (it does not rely on the store's sink): no component may be a
+# symbolic link. That holds in the operator's own store too, although the store
+# itself may be reached through one (it is made as with --models-dir): the
+# kernel follows a link's target through every folder on the way, and one of
+# them may be the hal0 account's, so a link in front of the NPU folder could
+# hand that account the choice of where root creates a folder it can write.
+# Missing folders above FLM are made root:root 0755, FLM itself 1000:hal0 (else
+# hal0:hal0) 2775, all through `nofollow`, never by path name. An existing FLM
+# is left exactly as it is. Whenever the folder is refused or cannot be made,
+# HAL0_FLM_MODELS_DIR is unset so no later root step reads it
+# (hal0_answers_unset_doc_flm, finding C6). The NPU is optional: never fails.
+hal0_doc_flm_prepare() {
+    local flm="${1:-}" store="${2:-}" default="${3:-}" why
+    while [[ "${store}" == */ && "${store}" != / ]]; do store="${store%/}"; done
+    while [[ "${default}" == */ && "${default}" != / ]]; do default="${default%/}"; done
+    if [[ "${store}" != /?* || "${flm}" != "${store}/"?* ]]; then
+        warn "FLM model directory ${flm} from the answers document is not inside the model store ${store}; it was not created. To use a folder elsewhere, set HAL0_FLM_MODELS_DIR when running the installer"
+        hal0_answers_unset_doc_flm
+        return 0
+    fi
+    if ! [[ "${default}" == /?* && "${flm}" == "${default}/"?* ]] \
+        && ! hal0_store_is_operator_choice "${store}"; then
+        warn "FLM model directory ${flm} from the answers document was not created: it is not inside the installer's own model store ${default}, and the model store ${store} is not one you chose on the setup screens or one this box already uses. To use it, set HAL0_FLM_MODELS_DIR when running the installer"
+        hal0_answers_unset_doc_flm
+        return 0
+    fi
+    if ! _hal0_doc_walk "${flm}" 0; then
+        if [[ "${_HAL0_DOC_LINK}" -eq 1 ]]; then
+            why="${_HAL0_DOC_WHY}. To use a folder reached through a link, set HAL0_FLM_MODELS_DIR when running the installer"
+        else
+            why="${_HAL0_DOC_WHY}. To use another folder, set HAL0_FLM_MODELS_DIR when running the installer"
+        fi
+        warn "FLM model directory ${flm} from the answers document was not created: ${why}"
+        hal0_answers_unset_doc_flm
+        return 0
+    fi
+    if [[ "${_HAL0_DOC_LAST}" == dir ]]; then
+        info "FLM model directory ${flm} already exists; leaving its owner and mode as they are"
+        return 0
+    fi
+    # The last missing entry is FLM itself; the ones before it are its parents.
+    if (( ${#_HAL0_DOC_MISSING[@]} > 1 )) \
+        && ! nofollow dir --create --owner root:root --mode 0755 --expect root \
+            "${_HAL0_DOC_MISSING[@]:0:${#_HAL0_DOC_MISSING[@]}-1}"; then
+        warn "could not create ${flm} safely; 'hal0 doctor perms' reports why"
+        hal0_answers_unset_doc_flm
+        return 0
+    fi
+    if nofollow dir --create --owner 1000:hal0 --mode 2775 --expect adopt "${flm}" 2>/dev/null \
+        || nofollow dir --create --owner hal0:hal0 --mode 2775 --expect adopt "${flm}"; then
+        info "created FLM model directory ${flm}"
+    else
+        warn "could not create ${flm} safely; 'hal0 doctor perms' reports why"
+        hal0_answers_unset_doc_flm
+    fi
+    return 0
+}
+# doc-path-helpers: end
 if [[ "${DEV_MODE}" -eq 1 ]]; then
     # Dev: editable checkout, everything under one prefix. `hal0 update`
     # hard-refuses in this mode (the updater detects the editable install via
@@ -470,6 +825,33 @@ trap 'err "install failed at line ${LINENO} during: ${CURRENT_STEP:-pre-init}"
     [[ -n "${_hal0_report_path}" ]] && warn "Failure report saved: ${_hal0_report_path} — attach it to a bug report."
     exit 1' ERR
 
+# ── Main Python: resolve or auto-install ────────────────────────────────────
+# The block below ran in line in the pre-flight step before the step was split
+# into detection, then checks that depend on the answers. It still runs once,
+# in the second half. It is a function only so the file-origin branch of the
+# first half can run it ahead of the answers seam (a person who passes an
+# answers file has already chosen to let the installer install Python).
+_hal0_resolve_main_python_or_die() {
+    # With an answers file the installer must try to install a missing
+    # interpreter before giving up, so the not-found guard comes after that try.
+    if [[ "${1:-}" != "install-first" ]] && ! command -v "${PY}" >/dev/null 2>&1; then
+        die "python interpreter '${PY}' not found — install with: $(python_venv_hint)"
+    fi
+    resolved_name="$(HAL0_PY_AUTOINSTALL=1 resolve_main_python)" || resolved_name=""
+    if [[ -n "${resolved_name}" && "${resolved_name}" != *$'\n'* ]] && command -v "${resolved_name}" >/dev/null 2>&1; then
+        resolved_py="${resolved_name}"
+        info "using ${resolved_py} for the main hal0 venv (default ${PY} is below hal0's 3.12 floor)"
+        PY="${resolved_py}"
+        export HAL0_PYTHON="${PY}"
+    elif ! command -v "${PY}" >/dev/null 2>&1; then
+        die "python interpreter '${PY}' not found — install with: $(python_venv_hint)"
+    else
+        [[ -z "${resolved_name}" ]] || warn "the Python the installer just set up could not be used (unexpected answer from the interpreter lookup)"
+        die "python '${PY}' is below hal0's floor (pyproject.toml requires-python >=3.12) and no compatible interpreter could be found or installed.
+  install one manually, e.g.: $(pkg_install_cmd python3.12 python3.12-venv 2>/dev/null || echo 'install python3.12'), then re-run with HAL0_PYTHON=python3.12"
+    fi
+}
+
 ui_step "Pre-flight checks" "~5-10s"
 
 if [[ "${DEV_MODE}" -eq 0 && "$(id -u)" -ne 0 ]]; then
@@ -568,14 +950,6 @@ check_upgrade_floor
 # bare "command not found" deep in the install.
 preflight_bootstrap_prereqs || die "missing base prereqs — see above (installer/bootstrap.sh's one-liner preflight requires the same tools)"
 
-# Persist bootstrap's digest-pinned cosign so the updater's signature
-# gate works on the very first `hal0 update` (#2052). Soft: warns and
-# continues when there is nothing to persist. Dev installs manage their
-# own tools.
-if [[ "${DEV_MODE}" -eq 0 ]]; then
-    persist_bootstrap_cosign
-fi
-
 # Architecture is a hard requirement in every mode — all shipped binaries
 # (FastFlowLM .deb, toolbox container images) are amd64-only.
 preflight_arch || die "hal0 requires an x86_64 host (see the message above)"
@@ -591,6 +965,148 @@ if [[ "${DEV_MODE}" -eq 0 ]]; then
     preflight_systemd || die "systemd not found — hal0 v1 requires systemctl on PATH"
 fi
 
+# Detection only: is the default Python usable? The comment on
+# _hal0_resolve_main_python_or_die (above this step) and the second half of this
+# step cover what happens when it is not.
+_main_python_usable=1
+preflight_python || _main_python_usable=0
+
+# ── Detection: GPU / NPU device visibility (capture only) ───────────────────
+# Same call the gate used to make further down; its return code is only
+# recorded here. The branches that act on it (hard stop, CPU-only consent, the
+# /dev/kfd group repair) run in the second half of this step, after the answers
+# seam. Skipped in dev mode, as the gate always was: nothing to detect, so 0.
+gpu_rc=0
+if [[ "${DEV_MODE}" -eq 0 ]]; then
+    HAL0_GPU_GATE=1 preflight_gpu || gpu_rc=$?
+fi
+
+# ── Facts file ──────────────────────────────────────────────────────────────
+# Everything above only read the machine. Write what it found to a JSON file a
+# terminal wizard reads before it asks anything. It is an aid, not a
+# requirement: an unattended install does not need it, so a failure to write it
+# warns and the install goes on. In --dev mode the tree lives under a prefix
+# and has no `current` link, so point the writer at the installer's own paths.
+if [[ "${DEV_MODE}" -eq 1 ]]; then
+    export HAL0_FACTS_VAR_DIR="${VAR_DIR}" HAL0_FACTS_FHS_ROOT="${PREFIX}"
+    # A non-root dev run cannot write /run; keep the file under the prefix.
+    HAL0_FACTS_FILE="${HAL0_FACTS_FILE:-${PREFIX}/run/hal0-install/facts.json}"
+fi
+hal0_facts_gather "${gpu_rc}"
+_facts_path="${HAL0_FACTS_FILE:-/run/hal0-install/facts.json}"
+if ! _facts_err="$(hal0_facts_write "${_facts_path}" 2>&1)"; then
+    warn "could not write the facts file ${_facts_path}; continuing without it${_facts_err:+ (${_facts_err//$'\n'/ })}"
+fi
+
+# file-origin: begin (the one place the detection half installs anything)
+# With the setup screens in this release tree, every run goes through them, and
+# they need Python 3.12 or newer, the same floor as hal0 itself: when ${PY} is
+# not usable, the interpreter is resolved now, before the seam, and installed
+# when the box has none (said in one line first).
+# Without them, only a person who passes an answers file has already chosen,
+# and reading it needs a Python. The reader runs on 3.10 and newer, so a
+# document is checked before anything changes whenever such an interpreter
+# exists (hal0_answers_python: ${PY}, else a python3 on PATH). Only when none
+# exists at all is one installed now, before the seam. A below-floor but 3.10+
+# interpreter is replaced by the normal resolution after the seam.
+if hal0_wizard_present; then
+    if [[ "${_main_python_usable}" -eq 0 ]]; then
+        if ! command -v python3.14 >/dev/null 2>&1 && ! command -v python3.13 >/dev/null 2>&1 \
+            && ! command -v python3.12 >/dev/null 2>&1; then
+            info "Installing Python, which hal0 needs before it can ask anything."
+        fi
+        _hal0_resolve_main_python_or_die install-first
+        _main_python_usable=1
+    fi
+elif [[ "${_main_python_usable}" -eq 0 && -n "${HAL0_ANSWERS_FILE:-}" ]] \
+    && ! hal0_answers_python >/dev/null; then
+    info "Installing Python, which is needed to read your answers file."
+    _hal0_resolve_main_python_or_die install-first
+    _main_python_usable=1
+fi
+# file-origin: end
+
+# ── Answers seam ────────────────────────────────────────────────────────────
+# The one place answers enter the install. Everything below this line may
+# change the host or depends on a choice.
+# answers-seam: begin
+# HAL0_FLM_MODELS_DIR as root's environment gave it, before a document can set
+# it: the setup screens copy it into their document, and it then stays the
+# environment's choice (see the answers-models-dir block).
+_pre_seam_flm="${HAL0_FLM_MODELS_DIR:-}"
+_seam_rc=0
+hal0_collect_answers || _seam_rc=$?
+if (( _seam_rc != 0 )); then
+    # Without the setup screens a refused document stops the install through the
+    # ERR trap, as before.
+    # An interrupt (130) is no refused document; it is handled below.
+    [[ "${_HAL0_WIZARD_CALLED:-0}" == "1" || "${_seam_rc}" == "130" ]] || false
+    # The setup screens already said why. Quitting and an interrupt changed
+    # nothing, so they leave no failure report; anything else may.
+    case "${_seam_rc}" in
+        10)
+            info "Nothing was changed."
+            _HAL0_REPORT_WRITTEN=1
+            exit 10
+            ;;
+        130)
+            _HAL0_REPORT_WRITTEN=1
+            exit 130
+            ;;
+        *) exit 1 ;;
+    esac
+fi
+# answers-seam: end
+
+# answers-models-dir: begin
+# MODELS_DIR was settled above, before the seam, so a document's model_store.path
+# has to be applied here. Precedence: a --models-dir flag wins over the document
+# (one warning); the document wins over an inherited HAL0_MODELS_DIR; then the
+# default. HAL0_ANSWERS_EXPORTED says the document (not the environment) set it.
+# The setup screens are handed --models-dir and read HAL0_MODELS_DIR and
+# HAL0_FLM_MODELS_DIR, and write them into their document: a folder there that
+# is the same folder as the flag or root's environment already chose (compared
+# in normal form, hal0_path_norm: the screens drop a trailing slash) stays that
+# choice, with today's rules, and is not the document's.
+if [[ "${HAL0_ANSWERS_APPLIED:-0}" == "1" ]]; then
+    for _answered in "${HAL0_ANSWERS_EXPORTED[@]+"${HAL0_ANSWERS_EXPORTED[@]}"}"; do
+        if [[ "${_answered}" == "HAL0_MODELS_DIR" ]]; then
+            if [[ "${HAL0_WIZARD_RAN:-0}" == "1" ]] \
+                && (( MODELS_DIR_FLAG_GIVEN || MODELS_DIR_EXPLICIT )) \
+                && [[ "$(hal0_path_norm "${HAL0_MODELS_DIR}")" == "$(hal0_path_norm "${MODELS_DIR}")" ]]; then
+                :
+            elif [[ "${MODELS_DIR_FLAG_GIVEN}" -eq 1 ]]; then
+                warn "--models-dir was given, so the model folder in the answers document was ignored"
+                export HAL0_MODELS_DIR="${MODELS_DIR}"
+                # The saved copy would name the document's folder, not the one
+                # this install uses, and a later run would take it for the
+                # box's existing store. Keep none.
+                HAL0_ANSWERS_SAVED=""
+            else
+                MODELS_DIR="${HAL0_MODELS_DIR}"
+                MODELS_DIR_EXPLICIT=1
+                MODELS_DIR_FROM_DOC=1
+            fi
+        fi
+    done
+    unset _answered
+    if [[ "${HAL0_WIZARD_RAN:-0}" == "1" && -n "${_pre_seam_flm:-}" && -n "${HAL0_FLM_MODELS_DIR:-}" ]] \
+        && [[ "$(hal0_path_norm "${HAL0_FLM_MODELS_DIR}")" == "$(hal0_path_norm "${_pre_seam_flm}")" ]]; then
+        hal0_answers_forget HAL0_FLM_MODELS_DIR
+    fi
+fi
+unset _pre_seam_flm
+# answers-models-dir: end
+
+# Persist bootstrap's digest-pinned cosign so the updater's signature
+# gate works on the very first `hal0 update` (#2052). Soft: warns and
+# continues when there is nothing to persist. Dev installs manage their
+# own tools.
+if [[ "${DEV_MODE}" -eq 0 ]]; then
+    persist_bootstrap_cosign
+fi
+
+# Resolve or auto-install a usable Python (see _hal0_resolve_main_python_or_die).
 # preflight_python returns 1 when python is missing OR the version is
 # below hal0's floor (pyproject.toml requires-python >=3.12; it logs an
 # `err`/`warn` itself). A below-floor interpreter is NOT survivable — pip
@@ -601,21 +1117,8 @@ fi
 # to die minutes later, deep inside "pip install", on Debian 12 (python3
 # 3.11) / Ubuntu 22.04 (python3 3.10) — every stock LTS whose system
 # python3 predates 3.12.
-if ! preflight_python; then
-    if ! command -v "${PY}" >/dev/null 2>&1; then
-        die "python interpreter '${PY}' not found — install with: $(python_venv_hint)"
-    fi
-    resolved_name="$(HAL0_PY_AUTOINSTALL=1 resolve_main_python)" || resolved_name=""
-    if [[ -n "${resolved_name}" && "${resolved_name}" != *$'\n'* ]] && command -v "${resolved_name}" >/dev/null 2>&1; then
-        resolved_py="${resolved_name}"
-        info "using ${resolved_py} for the main hal0 venv (default ${PY} is below hal0's 3.12 floor)"
-        PY="${resolved_py}"
-        export HAL0_PYTHON="${PY}"
-    else
-        [[ -z "${resolved_name}" ]] || warn "the Python the installer just set up could not be used (unexpected answer from the interpreter lookup)"
-        die "python '${PY}' is below hal0's floor (pyproject.toml requires-python >=3.12) and no compatible interpreter could be found or installed.
-  install one manually, e.g.: $(pkg_install_cmd python3.12 python3.12-venv 2>/dev/null || echo 'install python3.12'), then re-run with HAL0_PYTHON=python3.12"
-    fi
+if [[ "${_main_python_usable}" -eq 0 ]]; then
+    _hal0_resolve_main_python_or_die
 fi
 
 # `python3 -m venv` capability is a hard requirement — the install always
@@ -725,8 +1228,10 @@ _tty_read() {
 }
 
 if [[ "${DEV_MODE}" -eq 0 ]]; then
-    gpu_rc=0
-    HAL0_GPU_GATE=1 preflight_gpu || gpu_rc=$?
+    # gpu_rc was captured by the detection half of this step, before the answers
+    # seam; the branches below act on it, unchanged. After the setup screens the
+    # CPU-only question is not asked again: they asked it, and their answer is
+    # HAL0_ALLOW_CPU_ONLY (hardware.allow_cpu_only in their document).
     if (( gpu_rc == HAL0_GPU_RC_BROKEN_GID )); then
         err "GPU passthrough is broken: the render device is visible but its gid does not map to the render group in this container (no group, or the wrong one)."
         if [[ "$(hal0_lxc_kind)" == "container" ]]; then
@@ -751,7 +1256,7 @@ if [[ "${DEV_MODE}" -eq 0 ]]; then
         if [[ "${HAL0_ALLOW_CPU_ONLY:-0}" == "1" ]]; then
             _cpu_only_image_gate || exit 1
             warn "No usable GPU lane on this box — proceeding CPU-only (HAL0_ALLOW_CPU_ONLY=1); slots will be created with device=cpu."
-        elif [[ -r /dev/tty ]] && _confirm_cpu_only; then
+        elif [[ "${HAL0_WIZARD_RAN:-0}" != "1" && -r /dev/tty ]] && _confirm_cpu_only; then
             _cpu_only_image_gate || exit 1
             warn "Proceeding with a CPU-only install (confirmed at the prompt); slots will be created with device=cpu."
         else
@@ -822,7 +1327,7 @@ if [[ "${DEV_MODE}" -eq 0 ]]; then
         if [[ "${HAL0_ALLOW_CPU_ONLY:-0}" == "1" ]]; then
             _cpu_only_image_gate || exit 1
             warn "No GPU devices inside this container — proceeding CPU-only (HAL0_ALLOW_CPU_ONLY=1)."
-        elif [[ -r /dev/tty ]] && _confirm_cpu_only; then
+        elif [[ "${HAL0_WIZARD_RAN:-0}" != "1" && -r /dev/tty ]] && _confirm_cpu_only; then
             _cpu_only_image_gate || exit 1
             warn "Proceeding with a CPU-only install (confirmed at the prompt)."
         else
@@ -847,12 +1352,18 @@ fi
 # 0600 persist still happen in the "Configuration" step below, which is the
 # first point where the venv's `hf` console script exists.
 HF_TOKEN_VAL="${HF_TOKEN:-${HUGGING_FACE_HUB_TOKEN:-}}"
+# A token the person typed on the setup screens (hal0_run_wizard read it from
+# the wizard's root-only token file) is what they chose in this run.
+if [[ -n "${_HAL0_WIZARD_HF_TOKEN:-}" ]]; then
+    HF_TOKEN_VAL="${_HAL0_WIZARD_HF_TOKEN}"
+fi
+unset _HAL0_WIZARD_HF_TOKEN
 # Pre-declared because `_tty_read` writes through a nameref, which shellcheck
 # cannot follow (SC2154) — and an unset target would trip `set -u` if the
 # helper ever grew an early return.
 _md_answer=""
 _hf_answer=""
-if _interactive; then
+if [[ "${HAL0_ANSWERS_APPLIED:-0}" != "1" ]] && _interactive; then
     if [[ "${MODELS_DIR_EXPLICIT}" -eq 1 ]]; then
         info "model store fixed by --models-dir / HAL0_MODELS_DIR — not asking"
     else
@@ -969,6 +1480,37 @@ fi
 IS_UPGRADE=0
 [[ -n "${CURRENT_LINK}" && ( -e "${CURRENT_LINK}" || -L "${CURRENT_LINK}" ) ]] && IS_UPGRADE=1
 
+# ── install-in-progress marker: create ──────────────────────────────────────
+# From here on the install changes the host. This file exists exactly while an
+# install is under way, so a re-run after an abort can tell an unfinished
+# install from an upgrade (hal0_install_state in installer/lib/facts.sh reads
+# it). No failure path removes it: not the ERR trap, die(), or any `exit`.
+# Only the success path after the last step does. The state directory may not
+# exist yet on a fresh box; the "Filesystem layout" step's mkdir -p copes with
+# it already being there. Dev installs never create it.
+#
+# ${VAR_DIR} is hal0-owned and not sticky on an upgrade or re-run, so the hal0
+# account can plant a symlink at the marker path. The root write therefore goes
+# through `nofollow` (#2975): it replaces whatever sits there as a link, never
+# writing through it. There is no pure-shell fallback: no shell test can tell a
+# link to a non-regular file from a free name, and a usable Python is already
+# required by this point. When `nofollow` cannot run, warn and go on without a
+# marker. The marker is advisory: failure warns and the install goes on.
+INSTALL_MARKER="${VAR_DIR}/.install-in-progress"
+if [[ "${DEV_MODE}" -eq 0 ]]; then
+    _marker_ok=0
+    if "${PY}" -I -c '' >/dev/null 2>&1; then
+        if { [[ -d "${VAR_DIR}" ]] \
+                || nofollow dir --create --owner root:root --mode 0755 --expect root "${VAR_DIR}"; } \
+            && nofollow write --owner root:root --mode 0644 "${INSTALL_MARKER}" </dev/null; then
+            _marker_ok=1
+        fi
+    fi
+    [[ "${_marker_ok}" -eq 1 ]] \
+        || warn "could not write ${INSTALL_MARKER}; a re-run will not know this install was interrupted"
+    unset _marker_ok
+fi
+
 ui_step "System user" "~1-2s"
 
 if [[ "${DEV_MODE}" -eq 1 ]]; then
@@ -1083,16 +1625,53 @@ fi
 
 ui_step "Filesystem layout" "~2-5s"
 
+# A model store an answers document chose: the reader checked its text only, so
+# the rules about the disk are applied here (hal0_doc_store_prepare): no link
+# anywhere on the path; outside the default store, every existing folder above
+# it must be root's alone and it is checked before anything is written; an
+# existing store must be root's alone or the hal0 account's; missing folders are
+# made through `nofollow`. A store inside the default store is checked and made
+# once the default store exists (the `mkdir -p` below makes it, as for the
+# default). A refusal is FATAL: later root code (model pulls, `hal0 setup
+# --storage-dir`) would otherwise use the store by name. A store from
+# --models-dir, the environment or the default is made as before.
+_models_mkdir=("${MODELS_DIR}")
+_models_doc_inside=0
+_models_doc_die="Choose a real folder (no symbolic link on its path) whose parents only root can change, or pass --models-dir=PATH on the command line to use this one, or one reached through a link, as your own choice"
+# A store the operator chose on the setup screens in this run, or the one this
+# box already uses (hal0_store_is_operator_choice), is made exactly as a
+# --models-dir store is.
+_models_doc_strict="${MODELS_DIR_FROM_DOC}"
+if [[ "${_models_doc_strict}" -eq 1 ]] && hal0_store_is_operator_choice "${MODELS_DIR}"; then
+    info "model store ${MODELS_DIR}: your own choice, made as one given with --models-dir"
+    _models_doc_strict=0
+fi
+if [[ "${_models_doc_strict}" -eq 1 ]]; then
+    if [[ "${MODELS_DIR}" == "${VAR_DIR}/models" || "${MODELS_DIR}" == "${VAR_DIR}/models/"* ]]; then
+        _models_mkdir=("${VAR_DIR}/models")
+        _models_doc_inside=1
+    else
+        _models_mkdir=()
+        hal0_doc_store_prepare "${MODELS_DIR}" "${VAR_DIR}/models" \
+            || die "model store ${MODELS_DIR} from the answers document cannot be used: ${_HAL0_STORE_WHY}. ${_models_doc_die}"
+    fi
+fi
+
 mkdir -p \
     "${PREFIX}" \
     "${ETC_DIR}/slots" \
-    "${MODELS_DIR}" \
+    "${_models_mkdir[@]+"${_models_mkdir[@]}"}" \
     "${VAR_DIR}/registry" \
     "${VAR_DIR}/slots" \
     "${VAR_DIR}/backups" \
     "${VAR_DIR}/openwebui" \
     "${VAR_DIR}/cache" \
     "${UNIT_DIR}"
+if [[ "${_models_doc_inside}" -eq 1 ]]; then
+    hal0_doc_store_prepare "${MODELS_DIR}" "${VAR_DIR}/models" \
+        || die "model store ${MODELS_DIR} from the answers document cannot be used: ${_HAL0_STORE_WHY}. ${_models_doc_die}"
+fi
+unset _models_mkdir _models_doc_inside _models_doc_die _models_doc_strict
 info "directories under ${PREFIX}, ${ETC_DIR}, ${VAR_DIR} (pulls → ${MODELS_DIR})"
 
 # O13: the runtime state trees (slots/, registry/, models/, backups/) are born root:root
@@ -3646,11 +4225,60 @@ else
             warn "could not create ${VAR_DIR}/.config/flm/models as hal0 — 'hal0 doctor perms' reports why"
         fi
         if [[ -n "${HAL0_FLM_MODELS_DIR:-}" ]]; then
-            # Operator override from root's own environment: a trusted path.
-            mkdir -p "${HAL0_FLM_MODELS_DIR}"
-            chown 1000:hal0 "${HAL0_FLM_MODELS_DIR}" 2>/dev/null || chown hal0:hal0 "${HAL0_FLM_MODELS_DIR}" || true
-            chmod 2775 "${HAL0_FLM_MODELS_DIR}" || true
+            # The value is NOT always a trusted path: it comes from root's
+            # environment OR from an answers document (data), and the hal0
+            # account may control part of the path. So nothing here names the
+            # path to chown, chmod or mkdir: `nofollow` acts on a descriptor and
+            # never follows a link at the last component (or below an untrusted
+            # directory). A document's folder must be inside the model store and
+            # is only ever created, never re-owned (hal0_doc_flm_prepare).
+            _flm_from_doc=0
+            for _answered in "${HAL0_ANSWERS_EXPORTED[@]+"${HAL0_ANSWERS_EXPORTED[@]}"}"; do
+                [[ "${_answered}" == "HAL0_FLM_MODELS_DIR" ]] && _flm_from_doc=1
+            done
+            if [[ "${_flm_from_doc}" -eq 1 ]]; then
+                hal0_doc_flm_prepare "${HAL0_FLM_MODELS_DIR}" "${MODELS_DIR}" "${VAR_DIR}/models"
+            elif [[ -e "${HAL0_FLM_MODELS_DIR}" || -L "${HAL0_FLM_MODELS_DIR}" ]]; then
+                # `adopt`: only a directory hal0 already owns (or an empty
+                # one root just made). `any` would re-own whatever was
+                # renamed into this name by an account that owns its parent.
+                nofollow dir --owner 1000:hal0 --mode 2775 --expect adopt "${HAL0_FLM_MODELS_DIR}" 2>/dev/null \
+                    || nofollow dir --owner hal0:hal0 --mode 2775 --expect adopt "${HAL0_FLM_MODELS_DIR}" \
+                    || warn "could not set the owner and mode of ${HAL0_FLM_MODELS_DIR}; 'hal0 doctor perms' reports why"
+            else
+                # Missing parents first, top-down, root-owned. `nofollow dir`
+                # makes only the last component, and re-modes what it opens, so
+                # it is called only for components that do not exist yet.
+                _flm_walk=""
+                _flm_ok=1
+                IFS=/ read -r -a _flm_parts <<<"${HAL0_FLM_MODELS_DIR%/*}"
+                for _flm_part in "${_flm_parts[@]+"${_flm_parts[@]}"}"; do
+                    [[ -n "${_flm_part}" ]] || continue
+                    _flm_walk="${_flm_walk}/${_flm_part}"
+                    if [[ ! -e "${_flm_walk}" && ! -L "${_flm_walk}" ]]; then
+                        nofollow dir --create --owner root:root --mode 0755 --expect root "${_flm_walk}" || _flm_ok=0
+                    fi
+                done
+                if [[ "${_flm_ok}" -eq 1 ]] \
+                    && { nofollow dir --create --owner 1000:hal0 --mode 2775 --expect adopt "${HAL0_FLM_MODELS_DIR}" 2>/dev/null \
+                        || nofollow dir --create --owner hal0:hal0 --mode 2775 --expect adopt "${HAL0_FLM_MODELS_DIR}"; }; then
+                    info "created FLM model directory ${HAL0_FLM_MODELS_DIR}"
+                else
+                    warn "could not create ${HAL0_FLM_MODELS_DIR} safely; 'hal0 doctor perms' reports why"
+                fi
+            fi
+            unset _flm_from_doc _flm_walk _flm_ok _flm_parts _flm_part _answered
         fi
+    else
+        # No NPU on this box: a document's NPU folder is skipped, so no later
+        # root step (`doctor perms --fix` reads the variable) may act on it.
+        for _answered in "${HAL0_ANSWERS_EXPORTED[@]+"${HAL0_ANSWERS_EXPORTED[@]}"}"; do
+            if [[ "${_answered}" == "HAL0_FLM_MODELS_DIR" ]]; then
+                hal0_answers_unset_doc_flm
+                break
+            fi
+        done
+        unset _answered
     fi
 
     # HuggingFace hub cache (#275 bug 4). The hal0 user's HOME is
@@ -4488,12 +5116,82 @@ else
             [[ "${_eff##* }" == "1" ]] && _gateway_was_active=1
         fi
     fi
+    # The record that THIS installer stopped the assistant from the setup
+    # screens (root-only, one line per unit it disabled: `agent`, `gateway`),
+    # read here, before the provisioning and enable blocks below can change
+    # anything. A lift ends the stop: a confirmed run of the setup screens with
+    # the assistant ON (HAL0_HERMES_STOP=0), or the person enabling the agent
+    # unit by hand since (it reads enabled now, which this run has not caused).
+    # A stop signal in this same run wins over both: it stops again below.
+    # Strict read: known words only, a link is never followed, and anything
+    # else makes the record "damaged": still present, nothing in it trusted.
+    _hermes_record="$(hal0_hermes_stop_record_path)"
+    _hermes_rec="none"
+    _hermes_rec_gateway=0
+    _hermes_rec_gateway_runtime=0
+    if hal0_hermes_stop_record_present; then
+        _hermes_rec="damaged"
+        if [[ -f "${_hermes_record}" && ! -L "${_hermes_record}" ]]; then
+            _hermes_rec="ok"
+            _hermes_rec_lines=0
+            while IFS= read -r _hermes_rec_line || [[ -n "${_hermes_rec_line}" ]]; do
+                _hermes_rec_lines=$((_hermes_rec_lines + 1))
+                case "${_hermes_rec_line}" in
+                    agent) ;;
+                    gateway) _hermes_rec_gateway=1 ;;
+                    gateway-runtime) _hermes_rec_gateway=1; _hermes_rec_gateway_runtime=1 ;;
+                    *) _hermes_rec="damaged" ;;
+                esac
+            done < "${_hermes_record}" 2>/dev/null || _hermes_rec="damaged"
+            [[ "${_hermes_rec_lines}" -ge 1 && "${_hermes_rec_lines}" -le 8 ]] || _hermes_rec="damaged"
+        fi
+        [[ "${_hermes_rec}" == "ok" ]] || { _hermes_rec_gateway=0; _hermes_rec_gateway_runtime=0; }
+    fi
+    _hermes_agent_state="$(unit_enable_state hal0-agent@hermes.service)"
+    # Held: the stop stays. A stop signal in this run always holds it; otherwise
+    # it holds while it is in force (facts.sh: a record, not a gateway-only
+    # leftover of a lift, and the agent unit not enabled by hand) and this run
+    # was not confirmed ON on the setup screens. A record that is not held is
+    # lifted. The same function answers the facts the screens read.
+    _hermes_held=0
+    _hermes_lift=0
+    if [[ "${_hermes_rec}" != "none" ]]; then
+        if [[ "${HAL0_HERMES_STOP:-}" == "1" ]] \
+            || { [[ "${HAL0_HERMES_STOP:-}" != "0" ]] && hal0_hermes_stop_in_force "${_hermes_agent_state}"; }; then
+            _hermes_held=1
+        else
+            _hermes_lift=1
+            # A gateway this installer disabled is read as "on", not as the
+            # person's own off switch (for one that was only on for this boot,
+            # as on for this boot). One the person masked since, or that is
+            # enabled already, stays as it is: nothing is ever unmasked.
+            if [[ "${_hermes_rec_gateway}" -eq 1 ]]; then
+                case "${_gateway_state}" in
+                    masked* | enabled*) ;;
+                    *)
+                        _gateway_state="enabled"
+                        [[ "${_hermes_rec_gateway_runtime}" -eq 1 ]] && _gateway_state="enabled-runtime"
+                        ;;
+                esac
+            fi
+        fi
+    fi
     _hermes_install_args=()
     unit_state_off "${_gateway_state}" && _hermes_install_args+=(--no-gateway)
+
+    # Taken before the provisioning block below: a box that already has Hermes
+    # never runs `agent install hermes`, so the terminal-tool answer needs its own
+    # way in (the apply block after it).
+    _hermes_was_provisioned=0
+    [[ -x "/var/lib/hal0/venvs/hermes/bin/hermes" ]] && _hermes_was_provisioned=1
 
     if [[ -f "${AGENT_UNIT_DST}" && ! -x "/var/lib/hal0/venvs/hermes/bin/hermes" ]]; then
         if [[ "${HAL0_SKIP_HERMES:-0}" -eq 1 ]]; then
             info "skipping hermes provisioning (HAL0_SKIP_HERMES=1) — run '${HAL0_BIN} agent install hermes' later"
+        # `agent install hermes` enables and starts the agent: while the stop
+        # from the setup screens holds, this run does not provision either.
+        elif [[ "${_hermes_held:-0}" -eq 1 ]]; then
+            info "the assistant (Hermes) was stopped from the setup screens; it is not reinstalled until it is turned on again there, or with '${HAL0_BIN} agent install hermes' by hand"
         # `hal0 agent install hermes` checks the pinned hermes-agent commit
         # out of a git mirror under /var/lib/hal0/hermes (ADR-0032), so it
         # needs a working `git`. The
@@ -4527,12 +5225,199 @@ else
         fi
     fi
 
+    # A box that already has Hermes keeps its recorded terminal-tool decision
+    # unless this run was given an explicit answer (HAL0_HERMES_TERMINAL: the
+    # prompt, the setup screens or the environment). The provisioning above only
+    # runs on a box without Hermes, so here the answer is applied by
+    # `hal0 agent reprovision hermes`: its root prelude records the answer, it
+    # re-renders config.yaml from it, and it restarts the agent and gateway.
+    # Without an answer nothing runs and the recorded decision stays.
+    # An OFF answer is applied also when this run skips the assistant
+    # (HAL0_SKIP_HERMES=1): the setup screens export both variables when the
+    # assistant is turned off, and an agent installed earlier must not keep a
+    # root-equivalent tool the person turned off. An ON answer is not applied
+    # when the assistant is skipped.
+    if [[ "${_hermes_was_provisioned}" -eq 1 && -f "${AGENT_UNIT_DST}" ]]; then
+        _ht_value="${HAL0_HERMES_TERMINAL:-}"
+        _ht_value="${_ht_value,,}"
+        _ht_value="${_ht_value//[[:space:]]/}"
+        if [[ "${HAL0_SKIP_HERMES:-0}" -eq 1 ]]; then
+            case "${_ht_value}" in
+                0|false|no|off|n) ;;
+                *) _ht_value="" ;;
+            esac
+        fi
+        case "${_ht_value}" in
+            1|true|yes|on|y|0|false|no|off|n)
+                info "applying the Hermes terminal-tool answer to the installed agent (hal0 agent reprovision hermes)…"
+                if "${HAL0_BIN}" agent reprovision hermes; then
+                    info "Hermes terminal tool: applied (HAL0_HERMES_TERMINAL=${_ht_value})"
+                else
+                    warn "applying the Hermes terminal-tool answer failed — the terminal tool's state on this box may not match what was chosen"
+                    warn "  turn it off with 'hal0 agent install hermes --no-terminal-tool'; diagnose with '${HAL0_BIN} agent log hermes'"
+                fi
+                ;;
+        esac
+        unset _ht_value
+    fi
+
+    # An installed assistant that a confirmed run of the setup screens turned
+    # off is stopped and disabled, not removed: its venv, its data and its
+    # settings stay, and a later run with the assistant on enables it again
+    # through the block below. HAL0_HERMES_STOP is 1 only when the answers
+    # reader printed it for origin wizard with the screens-shown marker and the
+    # assistant off (installer/lib/answers.sh unsets an inherited one and
+    # refuses it for any other origin), so a skip flag, HAL0_SKIP_HERMES=1, a
+    # file document, a saved document or a headless run never gets here. This
+    # step does not run at all under --dev or --no-start (the service-start
+    # branch it lives in is skipped). It disables exactly the units the block
+    # below would enable: the agent unit, and the gateway unit when its state
+    # was enabled; a masked or disabled gateway, and one started by hand, are
+    # left as they are. Linger for hal0, the dashboard proxy, containers, the
+    # venv and /var/lib/hal0 are not touched.
+    _hermes_stop_signal=0
+    if [[ "${HAL0_HERMES_STOP:-}" == "1" && "${_hermes_was_provisioned}" -eq 1 && -f "${AGENT_UNIT_DST}" ]]; then
+        _hermes_stop_signal=1
+        _hermes_stop_failed=0
+        _hermes_stop_did=0
+        _hermes_stop_gateway=0
+        systemctl is-active --quiet hal0-agent@hermes.service 2>/dev/null && _hermes_stop_did=1
+        [[ "${_hermes_agent_state:-}" == enabled* ]] && _hermes_stop_did=1
+        # Enabled for this boot only: a plain disable would leave it enabled.
+        _hermes_agent_runtime=()
+        [[ "${_hermes_agent_state:-}" == "enabled-runtime" ]] && _hermes_agent_runtime=(--runtime)
+        systemctl disable ${_hermes_agent_runtime[@]+"${_hermes_agent_runtime[@]}"} --now hal0-agent@hermes.service || _hermes_stop_failed=1
+        # Every gateway unit that is really enabled or running, whichever name
+        # it has: the canonical hermes-gateway.service and hal0's hashed
+        # hermes-gateway-<hash>.service (named by the module's read-only
+        # `units` verb). Each is disabled and stopped where it stands. This
+        # step never calls `migrate`: that enables and starts the canonical
+        # unit when the hashed one was enabled, and turns linger on, which a
+        # "stop" must not do. The move onto the canonical name is left to the
+        # lift (`hermes_gateway_regen install` does it). A masked unit is never
+        # touched or unmasked; a disabled unit that runs (started by hand,
+        # "will be stopped" was confirmed) is stopped, and not named in the
+        # record.
+        _gw_units=(hermes-gateway.service)
+        if [[ -x "${VENV_DIR}/bin/python" ]]; then
+            while IFS= read -r _gw_name; do
+                if [[ "${_gw_name}" =~ ^hermes-gateway-[0-9a-f]{8}\.service$ ]]; then
+                    _gw_units+=("${_gw_name}")
+                fi
+            done < <("${VENV_DIR}/bin/python" -I -m hal0.agents.hermes_gateway_regen units 2>/dev/null || true)
+        fi
+        _hermes_stop_gateway_word="gateway"
+        for _gw_unit in "${_gw_units[@]}"; do
+            _gw_now="$(unit_enable_state "${_gw_unit}")"
+            _gw_act=0
+            systemctl is-active --quiet "${_gw_unit}" 2>/dev/null && _gw_act=1
+            case "${_gw_now}" in
+                masked*) ;;
+                enabled-runtime)
+                    systemctl disable --runtime --now "${_gw_unit}" || _hermes_stop_failed=1
+                    _hermes_stop_gateway=1
+                    _hermes_stop_gateway_word="gateway-runtime"
+                    ;;
+                enabled*)
+                    systemctl disable --now "${_gw_unit}" || _hermes_stop_failed=1
+                    _hermes_stop_gateway=1
+                    _hermes_stop_gateway_word="gateway"
+                    ;;
+                *)
+                    if [[ "${_gw_act}" -eq 1 ]]; then
+                        systemctl disable --now "${_gw_unit}" || _hermes_stop_failed=1
+                        _hermes_stop_did=1
+                    fi
+                    ;;
+            esac
+        done
+        [[ "${_hermes_stop_gateway}" -eq 1 ]] && _hermes_stop_did=1
+        # Stopped means: afterwards no gateway unit of either name is enabled or
+        # active, and neither is the agent. The effective gateway is asked too
+        # (`state`), for a hashed unit the `units` verb did not name. What is
+        # still on is named in the warning.
+        _hermes_stop_left=()
+        for _gw_unit in "${_gw_units[@]}"; do
+            _gw_now="$(unit_enable_state "${_gw_unit}")"
+            if systemctl is-active --quiet "${_gw_unit}" 2>/dev/null || [[ "${_gw_now}" == enabled* ]]; then
+                _hermes_stop_failed=1
+                _hermes_stop_left+=("${_gw_unit}")
+            fi
+        done
+        if [[ -x "${VENV_DIR}/bin/python" ]]; then
+            _gw_eff="$("${VENV_DIR}/bin/python" -I -m hal0.agents.hermes_gateway_regen state 2>/dev/null || true)"
+            case "${_gw_eff%% *}" in enabled*) _hermes_stop_failed=1 ;; esac
+            [[ -n "${_gw_eff}" && "${_gw_eff##* }" == "1" ]] && _hermes_stop_failed=1
+        fi
+        if systemctl is-active --quiet hal0-agent@hermes.service 2>/dev/null \
+            || [[ "$(unit_enable_state hal0-agent@hermes.service)" == enabled* ]]; then
+            _hermes_stop_failed=1
+            _hermes_stop_left+=(hal0-agent@hermes.service)
+        fi
+        if [[ "${_hermes_stop_failed}" -eq 0 ]]; then
+            COMPONENT_STATES["hermes"]="stopped"
+            # The record keeps what an earlier stop named: it is never reduced.
+            # A damaged one is left as it is (and already warned about).
+            if [[ "${_hermes_rec:-none}" == "damaged" ]]; then
+                warn "${_hermes_record} is not a record this installer wrote — leaving it as it is; it still holds the assistant stopped"
+            else
+                _hermes_rec_text="agent"$'\n'
+                # `gateway-runtime`: the gateway was on for this boot only, and a
+                # lift turns it on for this boot only again.
+                if [[ "${_hermes_stop_gateway}" -eq 1 ]]; then
+                    _hermes_rec_text+="${_hermes_stop_gateway_word}"$'\n'
+                elif [[ "${_hermes_rec_gateway_runtime:-0}" -eq 1 ]]; then
+                    _hermes_rec_text+="gateway-runtime"$'\n'
+                elif [[ "${_hermes_rec_gateway:-0}" -eq 1 ]]; then
+                    _hermes_rec_text+="gateway"$'\n'
+                fi
+                if nofollow dir --create --owner root:root --mode 0755 --expect root "${_hermes_record%/*}" \
+                    && printf '%s' "${_hermes_rec_text}" \
+                        | nofollow write --owner root:root --mode 0644 --require-trusted-dir "${_hermes_record}"; then
+                    :
+                else
+                    warn "could not write ${_hermes_record} — a later run without the setup screens may start the assistant again"
+                fi
+            fi
+            if [[ "${_hermes_stop_did}" -eq 1 ]]; then
+                info "the assistant (Hermes) was stopped and disabled; it stays installed and stays stopped across upgrades and unattended runs until it is turned on again on the setup screens or with 'systemctl enable --now hal0-agent@hermes'"
+            else
+                info "the assistant (Hermes) was already stopped and stays stopped; it stays installed, and stays stopped across upgrades and unattended runs until it is turned on again on the setup screens or with 'systemctl enable --now hal0-agent@hermes'"
+            fi
+        else
+            COMPONENT_STATES["hermes"]="stop-failed"
+            # Name what is still on, the hashed unit too, and put every unit
+            # that may still be on in the command to run by hand.
+            _gw_left_text="the gateway named by 'hermes_gateway_regen state'"
+            if [[ "${#_hermes_stop_left[@]}" -gt 0 ]]; then
+                _gw_left_text="${_hermes_stop_left[*]}"
+            fi
+            warn "the assistant (Hermes) may still be running — stopping it failed (still on: ${_gw_left_text}); run 'systemctl disable --now hal0-agent@hermes.service ${_gw_units[*]}' by hand (component state: stop-failed)"
+        fi
+        unset _hermes_stop_failed _hermes_stop_did _hermes_stop_gateway _hermes_stop_gateway_word _hermes_stop_left _hermes_agent_runtime
+        unset _gw_now _gw_act _gw_eff _gw_name _gw_unit _gw_units _gw_left_text _hermes_rec_text
+    elif [[ "${_hermes_held:-0}" -eq 1 && -f "${AGENT_UNIT_DST}" ]]; then
+        # Stopped from the setup screens earlier and nobody has turned it on
+        # since: this run (an upgrade, headless, --answers, saved answers) does
+        # not enable or start it, nor install or enable its gateway, and (see
+        # the provisioning block above) does not reinstall it when its venv is
+        # gone. The hold does not depend on the venv.
+        _hermes_stop_signal=1
+        COMPONENT_STATES["hermes"]="stopped"
+        if [[ "${_hermes_rec}" == "damaged" ]]; then
+            warn "${_hermes_record} is not a record this installer wrote — treating the assistant as stopped from the setup screens; nothing in it is used"
+        fi
+        if [[ "${_hermes_was_provisioned}" -eq 1 ]]; then
+            info "the assistant (Hermes) was stopped from the setup screens and stays stopped; start it again with 'systemctl enable --now hal0-agent@hermes' or turn it on on the setup screens"
+        fi
+    fi
+
     # Enable the unit + gateway for both fresh (just-provisioned) and upgrade
     # installs. `hal0 agent install hermes` already enables the agent unit, so
     # the enable here is idempotent; it also covers the upgrade path where no
     # provision ran, plus the system-scope gateway (which the provision does
     # not install).
-    if [[ -f "${AGENT_UNIT_DST}" && -x "/var/lib/hal0/venvs/hermes/bin/hermes" ]]; then
+    if [[ -f "${AGENT_UNIT_DST}" && -x "/var/lib/hal0/venvs/hermes/bin/hermes" && "${_hermes_stop_signal}" -ne 1 ]]; then
         # Non-fatal: a hermes start hiccup must NOT abort an otherwise-good
         # install (hal0-api + chat are already up). Under `set -e` a failed
         # `enable --now` (e.g. the unit tripped StartLimitBurst) would fire the
@@ -4644,7 +5529,45 @@ else
     elif [[ -f "${AGENT_UNIT_DST}" ]]; then
         # No venv after the provision block: it was skipped (HAL0_SKIP_HERMES=1)
         # or failed. The warnings above already explain; this is the summary line.
-        info "hal0-agent@hermes not enabled — provision with '${HAL0_BIN} agent install hermes'"
+        # (Not after a stop: the stop step above already said what it did.)
+        if [[ "${_hermes_stop_signal}" -ne 1 ]]; then
+            info "hal0-agent@hermes not enabled — provision with '${HAL0_BIN} agent install hermes'"
+        fi
+    fi
+
+    # The lift is complete once the block above has run (agent enabled and
+    # started, a gateway the record named enabled again): the record goes. The
+    # record is root's, in a root-only folder; `rm -f` on a link removes the link.
+    # The record goes only when everything it names is back: a gateway it names
+    # that does not read enabled now (the install or the enable failed) stays
+    # named, alone, so the next run still enables it instead of reading it as
+    # the person's own off switch. A gateway-only record is not a stop: the
+    # next run lifts again (facts.sh hal0_hermes_stop_in_force).
+    if [[ "${_hermes_lift:-0}" -eq 1 && -f "${AGENT_UNIT_DST}" && -x "/var/lib/hal0/venvs/hermes/bin/hermes" ]]; then
+        _hermes_rec_keep=""
+        if [[ "${_hermes_rec}" == "ok" && "${_hermes_rec_gateway}" -eq 1 ]]; then
+            case "$(unit_enable_state hermes-gateway.service)" in
+                enabled* | masked*) ;;
+                *)
+                    _hermes_rec_keep="gateway"
+                    [[ "${_hermes_rec_gateway_runtime}" -eq 1 ]] && _hermes_rec_keep="gateway-runtime"
+                    ;;
+            esac
+        fi
+        if [[ -n "${_hermes_rec_keep}" ]]; then
+            if nofollow dir --create --owner root:root --mode 0755 --expect root "${_hermes_record%/*}" \
+                && printf '%s\n' "${_hermes_rec_keep}" \
+                    | nofollow write --owner root:root --mode 0644 --require-trusted-dir "${_hermes_record}"; then
+                warn "the assistant (Hermes) was turned on again, but its gateway is not enabled yet: ${_hermes_record} keeps the gateway; the next run enables it again (or run 'systemctl enable --now hermes-gateway')"
+            else
+                warn "could not rewrite ${_hermes_record} — the gateway is not enabled; run 'systemctl enable --now hermes-gateway' by hand"
+            fi
+        elif rm -f "${_hermes_record}"; then
+            info "the assistant (Hermes) was turned on again: the stop from the setup screens is lifted"
+        else
+            warn "could not remove ${_hermes_record} — the assistant is running; remove the file by hand so a later run does not hold it stopped"
+        fi
+        unset _hermes_rec_keep
     fi
 
     # ── Optional: pi coding agent (cli-kind bundled agent; spec 2026-08-31) ──
@@ -4793,6 +5716,9 @@ fi
 if [[ "${IS_UPGRADE}" -eq 0 ]]; then
     _summary_skipped=()
     for _summary_cid in openwebui comfyui hermes pi hindsight brain; do
+        # `stopped` (an installed assistant the screens turned off) and
+        # `stop-failed` (the stop did not work: it may still be running) are
+        # not "skipped": the step already said so, and neither is listed here.
         if [[ "${COMPONENT_STATES[${_summary_cid}]:-}" == "skipped" ]]; then
             case "${_summary_cid}" in
                 openwebui) _summary_clabel="Open WebUI" ;;
@@ -4851,8 +5777,16 @@ ui_box "hal0 is ready" "${SUMMARY_LINES[@]}"
 # PREVIOUS step when the next one starts, so "Service start" needs this
 # explicit finalize) and report the total wall-clock time.
 ui_step_finalize
+# ── install-in-progress marker: remove ──────────────────────────────────────
+# Every step has finished; the install is complete.
+# The hal0 account owns ${VAR_DIR} and may have swapped the marker for a
+# directory: a failed removal is a warning, never a failed install.
+rm -f -- "${INSTALL_MARKER}" 2>/dev/null \
+    || warn "could not remove ${INSTALL_MARKER}; a re-run may report this finished install as unfinished"
 info "Total install time: $((SECONDS / 60))m $((SECONDS % 60))s"
 [[ -n "${HAL0_INSTALL_LOG:-}" ]] && info "Install log: ${HAL0_INSTALL_LOG}"
+# Keep the applied answers document (no token, no terminal grant); never fails the install.
+hal0_save_answers
 
 # ── --summary-json ───────────────────────────────────────────────────────────
 # Versioned, machine-readable install summary (docs/getting-started/install.mdx).
@@ -4947,7 +5881,8 @@ for entry in blob.split("\x1e"):
         except ValueError:
             pass
 
-# Component choices: id -> selected | skipped | unavailable:<reason>, same
+# Component choices: id -> selected | skipped | stopped | stop-failed |
+# unavailable:<reason> (the state string passes through as it is), same
 # RS-joined blob (HAL0_COMPONENTS_BLOB). Additive to v1; {} when absent.
 components = {}
 for entry in os.environ.get("HAL0_COMPONENTS_BLOB", "").split("\x1e"):

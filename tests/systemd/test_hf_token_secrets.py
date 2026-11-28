@@ -93,7 +93,7 @@ class TestGather:
 
     def test_the_prompt_is_tty_only(self, gather_block: str) -> None:
         """A headless install must take the env value without ever asking."""
-        assert "if _interactive; then" in gather_block
+        assert "&& _interactive; then" in gather_block
 
     def test_the_prompt_is_silent(self, gather_block: str) -> None:
         """A secret typed at a prompt must never be echoed into the transcript

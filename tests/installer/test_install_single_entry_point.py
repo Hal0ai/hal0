@@ -182,7 +182,10 @@ def test_operator_prompts_are_gated_on_an_interactive_stdin(install_sh_text: str
 
     # Every operator prompt must sit behind that gate. _tty_read is the only
     # prompting helper; its call sites must all be inside `if _interactive`.
-    gate_line = _line_of(install_sh_text, "if _interactive; then")
+    # The gate also skips itself once an answers document has been applied.
+    gate_line = _line_of(
+        install_sh_text, '"${HAL0_ANSWERS_APPLIED:-0}" != "1" ]] && _interactive; then'
+    )
     lines = install_sh_text.splitlines()
     call_sites = [i for i, line in enumerate(lines, start=1) if re.match(r"\s+_tty_read ", line)]
     assert call_sites, "no _tty_read call sites found — did the prompts move?"

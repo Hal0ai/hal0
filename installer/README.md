@@ -220,8 +220,11 @@ sudo bash installer/install.sh --summary-json=/tmp/hal0-install-summary.json
 ```
 
 `components` maps each component id (`openwebui`, `comfyui`, `hermes`, `pi`,
-`hindsight`, `brain`) to `"selected"`, `"skipped"` or `"unavailable:<reason>"`;
-the example shows three of the six. `selected` records the operator's choice
+`hindsight`, `brain`) to `"selected"`, `"skipped"`, `"stopped"`, `"stop-failed"`
+or `"unavailable:<reason>"`; the example shows three of the six. `stopped`
+(Hermes only) means the assistant was stopped from the setup screens and stays
+stopped; `stop-failed` means that stop did not finish and a unit may still be
+running (the installer's warning names it). `selected` records the operator's choice
 at install time, not the outcome: a later step may still skip or fail (see
 `warnings`). `skipped` means opted out by flag, env or checklist, or, for
 Pi, not opted in: a default headless install skips Pi with no opt-out to pass

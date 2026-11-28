@@ -98,6 +98,18 @@ def test_default_run_does_not_run_or_remove_the_companion(tmp_path: Path) -> Non
     assert "uninstall companion" not in proc.stdout + proc.stderr
 
 
+def test_default_run_removes_the_installers_stopped_by_setup_record_only(tmp_path: Path) -> None:
+    """The record is about the units the uninstall removes; the rest of agents/ stays."""
+    files = _tree(tmp_path)
+    record = files["policy"].parent / "hermes-stopped-by-setup"
+    record.write_text("agent\ngateway\n")
+    proc = _run(tmp_path)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert not record.exists()
+    for name in _STATE:
+        assert files[name].read_text() == "operator data\n", name
+
+
 def test_purge_runs_the_companion_with_its_directory_intact_then_removes_all(
     tmp_path: Path,
 ) -> None:
