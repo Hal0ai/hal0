@@ -127,3 +127,9 @@ and session handling as `major` by default.
 * Run the docs-vs-served name diff against the docs under /usr/lib/hal0/current/docs on the box (the release-tag copy), not only the worktree.
 * `slot_by_id` takes arg `slot_id`, not `id`; a call with `id` is a false missing_arg.
 * Session teardown with the GET SSE stream open logs a ClosedResourceError traceback: known #3654, record only.
+
+## Added in kit 22
+
+* On gated tools also send a wrong-typed non-path arg (slot_logs lines=abc), separately from the path-arg case.
+* Report the memory server's flat-vs-wrapped argument acceptance as its own row.
+* memory_operation_cancel text says it aborts in-flight work; that is false for a processing single-doc retain (#4051). Cite it, do not refile.

@@ -129,14 +129,14 @@ def _exec_line(unit_text: str) -> str:
 
 def _moe_profile() -> ProfileConfig:
     return ProfileConfig(
-        flags="-fa on -ctk q8_0 -ctv q8_0 -b 512 -ub 512 --parallel 1 --no-mmap",
+        flags="-fa on -ctk q8_0 -ctv q8_0 -b 512 -ub 512 --parallel 1 -lm none",
         speculation="off",
     )
 
 
 def _mtp_profile() -> ProfileConfig:
     return ProfileConfig(
-        flags="-fa on -ctk q8_0 -ctv q8_0 -b 512 -ub 512 --parallel 1 --no-mmap",
+        flags="-fa on -ctk q8_0 -ctv q8_0 -b 512 -ub 512 --parallel 1 -lm none",
         speculation="auto",
     )
 
@@ -550,7 +550,7 @@ class TestRenderUnit:
         unit = _render_llama("test-slot", _TEST_IMAGE, 8095, "/mnt/ai-models/model.gguf", flags)
         exec_line = _exec_line(unit)
         assert "-fa" in exec_line
-        assert "--no-mmap" in exec_line
+        assert "-lm none" in exec_line
         assert "-ctk" in exec_line
 
     def test_mtp_flags_in_exec_when_mtp_true(self) -> None:

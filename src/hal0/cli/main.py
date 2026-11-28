@@ -138,7 +138,16 @@ app.command("ports")(ports_cmd)
 
 def _version_callback(value: bool) -> None:
     if value:
-        console.print(f"hal0 {hal0.__version__}")
+        # The first two words stay ``hal0 <package version>``: release tooling
+        # and the validation kit compare that with the API's ``version``. The
+        # package version is the same for a nightly and the stable release of
+        # that number, so the installed release is appended when it says more
+        # (#3969). Imported here so no other command pays for it.
+        from hal0.updater.updater import installed_version
+
+        release = installed_version()
+        suffix = f" (release {release})" if release != hal0.__version__ else ""
+        console.print(f"hal0 {hal0.__version__}{suffix}", soft_wrap=True)
         raise typer.Exit()
 
 

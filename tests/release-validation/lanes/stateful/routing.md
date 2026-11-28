@@ -174,3 +174,12 @@ Brain and embed loaded and healthy. Any model you caused to auto-load, unload ag
 * Use the qwen3.5-0.8b staged by slots as the fast workhorse and for json_object; load it on coder in the first minute.
 * In check 2 print `tail -c 300` of the SSE body so the [DONE] terminator is asserted, not the head.
 * embeddings/rerank echoing the client's `model` string (legacy_slot path) is known #2663.
+
+## Added in kit 22
+
+* Check 25: probe both `model=<custom capability slot>` (must be 409 capability_mismatch) and `hal0/<custom capability slot>` (anchor fallback, known `chat-hal0-prefix-non-llm-slot-anchor-fallback`; the #3807 gate is NOT keyed on role names). Assert the response `model` shows the anchor's real id.
+* Check 19: /v1/rerank naming the registered embed id returns a typed 409; update any 'raw 501' expectation.
+* Check 15 (omitted model, bound-but-offline agent) still 404s in 0.02 s on 1.8.1 (#2666 open); the older note that it wakes is stale.
+* Check 29: #2665 fails even with both sibling slots idle (model=agent -> coder 3/3); the 'idle passes' premise is stale.
+* `hal0 slot delete` in automation always takes `-f`; without it the command blocks on a y/N prompt with no tty.
+* After `hal0 slot load <slot> -m <model>` record whether the slot TOML now carries the [model] binding (it persists) and lost its comments (known).

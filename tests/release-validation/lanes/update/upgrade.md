@@ -130,6 +130,10 @@ the fact otherwise:
    and that `slot.unconverted` and `*_migration_failed` are absent from the hal0-api journal. If
    pending components print no `hal0 update component <id>` line, that is
    `update-components-pending-no-guidance`.
+   A row with status `broken` (#4065: nothing installed while the component's unit is enabled)
+   also makes `hal0 update status` exit 2. That is a finding about the box, not about the update:
+   record it and the row's remedy. A broken row prints its own reinstall remedy and, by design, no
+   `hal0 update component <id>` line, so it is not `update-components-pending-no-guidance`.
 10. **Rollback timing and TOML diffs.** `time hal0 update --rollback --yes` and compare the CLI exit
    code with `updater.rollback_ok` in the journal (re-pip takes ~15 s against the CLI's 10 s cap:
    `update-rollback-cli-timeout`, #2661); never run it twice (the real rollback on this 32-core box takes ~8 s, under the old 10 s cap, so only a stub that sleeps 13 s and answers `HEAD /api/status` plus `POST /api/updates/rollback` discriminates #2661: that belongs in a unit test; the live run only proves the restart panel prints). Diff `/etc/hal0/slots/*.toml`
@@ -152,7 +156,7 @@ the fact otherwise:
 18. **Attribute concurrent clients first.** Before timing anything on ct150 list who else is using it: `ss -tn | grep :8080`, the hermes pid, whether the agent slot is serving. Record `uptime` load average and agent-slot state before every restart or downtime measurement (agent traffic pushed load to 190 and distorted a 69 s startup).
 
 
-20. **Roll-forward waits for the API.** Poll `/api/health` for 200 before `hal0 update --yes` after a restart (an immediate attempt exited 1 while the API was starting), and after `--yes` returns 0 keep polling: the CLI exits 0 with `update applied` while hal0-api can be down up to ~100 s when the stop hangs (#2727). Record the outage length.
+20. **Roll-forward waits for the API.** Poll `/api/health` for 200 before `hal0 update --yes` after a restart (an immediate attempt exited 1 while the API was starting), and after `--yes` returns 0 (or 2 with a `broken` component row, which is a finding about the box as in step 9, not a failed update) keep polling: the CLI exits 0 with `update applied` while hal0-api can be down up to ~100 s when the stop hangs (#2727). Record the outage length.
 
 21. **Make #2727 a numeric assertion.** On a nightly that contains the #2746 fix, three `systemctl restart hal0-api` with a streaming request in flight to a serving slot must each stop in < 30 s with no `stop-sigterm timed out` (the new tree took 20.3-20.5 s x3). The update's own restart runs the OLD process and still hangs, so take the proof from the SECOND restart onward. An in-flight stream gets a bare HTTP 500 ('Cancel N running task(s), timeout graceful shutdown exceeded') on every restart: note it, cosmetic.
 

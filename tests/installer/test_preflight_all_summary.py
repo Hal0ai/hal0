@@ -11,6 +11,7 @@ suites) rather than stubbing ui.sh away, since the counter IS the fix.
 
 from __future__ import annotations
 
+import shlex
 import subprocess
 from pathlib import Path
 
@@ -46,8 +47,8 @@ def _run(overrides: str) -> subprocess.CompletedProcess[str]:
     stub_all_clean = "\n".join(f"{name}() {{ return 0; }}" for name in _ALL_CHECKS)
     script = (
         "set -uo pipefail\n"
-        f"source {_UI!s}\n"
-        f"source {_PREFLIGHT!s}\n"
+        f"source {shlex.quote(str(_UI))}\n"
+        f"source {shlex.quote(str(_PREFLIGHT))}\n"
         f"{stub_all_clean}\n"
         f"{overrides}\n"
         "preflight_all; rc=$?\n"

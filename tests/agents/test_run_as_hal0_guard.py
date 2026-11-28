@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import os
 import pwd
+import shlex
 import subprocess
 from pathlib import Path
 
@@ -51,7 +52,7 @@ def _run_guard(
         full_env["PATH"] = f"{extra_path}{os.pathsep}{full_env['PATH']}"
     if env:
         full_env.update(env)
-    body = f". {_GUARD}\n{script}\n"
+    body = f". {shlex.quote(str(_GUARD))}\n{script}\n"
     return subprocess.run(
         ["/bin/sh", "-c", body],
         capture_output=True,
@@ -167,7 +168,7 @@ def test_root_without_any_dropper_refuses(tmp_path: Path) -> None:
     _write_stub(tmp_path, "id", "echo 0")  # `id <user>` -> exists (exit 0)
     _write_stub(tmp_path, "getent", 'echo "x:x:0:0:x:/nonexistent:/bin/sh"')
     res = subprocess.run(
-        ["/bin/sh", "-c", f". {_GUARD}\nhal0_ensure_runas hal0 echo X\n"],
+        ["/bin/sh", "-c", f". {shlex.quote(str(_GUARD))}\nhal0_ensure_runas hal0 echo X\n"],
         capture_output=True,
         text=True,
         env={"PATH": str(tmp_path), "HAL0_RUNAS_TEST_UID": "0"},

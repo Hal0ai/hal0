@@ -15,6 +15,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import shutil
 import sys
 import tarfile
@@ -157,6 +158,13 @@ def _write_release_manifest(
     return payload
 
 
+# A "#!" line cannot name an interpreter whose path has a space in it: the kernel
+# splits the line there. So a Python stub starts under /bin/sh and re-executes
+# itself. To the shell the three lines after "#!/bin/sh" are a no-op and an exec;
+# to Python they are one string it throws away.
+_PYTHON_STUB_HEAD = f"#!/bin/sh\n''':'\nexec {shlex.quote(sys.executable)} \"$0\" \"$@\"\n'''\n"
+
+
 def _install_fake_cosign(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, reject: bool = False
 ) -> Path:
@@ -171,7 +179,7 @@ def _install_fake_cosign(
     log_path = tmp_path / "fake-cosign-invocations.jsonl"
     fake = fake_bin / "cosign"
     fake.write_text(
-        f"#!{sys.executable}\n"
+        _PYTHON_STUB_HEAD
         + """import hashlib
 import json
 import os

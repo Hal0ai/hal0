@@ -141,8 +141,16 @@ backend selection degrades to CPU rather than refusing to run.
 `hal0-api` binds `0.0.0.0:8080` and, until you configure an admin key,
 treats every request as authenticated by network reachability — the right
 posture for a trusted LAN appliance. hal0's own auth is opt-in (see
-[Authentication](/docs/operate/auth/)). If hal0 is reachable from anywhere you
-do not control, front it with a reverse proxy that owns TLS.
+[Authentication](/docs/operate/auth/)). Browser requests are checked either
+way: from a web origin hal0 does not recognise, a state-changing request
+answers `403 auth.origin_forbidden`, and a WebSocket upgrade is refused before
+it opens (close code 4403, no JSON body). If you open the
+dashboard through a name other than its IP address, `<hostname>.local` or the
+host name the installer recorded, allow that name once with
+`hal0 network public-url set <url>` or `hal0 network origins add <origin>`
+(see [Allow the public URL](/docs/operate/tls-and-listeners/)). If hal0 is
+reachable from anywhere you do not control, front it with a reverse proxy that
+owns TLS.
 </Aside>
 
 ## Sections

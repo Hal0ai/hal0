@@ -1,0 +1,719 @@
+{
+ "apply_classes": [
+  "immediate",
+  "service-restart",
+  "manual-restart"
+ ],
+ "registry": {
+  "activity.enabled": {
+   "apply_class": "service-restart",
+   "services": [
+    "hal0-api"
+   ]
+  },
+  "activity.max_rows": {
+   "apply_class": "service-restart",
+   "services": [
+    "hal0-api"
+   ]
+  },
+  "activity.retention_days": {
+   "apply_class": "service-restart",
+   "services": [
+    "hal0-api"
+   ]
+  },
+  "brain_chat.completion_timeout_s": {
+   "apply_class": "immediate",
+   "services": []
+  },
+  "brain_chat.enabled": {
+   "apply_class": "immediate",
+   "services": []
+  },
+  "brain_chat.max_rounds": {
+   "apply_class": "immediate",
+   "services": []
+  },
+  "brain_chat.model": {
+   "apply_class": "immediate",
+   "services": []
+  },
+  "brain_chat.read_only": {
+   "apply_class": "immediate",
+   "services": []
+  },
+  "brain_chat.tool_model": {
+   "apply_class": "immediate",
+   "services": []
+  },
+  "bridge.clarify_timeout_s": {
+   "apply_class": "immediate",
+   "services": []
+  },
+  "bridge.enabled": {
+   "apply_class": "service-restart",
+   "services": [
+    "hal0-api"
+   ]
+  },
+  "bridge.max_concurrent_runs_per_client": {
+   "apply_class": "immediate",
+   "services": []
+  },
+  "bridge.run_retention_days": {
+   "apply_class": "immediate",
+   "services": []
+  },
+  "dispatcher.admission_wait_timeout_s": {
+   "apply_class": "service-restart",
+   "services": [
+    "hal0-api"
+   ]
+  },
+  "dispatcher.direct_read_timeout_s": {
+   "apply_class": "service-restart",
+   "services": [
+    "hal0-api"
+   ]
+  },
+  "dispatcher.prefetch_parallel_cap": {
+   "apply_class": "service-restart",
+   "services": [
+    "hal0-api"
+   ]
+  },
+  "dispatcher.prefetch_timeout_s": {
+   "apply_class": "service-restart",
+   "services": [
+    "hal0-api"
+   ]
+  },
+  "dispatcher.stream_idle_timeout_s": {
+   "apply_class": "service-restart",
+   "services": [
+    "hal0-api"
+   ]
+  },
+  "dispatcher.stream_total_timeout_s": {
+   "apply_class": "service-restart",
+   "services": [
+    "hal0-api"
+   ]
+  },
+  "memory.bank": {
+   "apply_class": "service-restart",
+   "services": [
+    "hal0-api"
+   ]
+  },
+  "memory.compat.gitlog_min_interval_s": {
+   "apply_class": "immediate",
+   "services": []
+  },
+  "memory.compat.max_concurrent_recalls": {
+   "apply_class": "immediate",
+   "services": []
+  },
+  "memory.compat.max_concurrent_reflects": {
+   "apply_class": "immediate",
+   "services": []
+  },
+  "memory.compat.max_item_bytes": {
+   "apply_class": "immediate",
+   "services": []
+  },
+  "memory.compat.max_outstanding_bytes": {
+   "apply_class": "immediate",
+   "services": []
+  },
+  "memory.compat.max_outstanding_operations": {
+   "apply_class": "immediate",
+   "services": []
+  },
+  "memory.compat.shared_document_prefixes": {
+   "apply_class": "immediate",
+   "services": []
+  },
+  "memory.console.bind": {
+   "apply_class": "immediate",
+   "services": []
+  },
+  "memory.console.enabled": {
+   "apply_class": "immediate",
+   "services": []
+  },
+  "memory.console.port": {
+   "apply_class": "immediate",
+   "services": []
+  },
+  "memory.decision.base_url": {
+   "apply_class": "immediate",
+   "services": []
+  },
+  "memory.decision.enabled": {
+   "apply_class": "immediate",
+   "services": []
+  },
+  "memory.decision.max_concurrent": {
+   "apply_class": "immediate",
+   "services": []
+  },
+  "memory.decision.max_request_tokens": {
+   "apply_class": "immediate",
+   "services": []
+  },
+  "memory.decision.model": {
+   "apply_class": "immediate",
+   "services": []
+  },
+  "memory.decision.port": {
+   "apply_class": "immediate",
+   "services": []
+  },
+  "memory.decision.provider": {
+   "apply_class": "immediate",
+   "services": []
+  },
+  "memory.decision.threads": {
+   "apply_class": "immediate",
+   "services": []
+  },
+  "memory.decision.timeout_s": {
+   "apply_class": "immediate",
+   "services": []
+  },
+  "memory.embedding.rerank_connect_timeout_s": {
+   "apply_class": "service-restart",
+   "services": [
+    "hal0-api"
+   ]
+  },
+  "memory.embedding.rerank_fallback": {
+   "apply_class": "service-restart",
+   "services": [
+    "hal0-api"
+   ]
+  },
+  "memory.embedding.rerank_gateway_url": {
+   "apply_class": "service-restart",
+   "services": [
+    "hal0-api"
+   ]
+  },
+  "memory.embedding.rerank_model": {
+   "apply_class": "service-restart",
+   "services": [
+    "hal0-api"
+   ]
+  },
+  "memory.embedding.rerank_read_timeout_s": {
+   "apply_class": "service-restart",
+   "services": [
+    "hal0-api"
+   ]
+  },
+  "memory.enabled": {
+   "apply_class": "service-restart",
+   "services": [
+    "hal0-api"
+   ]
+  },
+  "memory.engine": {
+   "apply_class": "service-restart",
+   "services": [
+    "hal0-api"
+   ]
+  },
+  "memory.graph.consolidation_reserved_slots": {
+   "apply_class": "immediate",
+   "services": []
+  },
+  "memory.graph.enabled": {
+   "apply_class": "immediate",
+   "services": []
+  },
+  "memory.graph.extraction_llm_retries": {
+   "apply_class": "immediate",
+   "services": []
+  },
+  "memory.graph.extraction_max_concurrent": {
+   "apply_class": "immediate",
+   "services": []
+  },
+  "memory.graph.extraction_max_tokens": {
+   "apply_class": "immediate",
+   "services": []
+  },
+  "memory.graph.extraction_model": {
+   "apply_class": "immediate",
+   "services": []
+  },
+  "memory.graph.extraction_retry_backoff_s": {
+   "apply_class": "immediate",
+   "services": []
+  },
+  "memory.graph.extraction_slot": {
+   "apply_class": "immediate",
+   "services": []
+  },
+  "memory.graph.extraction_task_retries": {
+   "apply_class": "immediate",
+   "services": []
+  },
+  "memory.graph.extraction_worker_slots": {
+   "apply_class": "immediate",
+   "services": []
+  },
+  "memory.graph.llm_timeout_s": {
+   "apply_class": "immediate",
+   "services": []
+  },
+  "memory.graph.refresh_reserved_slots": {
+   "apply_class": "immediate",
+   "services": []
+  },
+  "memory.graph.retain_reserved_slots": {
+   "apply_class": "immediate",
+   "services": []
+  },
+  "memory.lanes.consolidation.batch_size": {
+   "apply_class": "immediate",
+   "services": []
+  },
+  "memory.lanes.consolidation.max_completion_tokens": {
+   "apply_class": "immediate",
+   "services": []
+  },
+  "memory.lanes.consolidation.max_concurrent": {
+   "apply_class": "immediate",
+   "services": []
+  },
+  "memory.lanes.consolidation.reasoning_effort": {
+   "apply_class": "manual-restart",
+   "services": []
+  },
+  "memory.lanes.consolidation.strict_schema": {
+   "apply_class": "immediate",
+   "services": []
+  },
+  "memory.lanes.consolidation.timeout_s": {
+   "apply_class": "immediate",
+   "services": []
+  },
+  "memory.lanes.consolidation.virtual_model": {
+   "apply_class": "immediate",
+   "services": []
+  },
+  "memory.lanes.llm_max_concurrent": {
+   "apply_class": "immediate",
+   "services": []
+  },
+  "memory.lanes.mental_model_refresh.max_completion_tokens": {
+   "apply_class": "manual-restart",
+   "services": []
+  },
+  "memory.lanes.mental_model_refresh.max_concurrent": {
+   "apply_class": "manual-restart",
+   "services": []
+  },
+  "memory.lanes.mental_model_refresh.reasoning_effort": {
+   "apply_class": "manual-restart",
+   "services": []
+  },
+  "memory.lanes.mental_model_refresh.strict_schema": {
+   "apply_class": "manual-restart",
+   "services": []
+  },
+  "memory.lanes.mental_model_refresh.timeout_s": {
+   "apply_class": "manual-restart",
+   "services": []
+  },
+  "memory.lanes.mental_model_refresh.virtual_model": {
+   "apply_class": "manual-restart",
+   "services": []
+  },
+  "memory.lanes.reasoning_effort": {
+   "apply_class": "immediate",
+   "services": []
+  },
+  "memory.lanes.reflect.max_completion_tokens": {
+   "apply_class": "immediate",
+   "services": []
+  },
+  "memory.lanes.reflect.max_concurrent": {
+   "apply_class": "immediate",
+   "services": []
+  },
+  "memory.lanes.reflect.reasoning_effort": {
+   "apply_class": "immediate",
+   "services": []
+  },
+  "memory.lanes.reflect.strict_schema": {
+   "apply_class": "immediate",
+   "services": []
+  },
+  "memory.lanes.reflect.timeout_s": {
+   "apply_class": "immediate",
+   "services": []
+  },
+  "memory.lanes.reflect.virtual_model": {
+   "apply_class": "immediate",
+   "services": []
+  },
+  "memory.lanes.reflect.wall_timeout_s": {
+   "apply_class": "immediate",
+   "services": []
+  },
+  "memory.lanes.retain.max_completion_tokens": {
+   "apply_class": "immediate",
+   "services": []
+  },
+  "memory.lanes.retain.max_concurrent": {
+   "apply_class": "immediate",
+   "services": []
+  },
+  "memory.lanes.retain.reasoning_effort": {
+   "apply_class": "immediate",
+   "services": []
+  },
+  "memory.lanes.retain.strict_schema": {
+   "apply_class": "immediate",
+   "services": []
+  },
+  "memory.lanes.retain.timeout_s": {
+   "apply_class": "immediate",
+   "services": []
+  },
+  "memory.lanes.retain.virtual_model": {
+   "apply_class": "immediate",
+   "services": []
+  },
+  "memory.lanes.strict_schema": {
+   "apply_class": "immediate",
+   "services": []
+  },
+  "memory.lanes.timeout_s": {
+   "apply_class": "immediate",
+   "services": []
+  },
+  "memory.models.embeddings_model": {
+   "apply_class": "manual-restart",
+   "note": "saved; takes effect only through an embedder switch",
+   "services": []
+  },
+  "memory.models.embeddings_provider": {
+   "apply_class": "manual-restart",
+   "note": "saved; takes effect only through an embedder switch",
+   "services": []
+  },
+  "memory.models.reranker_api_model": {
+   "apply_class": "immediate",
+   "services": []
+  },
+  "memory.models.reranker_base_url": {
+   "apply_class": "immediate",
+   "services": []
+  },
+  "memory.models.reranker_bucket_batching": {
+   "apply_class": "immediate",
+   "services": []
+  },
+  "memory.models.reranker_local_batch_size": {
+   "apply_class": "immediate",
+   "services": []
+  },
+  "memory.models.reranker_local_max_concurrent": {
+   "apply_class": "immediate",
+   "services": []
+  },
+  "memory.models.reranker_local_timeout_s": {
+   "apply_class": "immediate",
+   "services": []
+  },
+  "memory.models.reranker_max_candidates": {
+   "apply_class": "immediate",
+   "services": []
+  },
+  "memory.models.reranker_max_candidates_high": {
+   "apply_class": "immediate",
+   "services": []
+  },
+  "memory.models.reranker_max_candidates_low": {
+   "apply_class": "immediate",
+   "services": []
+  },
+  "memory.models.reranker_max_candidates_mid": {
+   "apply_class": "immediate",
+   "services": []
+  },
+  "memory.models.reranker_model": {
+   "apply_class": "immediate",
+   "services": []
+  },
+  "memory.models.reranker_provider": {
+   "apply_class": "immediate",
+   "services": []
+  },
+  "memory.models.reranker_timeout_s": {
+   "apply_class": "immediate",
+   "services": []
+  },
+  "memory.priority.enabled": {
+   "apply_class": "immediate",
+   "services": []
+  },
+  "memory.priority.max_defer_s": {
+   "apply_class": "immediate",
+   "services": []
+  },
+  "memory.priority.quiet_gap_s": {
+   "apply_class": "immediate",
+   "services": []
+  },
+  "memory.private_bank": {
+   "apply_class": "service-restart",
+   "services": [
+    "hal0-api"
+   ]
+  },
+  "memory.projects.aliases": {
+   "apply_class": "service-restart",
+   "services": [
+    "hal0-api"
+   ]
+  },
+  "memory.projects.deny": {
+   "apply_class": "service-restart",
+   "services": [
+    "hal0-api"
+   ]
+  },
+  "memory.projects.registered": {
+   "apply_class": "service-restart",
+   "services": [
+    "hal0-api"
+   ]
+  },
+  "memory.public_url": {
+   "apply_class": "immediate",
+   "services": []
+  },
+  "memory.refresh.consolidation": {
+   "apply_class": "immediate",
+   "services": []
+  },
+  "memory.refresh.consolidation_schedule": {
+   "apply_class": "immediate",
+   "services": []
+  },
+  "memory.refresh.min_interval_s": {
+   "apply_class": "immediate",
+   "services": []
+  },
+  "memory.refresh.pages": {
+   "apply_class": "immediate",
+   "services": []
+  },
+  "memory.refresh.schedule": {
+   "apply_class": "immediate",
+   "services": []
+  },
+  "meta.schema_version": {
+   "apply_class": "manual-restart",
+   "services": []
+  },
+  "models.auto_scan_on_start": {
+   "apply_class": "immediate",
+   "services": []
+  },
+  "models.file_extensions": {
+   "apply_class": "service-restart",
+   "services": [
+    "hal0-api"
+   ]
+  },
+  "models.flm_store": {
+   "apply_class": "service-restart",
+   "services": [
+    "slots"
+   ]
+  },
+  "models.pull_root": {
+   "apply_class": "service-restart",
+   "services": [
+    "slots"
+   ]
+  },
+  "models.roots": {
+   "apply_class": "service-restart",
+   "services": [
+    "hal0-api"
+   ]
+  },
+  "models.store": {
+   "apply_class": "service-restart",
+   "services": [
+    "slots"
+   ]
+  },
+  "network.comfyui_listen": {
+   "apply_class": "service-restart",
+   "services": [
+    "slots"
+   ]
+  },
+  "network.extra_origins": {
+   "apply_class": "immediate",
+   "services": []
+  },
+  "network.public_url": {
+   "apply_class": "immediate",
+   "services": []
+  },
+  "openwebui.hermes_session_from_chat_id": {
+   "apply_class": "immediate",
+   "services": []
+  },
+  "realtime.approval_wait_s": {
+   "apply_class": "immediate",
+   "services": []
+  },
+  "realtime.default_model": {
+   "apply_class": "immediate",
+   "services": []
+  },
+  "realtime.enabled": {
+   "apply_class": "immediate",
+   "services": []
+  },
+  "realtime.frame_ms": {
+   "apply_class": "immediate",
+   "services": []
+  },
+  "realtime.max_buffer_seconds": {
+   "apply_class": "immediate",
+   "services": []
+  },
+  "realtime.sample_rate": {
+   "apply_class": "immediate",
+   "services": []
+  },
+  "realtime.stt_model": {
+   "apply_class": "immediate",
+   "services": []
+  },
+  "realtime.tts_model": {
+   "apply_class": "immediate",
+   "services": []
+  },
+  "realtime.tts_voice": {
+   "apply_class": "immediate",
+   "services": []
+  },
+  "realtime.vad_energy_threshold": {
+   "apply_class": "immediate",
+   "services": []
+  },
+  "realtime.vad_min_speech_ms": {
+   "apply_class": "immediate",
+   "services": []
+  },
+  "realtime.vad_silence_ms": {
+   "apply_class": "immediate",
+   "services": []
+  },
+  "realtime.vad_window_ms": {
+   "apply_class": "immediate",
+   "services": []
+  },
+  "security.require_auth": {
+   "apply_class": "immediate",
+   "services": []
+  },
+  "security.trust_forwarded_for": {
+   "apply_class": "immediate",
+   "services": []
+  },
+  "slots.default_images": {
+   "apply_class": "service-restart",
+   "services": [
+    "slots"
+   ]
+  },
+  "slots.evict_pressure_mb": {
+   "apply_class": "service-restart",
+   "services": [
+    "hal0-api"
+   ]
+  },
+  "slots.fabric_clock_guard": {
+   "apply_class": "service-restart",
+   "services": [
+    "hal0-api"
+   ]
+  },
+  "slots.idle_timeout_s": {
+   "apply_class": "service-restart",
+   "services": [
+    "hal0-api"
+   ]
+  },
+  "slots.max_slots": {
+   "apply_class": "immediate",
+   "services": []
+  },
+  "slots.network_mode": {
+   "apply_class": "service-restart",
+   "services": [
+    "slots"
+   ]
+  },
+  "slots.port_dnat_auto_repair": {
+   "apply_class": "service-restart",
+   "services": [
+    "hal0-api"
+   ]
+  },
+  "slots.port_range_end": {
+   "apply_class": "immediate",
+   "services": []
+  },
+  "slots.port_range_start": {
+   "apply_class": "immediate",
+   "services": []
+  },
+  "slots.preload_evict_enabled": {
+   "apply_class": "service-restart",
+   "services": [
+    "hal0-api"
+   ]
+  },
+  "slots.preload_evict_headroom_mb": {
+   "apply_class": "service-restart",
+   "services": [
+    "hal0-api"
+   ]
+  },
+  "slots.publish_host": {
+   "apply_class": "service-restart",
+   "services": [
+    "slots"
+   ]
+  },
+  "telemetry.channel": {
+   "apply_class": "immediate",
+   "services": []
+  },
+  "telemetry.enabled": {
+   "apply_class": "immediate",
+   "services": []
+  },
+  "updates.auto_restart_image_drift": {
+   "apply_class": "service-restart",
+   "services": [
+    "hal0-api"
+   ]
+  }
+ }
+}

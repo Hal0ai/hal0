@@ -18,7 +18,7 @@ const A = args || {}
 const VERSION = A.version
 const MODE = A.mode || 'file'                    // 'report' | 'file'
 const REPO = A.repo || process_cwd_placeholder() // see below
-const BOX_IDS = A.boxes && A.boxes.length ? A.boxes : ['ct151-cpu-fresh']
+const BOX_IDS = A.boxes && A.boxes.length ? A.boxes : ['ct151-fresh']
 const ARTIFACTS = A.artifacts || artifacts_placeholder()
 const ONLY = A.lanes && A.lanes.length ? A.lanes : null
 
@@ -40,10 +40,13 @@ const KIT = `${REPO}/tests/release-validation`
 const RUN = `${ARTIFACTS}/hal0-release-validation/${VERSION}`
 
 // Box id -> role. Mirrors tests/release-validation/boxes.example.toml (operator copy: boxes.toml, gitignored).
-// ct152-cpu-fresh was destroyed 2026-08-21 (kit v8) — there is no CPU-only fresh box left.
+// tests/release/test_rc_validate_kit_contract.py holds the two in step.
+// The fresh box is `ct151-cpu-fresh` in reports from runs before the rename (#4084, 2026-11-28).
+// It has had a render node since rc.6 and serves the Vulkan lane. No zero-GPU box is left:
+// ct152-cpu-fresh was destroyed 2026-08-21 (kit v8) and ct163-cpu-fresh on 2026-11-27, so
+// nothing in this fleet tests a CPU-only fresh install.
 const BOX_ROLES = {
-  'ct151-cpu-fresh': 'fresh',
-  'ct163-cpu-fresh': 'fresh-alt',
+  'ct151-fresh': 'fresh',
   'ct150-update': 'update',
   'ct105-prod': 'prod',
 }
@@ -199,17 +202,35 @@ Read these before doing anything, in this order:
 If ${KIT} does not exist at that path, stop and say so — do not guess a different path.
 `
 
+// A box id that is missing from BOX_ROLES resolves to no role, which used to make the whole
+// Sweep phase spawn zero agents in silence — triage then "succeeded" off the preflight
+// CONTEXT.md alone and the run looked complete. Abort instead, and before Preflight, so a
+// renamed or mistyped id costs no agent: an unknown box is a kit bug.
+const unroled = BOX_IDS.filter((b) => !BOX_ROLES[b])
+if (unroled.length) {
+  throw new Error(
+    `unknown box id(s): ${unroled.join(', ')} — add them to BOX_ROLES in this script AND to ` +
+    `tests/release-validation/boxes.toml. Known ids: ${Object.keys(BOX_ROLES).join(', ')}`,
+  )
+}
+
 // ── phase 0: preflight ───────────────────────────────────────────────────────
 phase('Preflight')
 
 const preflights = await parallel(BOX_IDS.map((boxId) => () => agent(`
-You are the PREFLIGHT agent for box ${boxId} (role: ${BOX_ROLES[boxId] || 'unknown'}).
+You are the PREFLIGHT agent for box ${boxId} (role: ${BOX_ROLES[boxId]}).
 
 VERSION UNDER TEST: ${VERSION}
 KIT: ${KIT}   RUN DIRECTORY: ${RUN}
 
 Read ${KIT}/boxes.toml for this box's access details, hardware, reset procedure, and gotchas,
 and ${KIT}/lanes/_shared.md for the reporting rules.
+
+boxes.toml is the operator's own untracked file. If it is missing, or has no
+[boxes.${boxId}] table, set ready=false with exactly that as the blocker and stop there. Do NOT
+take this box's facts from a table with a similar name or the same container id: a box id is
+renamed in this script and in the fleet file together, and a leftover table under an old id
+(the fresh box was [boxes.ct151-cpu-fresh] until #4084) means the file was not updated.
 
 Your job is to establish ground truth and gate the run. Do it read-only except for writing your
 own CONTEXT file.
@@ -257,21 +278,11 @@ log(`preflight ok on ${ok.map((p) => p.box).join(', ')} — version ${ok.map((p)
 // produce findings neither can reproduce.
 phase('Sweep')
 
-const freshBox = BOX_IDS.find((b) => BOX_ROLES[b] === 'fresh' || BOX_ROLES[b] === 'fresh-alt')
+const freshBox = BOX_IDS.find((b) => BOX_ROLES[b] === 'fresh')
 const updateBox = BOX_IDS.find((b) => BOX_ROLES[b] === 'update')
 
-// A box id that is missing from BOX_ROLES resolves to no role, which used to make the whole
-// Sweep phase spawn zero agents in silence — triage then "succeeded" off the preflight
-// CONTEXT.md alone and the run looked complete. Abort instead: an unknown box is a kit bug.
-const unroled = BOX_IDS.filter((b) => !BOX_ROLES[b])
-if (unroled.length) {
-  throw new Error(
-    `unknown box id(s): ${unroled.join(', ')} — add them to BOX_ROLES in this script AND to ` +
-    `tests/release-validation/boxes.toml. Known ids: ${Object.keys(BOX_ROLES).join(', ')}`,
-  )
-}
 if (!freshBox && !updateBox) {
-  throw new Error(`no box with role fresh/fresh-alt/update in ${BOX_IDS.join(', ')} — nothing to sweep`)
+  throw new Error(`no box with role fresh/update in ${BOX_IDS.join(', ')} — nothing to sweep`)
 }
 
 function laneAgent(kind, key, box, extra, opts) {
@@ -478,7 +489,7 @@ Then attack it:
     and the installed source on the box. rc.4 had four candidates die exactly here.
   - Is the evidence misread — a different slot, a stale cache, a reaped slot, a timeout that was
     really model slowness on CPU?
-  - Is it specific to this box's environment (CPU-only, unprivileged container, no /dev/dri)
+  - Is it specific to this box's environment (unprivileged container, no /dev/kfd, 16 GB)
     rather than a defect a normal install would hit?
   - Is it already covered by ${KIT}/known-issues.yaml under a different description?
 

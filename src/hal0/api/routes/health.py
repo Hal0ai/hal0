@@ -26,7 +26,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import Response
 
 from hal0 import __version__
-from hal0.build_info import build_sha
+from hal0.build_info import build_sha, serving_release
 from hal0.config import paths
 from hal0.slots.state import SlotState
 from hal0.upstreams.catalog import curated_model_ids
@@ -242,6 +242,7 @@ async def get_status(request: Request) -> dict[str, Any]:
     return {
         "name": "hal0",
         "version": __version__,
+        "release": serving_release(),
         # Short git SHA of the tree THIS PROCESS started from, or None on a
         # non-git FHS install (#1550/H7). `scripts/deploy.sh` polls this after
         # restarting hal0-api and fails loudly on a mismatch — a served
@@ -302,7 +303,15 @@ async def health() -> dict[str, Any]:
     Deep health (disk / slots / event bus) lives at ``/api/health/system``;
     the dashboard summary at ``/api/status``.
     """
-    return {"status": "ok", "name": "hal0", "version": __version__}
+    return {
+        "status": "ok",
+        "name": "hal0",
+        "version": __version__,
+        # The full release this process started from. ``version`` is the
+        # package version, which is the same for a nightly and the stable
+        # release of that number (#3969).
+        "release": serving_release(),
+    }
 
 
 @router.get("/health/system")

@@ -9,7 +9,17 @@ hypervisor = "192.0.2.10"      # Proxmox; `pct` runs here. SSH direct to the gue
 ssh_key = "~/.ssh/<your-key>"
 ssh_user = "root"
 
-[boxes.ct151-cpu-fresh]
+# FLEET COVERAGE. What this fleet cannot test; the report agent restates it under Coverage.
+# Keep it true when a box is added, changed or destroyed.
+#   - A CPU-only fresh install: no box is without a GPU. The fresh box has a render node and
+#     serves the Vulkan lane, so a finding there is not evidence about a zero-GPU install.
+#   - A fresh install on the ROCm lane: no box is both a fresh install and has /dev/kfd. The
+#     update and prod boxes have /dev/kfd but are upgraded installs.
+#   - A privileged or Ubuntu 24.04 fresh install: the one fresh box is unprivileged 26.04.
+# Box ids are stable names for report tables. Do not put hardware in an id: `ct151-fresh` was
+# `ct151-cpu-fresh` until 2026-11-28, long after the box stopped being CPU-only.
+
+[boxes.ct151-fresh]
 role = "fresh"
 ctid = 151
 hostname = "hal0-fresh-example"
@@ -66,24 +76,6 @@ No snapshot reset: its value is accumulated upgrade history, so record the exact
 in CONTEXT.md before upgrading.
 """
 
-[boxes.ct163-cpu-fresh]
-role = "fresh-alt"
-ctid = 163
-hostname = "hal0-fresh-alt-example"
-ip = "192.0.2.163"
-os = "ubuntu 24.04"
-privileged = true
-gpu = false
-cores = 8
-ram_gb = 16
-snapshot = "pristine"
-api = "http://192.0.2.163:8080"
-auth_required = false
-notes = """
-Second fresh-install box: privileged, older Ubuntu, no GPU device passthrough. Not in the
-default matrix — enable it when a finding smells privilege- or distro-specific.
-"""
-
 [boxes.ct105-prod]
 role = "prod"
 ctid = 105
@@ -94,7 +86,7 @@ api = "http://192.0.2.105:8080"
 auth_required = true
 notes = """
 PRODUCTION. READ-ONLY, always — no slot loads, no config writes, no service restarts. Its job
-in a validation run is to answer "is this finding an artifact of the CPU-only test box?" on
-real GPU hardware. Anonymous /api/* returns 401; run `hal0 ...` on the box instead of curl
+in a validation run is to answer "is this finding an artifact of the small test box?" on
+production-class hardware. Anonymous /api/* returns 401; run `hal0 ...` on the box instead of curl
 from the workstation. Not part of the default matrix; opt in per run.
 """

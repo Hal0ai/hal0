@@ -1,0 +1,236 @@
+{
+ "activity": {
+  "enabled": true,
+  "max_rows": 50000,
+  "retention_days": 30
+ },
+ "brain_chat": {
+  "completion_timeout_s": 300.0,
+  "enabled": true,
+  "max_rounds": 8,
+  "model": "",
+  "read_only": true,
+  "tool_model": "hal0/agent"
+ },
+ "bridge": {
+  "clarify_timeout_s": 900,
+  "enabled": true,
+  "max_concurrent_runs_per_client": 2,
+  "run_retention_days": 7
+ },
+ "dispatcher": {
+  "admission_wait_timeout_s": 1800.0,
+  "direct_read_timeout_s": 300.0,
+  "prefetch_parallel_cap": 4,
+  "prefetch_timeout_s": 8.0,
+  "stream_idle_timeout_s": 300.0,
+  "stream_total_timeout_s": 900.0
+ },
+ "memory": {
+  "bank": "hal0:shared",
+  "compat": {
+   "gitlog_min_interval_s": 86400,
+   "max_concurrent_recalls": 4,
+   "max_concurrent_reflects": 2,
+   "max_item_bytes": 16777216,
+   "max_outstanding_bytes": 268435456,
+   "max_outstanding_operations": 64,
+   "shared_document_prefixes": [
+    "git:",
+    "gitlog:",
+    "survey-baseline:"
+   ]
+  },
+  "console": {
+   "bind": "127.0.0.1",
+   "enabled": false,
+   "port": 9999
+  },
+  "decision": {
+   "base_url": null,
+   "enabled": true,
+   "max_concurrent": 4,
+   "max_request_tokens": 4096,
+   "model": "hs-decide-1-flash",
+   "port": 9178,
+   "provider": "off",
+   "threads": 8,
+   "timeout_s": 60
+  },
+  "embedding": {
+   "rerank_connect_timeout_s": 1.0,
+   "rerank_fallback": true,
+   "rerank_gateway_url": "http://127.0.0.1:8080",
+   "rerank_model": "",
+   "rerank_read_timeout_s": 8.0
+  },
+  "enabled": true,
+  "engine": "hindsight",
+  "graph": {
+   "consolidation_reserved_slots": 2,
+   "enabled": false,
+   "extraction_llm_retries": 1,
+   "extraction_max_concurrent": 1,
+   "extraction_max_tokens": 16384,
+   "extraction_model": null,
+   "extraction_retry_backoff_s": 120,
+   "extraction_slot": "memory",
+   "extraction_task_retries": 2,
+   "extraction_worker_slots": 4,
+   "llm_timeout_s": 300,
+   "refresh_reserved_slots": 0,
+   "retain_reserved_slots": 1
+  },
+  "lanes": {
+   "consolidation": {
+    "batch_size": null,
+    "max_completion_tokens": null,
+    "max_concurrent": null,
+    "reasoning_effort": null,
+    "strict_schema": null,
+    "timeout_s": null,
+    "virtual_model": null
+   },
+   "llm_max_concurrent": null,
+   "mental_model_refresh": {
+    "max_completion_tokens": null,
+    "max_concurrent": null,
+    "reasoning_effort": null,
+    "strict_schema": null,
+    "timeout_s": null,
+    "virtual_model": null
+   },
+   "reasoning_effort": "none",
+   "reflect": {
+    "max_completion_tokens": null,
+    "max_concurrent": null,
+    "reasoning_effort": null,
+    "strict_schema": null,
+    "timeout_s": null,
+    "virtual_model": null,
+    "wall_timeout_s": null
+   },
+   "retain": {
+    "max_completion_tokens": null,
+    "max_concurrent": null,
+    "reasoning_effort": null,
+    "strict_schema": null,
+    "timeout_s": null,
+    "virtual_model": null
+   },
+   "strict_schema": false,
+   "timeout_s": 600
+  },
+  "models": {
+   "embeddings_model": "hindsight-ai/hs-embed-1",
+   "embeddings_provider": "local",
+   "reranker_api_model": null,
+   "reranker_base_url": null,
+   "reranker_bucket_batching": true,
+   "reranker_local_batch_size": null,
+   "reranker_local_max_concurrent": null,
+   "reranker_local_timeout_s": null,
+   "reranker_max_candidates": 60,
+   "reranker_max_candidates_high": null,
+   "reranker_max_candidates_low": null,
+   "reranker_max_candidates_mid": null,
+   "reranker_model": "hindsight-ai/hs-rerank-1",
+   "reranker_provider": "local",
+   "reranker_timeout_s": null
+  },
+  "priority": {
+   "enabled": true,
+   "max_defer_s": 300,
+   "quiet_gap_s": 30
+  },
+  "private_bank": "hal0:private",
+  "projects": {
+   "aliases": {},
+   "deny": [
+    "tmp",
+    "temp",
+    "root",
+    "home",
+    "workdir",
+    "scratch",
+    "scratchpad",
+    "unknown",
+    "default"
+   ],
+   "registered": []
+  },
+  "public_url": null,
+  "refresh": {
+   "consolidation": "continuous",
+   "consolidation_schedule": "0 2 * * *",
+   "min_interval_s": 86400,
+   "pages": "scheduled",
+   "schedule": "0 3 * * *"
+  }
+ },
+ "meta": {
+  "schema_version": 6
+ },
+ "models": {
+  "auto_scan_on_start": true,
+  "file_extensions": [
+   ".gguf",
+   ".safetensors",
+   ".hgn"
+  ],
+  "flm_store": "",
+  "pull_root": "/var/lib/hal0/models",
+  "roots": [
+   "/var/lib/hal0/models"
+  ],
+  "store": ""
+ },
+ "network": {
+  "comfyui_listen": "lan",
+  "extra_origins": [],
+  "public_url": null
+ },
+ "openwebui": {
+  "hermes_session_from_chat_id": true
+ },
+ "realtime": {
+  "approval_wait_s": 20.0,
+  "default_model": "",
+  "enabled": true,
+  "frame_ms": 20,
+  "max_buffer_seconds": 30.0,
+  "sample_rate": 24000,
+  "stt_model": "",
+  "tts_model": "kokoro",
+  "tts_voice": "",
+  "vad_energy_threshold": 0.02,
+  "vad_min_speech_ms": 200,
+  "vad_silence_ms": 500,
+  "vad_window_ms": 20
+ },
+ "security": {
+  "require_auth": null,
+  "trust_forwarded_for": null
+ },
+ "slots": {
+  "default_images": {},
+  "evict_pressure_mb": 8192,
+  "fabric_clock_guard": "refuse",
+  "idle_timeout_s": 300,
+  "max_slots": 0,
+  "network_mode": "",
+  "port_dnat_auto_repair": true,
+  "port_range_end": 8099,
+  "port_range_start": 8081,
+  "preload_evict_enabled": true,
+  "preload_evict_headroom_mb": 1024,
+  "publish_host": "127.0.0.1"
+ },
+ "telemetry": {
+  "channel": "stable",
+  "enabled": false
+ },
+ "updates": {
+  "auto_restart_image_drift": true
+ }
+}

@@ -563,6 +563,35 @@ def memory_budget(monkeypatch: pytest.MonkeyPatch) -> Iterator[MemoryBudgetStub]
     )
 
 
+@pytest.fixture(autouse=True)
+def _component_unit_enabled_stub(monkeypatch: pytest.MonkeyPatch) -> Any:
+    """No test asks the host's systemd whether a component's unit is enabled (#4065).
+
+    ``component_status_snapshot`` runs ``systemctl is-enabled`` for a component
+    whose install probe finds nothing, and many tests reach the snapshot
+    (status, the updater routes, the agents overview). On a machine where that
+    unit happens to be enabled the row would read ``broken`` and the test would
+    depend on its host. The probe answers "not enabled" here; a test of the
+    probe itself asks for ``real_component_unit_enabled``. Yields the real
+    function for that fixture.
+    """
+    from hal0.components import status
+
+    real = status._unit_enabled
+    monkeypatch.setattr(status, "_unit_enabled", lambda _service_id: False)
+    return real
+
+
+@pytest.fixture
+def real_component_unit_enabled(
+    _component_unit_enabled_stub: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Opt a test out of the stub above: the real probe runs (patch ``subprocess.run``)."""
+    from hal0.components import status
+
+    monkeypatch.setattr(status, "_unit_enabled", _component_unit_enabled_stub)
+
+
 @pytest.fixture
 def real_memory_budget(memory_budget: MemoryBudgetStub, monkeypatch: pytest.MonkeyPatch) -> None:
     """Opt a test out of the ``memory_budget`` stub: the real collector answers again.
@@ -575,20 +604,73 @@ def real_memory_budget(memory_budget: MemoryBudgetStub, monkeypatch: pytest.Monk
 
 
 def _coverage_active(config: pytest.Config) -> bool:
-    """True when pytest-cov is tracing this run (``--cov``, the main-push CI leg)."""
+    """True when pytest-cov is tracing this run (``--cov``; CI no longer passes it, so in
+    practice a local coverage run)."""
     return config.pluginmanager.hasplugin("_cov") and bool(
         getattr(config.option, "cov_source", None)
     )
 
 
+def pytest_addoption(parser: pytest.Parser) -> None:
+    parser.addoption(
+        "--shard",
+        default=None,
+        metavar="I/N",
+        help="Run only shard I of N (1-based). Whole test files are assigned to shards "
+        "by test count, so the N shards together run every test exactly once.",
+    )
+
+
+def assign_shards(nodeids: list[str], total: int) -> dict[str, int]:
+    """Map each test file to a 1-based shard, balancing the number of tests.
+
+    Files are placed largest first onto the shard with the fewest tests so far
+    (ties go to the lowest shard, then the path). Every shard collects the same
+    items in CI, so each computes the same map. Whole files stay together,
+    which keeps module- and class-scoped fixtures in one process.
+    """
+    counts: dict[str, int] = {}
+    for nodeid in nodeids:
+        path = nodeid.split("::", 1)[0]
+        counts[path] = counts.get(path, 0) + 1
+    load = [0] * total
+    assignment: dict[str, int] = {}
+    for path, count in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0])):
+        slot = load.index(min(load))
+        load[slot] += count
+        assignment[path] = slot + 1
+    return assignment
+
+
+def _parse_shard(spec: str) -> tuple[int, int]:
+    try:
+        index, total = (int(part) for part in spec.split("/"))
+    except ValueError:
+        raise pytest.UsageError(f"--shard expects I/N, got {spec!r}") from None
+    if total < 1 or not 1 <= index <= total:
+        raise pytest.UsageError(f"--shard {spec}: I must be between 1 and N")
+    return index, total
+
+
 def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
-    """Skip ``@pytest.mark.timing`` tests while coverage traces the run.
+    """Apply ``--shard``, then skip ``@pytest.mark.timing`` tests under coverage.
 
     A wall-clock bound measures the code, not the tracer: under ``--cov`` the
     redaction scans run 5-14x slower on 3.12/3.13, so a linear-time guard
     fails on main pushes while the code is fine (it passes in ~1s untraced).
     The PR leg runs without coverage and still enforces every bound.
     """
+    spec = config.getoption("--shard")
+    if spec:
+        index, total = _parse_shard(spec)
+        assignment = assign_shards([item.nodeid for item in items], total)
+        kept, dropped = [], []
+        for item in items:
+            mine = assignment[item.nodeid.split("::", 1)[0]] == index
+            (kept if mine else dropped).append(item)
+        if dropped:
+            items[:] = kept
+            config.hook.pytest_deselected(items=dropped)
     if not _coverage_active(config):
         return
     skip = pytest.mark.skip(reason="wall-clock bound is meaningless under coverage tracing")

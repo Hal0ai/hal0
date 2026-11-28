@@ -18,6 +18,7 @@ LXC with a real GPU, as the maintainer's box is).
 from __future__ import annotations
 
 import os
+import shlex
 import subprocess
 from pathlib import Path
 
@@ -46,7 +47,11 @@ def _run_gpu_gate_full(env_overrides: dict[str, str]) -> subprocess.CompletedPro
     tests can assert on what the operator is actually told (#1948: the gate's
     two branches now say different things, and both must be true).
     """
-    script = f"set -euo pipefail\nsource {PREFLIGHT!s}\nrc=0\npreflight_gpu || rc=$?\nexit $rc\n"
+    script = (
+        "set -euo pipefail\n"
+        f"source {shlex.quote(str(PREFLIGHT))}\n"
+        "rc=0\npreflight_gpu || rc=$?\nexit $rc\n"
+    )
     # HAL0_GPU_AMD_OVERRIDE defaults OFF here so the AMD lane check (#1888)
     # stays hermetic: the box running the suite may itself be an AMD LXC with
     # (or without) a real /dev/kfd. Tests that exercise that check set it.
@@ -392,7 +397,7 @@ def _run_preflight(snippet: str, **env_overrides: str) -> subprocess.CompletedPr
     environment unless a test sets them, so the answer never depends on the box
     running the suite.
     """
-    script = f"set -euo pipefail\nsource {PREFLIGHT!s}\n{snippet}\n"
+    script = f"set -euo pipefail\nsource {shlex.quote(str(PREFLIGHT))}\n{snippet}\n"
     env = {k: v for k, v in os.environ.items() if k not in _SEAMS}
     env.update(env_overrides)
     return subprocess.run(
@@ -778,7 +783,9 @@ class TestKfdGroupGate:
         (tmp_path / "renderD128").touch()
         kfd = tmp_path / "kfd"
         kfd.touch()
-        script = f"set -uo pipefail\nsource {PREFLIGHT!s}\npreflight_gpu 2>&1 || true\n"
+        script = (
+            f"set -uo pipefail\nsource {shlex.quote(str(PREFLIGHT))}\npreflight_gpu 2>&1 || true\n"
+        )
         env = {
             **os.environ,
             "HAL0_GPU_GATE": "1",

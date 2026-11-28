@@ -315,6 +315,9 @@ async def create_profile(body: ProfileBody, request: Request) -> dict[str, Any]:
         400 slot.hardware_flag_denied: flags carry a slot-owned hardware flag.
         400 slot.managed_arg_denied: flags carry a hal0-managed flag.
         400 profiles.model_fact_flag_denied: flags carry a model-fact flag.
+        422 slot.removed_flag_denied: a llama-server profile's flags carry a
+            flag llama-server has removed (``details.replacements`` names
+            what to use instead).
         422 profiles.halogen_flag_malformed / profiles.halogen_flag_denied /
             profiles.halogen_flag_out_of_range: a halogen profile's flags are
             not valid ``HALOGEN_NAME=value`` tokens.
@@ -616,6 +619,10 @@ async def update_profile(name: str, body: ProfileUpdateBody, request: Request) -
         400 slot.hardware_flag_denied / slot.managed_arg_denied /
             profiles.model_fact_flag_denied / slot.reasoning_format_none_denied:
             the flags carry a flag a profile may not hold.
+        422 slot.removed_flag_denied: a llama-server profile's flags carry a
+            flag llama-server has removed (``details.replacements`` names
+            what to use instead). Sent whenever the body carries ``flags``,
+            a stored value included: the slot cannot start with it.
         422 profiles.halogen_flag_malformed / profiles.halogen_flag_denied /
             profiles.halogen_flag_out_of_range: the profile's runtime family
             (the body's ``runner``, else the stored one) is halogen and the

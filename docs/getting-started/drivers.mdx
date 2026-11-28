@@ -17,9 +17,14 @@ how container/LXC device passthrough must be wired so hal0 can see it.
 ## Kernel and firmware
 
 The iGPU uses the in-tree `amdgpu` driver. On AMD Strix Halo (Ryzen AI
-Max+ 395/385/390), get onto a **kernel ≥ 6.14** with current
-`linux-firmware` — earlier kernels are missing GTT and NPU fixes that
-Strix Halo depends on. If you also want the XDNA NPU, the kernel needs
+Max+ 395/385/390), run a kernel that carries AMD's two KFD fixes for the
+Ryzen AI Max series, with current `linux-firmware`. AMD's
+[Strix Halo system optimization page](https://rocm.docs.amd.com/en/latest/how-to/system-optimization/strixhalo.html)
+puts the floor at **Linux 6.18.4** or later; on Ubuntu 24.04 the HWE kernel
+`6.17.0-19.19~24.04.2` or the OEM kernel `6.14.0-1018` (or later) carries
+them, and Fedora 43, Ubuntu 26.04 and Arch Linux 2026.02.01 ship them in
+their own kernels. Without these fixes, GPU compute work can fail to
+initialize or behave unpredictably. If you also want the XDNA NPU, the kernel needs
 the `amdxdna` module available (`modprobe amdxdna`) and NPU firmware
 current enough to match it.
 
@@ -58,11 +63,13 @@ install.
 <Aside type="note" title="Host ROCm is not required">
 The host only needs `amdgpu` bound and the nodes above present — it does
 **not** need a host ROCm install. Every hal0 slot container carries its
-own ROCm userspace. In particular, hal0 does **not** need `rocm-smi` to pick
-the ROCm lane: `/dev/kfd` present and openable by the identity that runs
-your slot containers is enough on its own. A `rocm-smi --showproductname`
-that succeeds is still a second, independent signal for ROCm, so having
-`rocm-smi` installed can add the lane, but its absence never removes it.
+own ROCm userspace. In particular, hal0 does **not** use `rocm-smi` to pick
+the ROCm lane. The lane needs two device nodes, both openable by the
+identity that runs your slot containers: `/dev/kfd` for compute and a
+`/dev/dri/renderD*` render node for the device itself
+(`rocm_lane_present()` in `src/hal0/providers/_gpu.py`). A box with
+`/dev/kfd` but no render node, such as an LXC with a dropped `dev0` line,
+does not get the ROCm lane, whether or not `rocm-smi` is installed.
 </Aside>
 
 ## Re-probing after a driver or kernel change
@@ -103,18 +110,21 @@ On Strix Halo the GPU's usable memory is the amdgpu **GTT** pool, carved
 from system RAM (unified memory). A model can only allocate up to the
 GTT cap, not the full RAM pool.
 
-On **kernel ≥ 6.14**, amdgpu grows the GTT/GART limit dynamically — hal0
-reads the *live* pool size from `mem_info_gtt_total` on every request
-rather than trusting a boot-time snapshot, precisely because that limit
-can move (see `src/hal0/api/routes/hardware.py`). You generally don't
-need to pin anything; hal0 measures whatever the kernel currently
-reports and sizes its model recommendations against it.
+The cap is the kernel's TTM page limit,
+`/sys/module/ttm/parameters/pages_limit`, counted in 4 KiB pages. AMD
+recommends keeping the dedicated VRAM reservation in the BIOS small (for
+example 0.5 GB) and raising the TTM limit instead. AMD's `amd-ttm` tool
+(`pipx install amd-debug-tools`) shows the current limit in GB and sets a
+new one with `amd-ttm --set <GB>`, which takes effect after a reboot; the
+kernel command line below does the same by hand.
 
-Pinning GTT/TTM parameters on the kernel command line is an operator
-choice, not a requirement — it reserves a large fixed pool up front
-instead of letting the kernel size it dynamically, which is useful if
-you want a guaranteed floor regardless of what else the host is doing.
-Here's a worked example from a 128 GB Strix Halo host that pins one:
+hal0 does not set this limit. It reads the *live* pool size from
+`mem_info_gtt_total` on every request rather than trusting a boot-time
+snapshot (see `src/hal0/api/routes/hardware.py`), and sizes its model
+recommendations against whatever the kernel reports.
+
+Here's a worked example from a 128 GB Strix Halo host that pins the pool
+on the kernel command line:
 
 ```sh
 # /etc/default/grub — GRUB_CMDLINE_LINUX_DEFAULT on a 128 GB Strix Halo host

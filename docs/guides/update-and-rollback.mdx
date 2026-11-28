@@ -78,6 +78,16 @@ runs a check:
 hal0 update --channel preview
 ```
 
+To change channel without updating, add `--check`:
+
+```sh
+hal0 update --channel preview --check
+```
+
+The channel is saved in both forms, and the output says which channel the box
+was on and which it follows now. `--check` only stops the update from being
+applied; it is not a preview of another channel.
+
 ![The Settings → Updates panel showing current version, available update, and channel selector](/screenshots/settings-page.png)
 *Settings → Updates: current version, available release, and channel selector.*
 
@@ -207,7 +217,7 @@ sudo sqlite3 /var/lib/hal0/backups/hal0-pre-015-<timestamp>.db \
 
 ## Upgrade notes by release
 
-The per-release upgrade notes (1.3.0, 1.6.0, 1.8.0, 1.7.1, 1.7.0, and upgrading from an older release) are on [Update and roll back: upgrade notes by release](/docs/guides/update-and-rollback-release-notes/).
+The per-release upgrade notes (1.3.0, 1.6.0, 1.8.2, 1.8.1, 1.8.0, 1.7.1, 1.7.0, and upgrading from an older release) are on [Update and roll back: upgrade notes by release](/docs/guides/update-and-rollback-release-notes/).
 
 ## Component updates
 

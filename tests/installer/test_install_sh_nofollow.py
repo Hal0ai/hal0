@@ -11,6 +11,7 @@ installer defines it.
 from __future__ import annotations
 
 import re
+import shlex
 import stat
 import subprocess
 import sys
@@ -63,7 +64,10 @@ def test_secrets_seed_goes_through_the_helper() -> None:
 
 def _run_helper(tmp_path: Path, *args: str) -> subprocess.CompletedProcess[str]:
     script = (
-        f'set -euo pipefail\nPY={sys.executable}\nREPO_ROOT={REPO}\n{_function()}nofollow "$@"\n'
+        "set -euo pipefail\n"
+        f"PY={shlex.quote(sys.executable)}\n"
+        f"REPO_ROOT={shlex.quote(str(REPO))}\n"
+        f'{_function()}nofollow "$@"\n'
     )
     return subprocess.run(
         ["bash", "-c", script, "bash", *args],

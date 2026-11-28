@@ -159,7 +159,7 @@ and throwaway profiles removed. Brain and utility slots healthy.
 ## Added in kit 19
 
 * After `model rm --keep-files`, run the exact `model add <kept path>` the CLI prints for a pulled-layout gguf and assert the re-registered id equals the original (it becomes `model`), then re-apply the capability selection.
-* After `hal0 profile create` plus DELETE of the throwaway, `/etc/hal0/profiles.toml` must be absent or byte-identical to the seed (a 10-byte `[profile]` was left).
+* (Corrected kit 22) After `hal0 profile create` plus API DELETE of the throwaway, `/etc/hal0/profiles.toml` is exactly `[profile]\n` 0600 hal0:hal0 (by-design; see Added in kit 22).
 * After enabling embed/rerank/tts, note TOML provider rewrites (`provider = "llama-server"` appeared, tts lost its comment header) as intended or file.
 * Capture the `/api/capabilities` tts catalog row (backends, profile, runtime_family) BEFORE kokoro-v1 is pulled so check 13 can diff.
 * `hal0 model scan` skip reasons: compare CLI output with the API `skipped` list (#2725, known).
@@ -169,3 +169,11 @@ and throwaway profiles removed. Brain and utility slots healthy.
 * Compare registry model.backends (vulkan,rocm,cuda,cpu for every local gguf) with the picker catalog row for the same model after `model add`.
 * At entry list models and capability TOMLs already staged by earlier lanes and diff against CONTEXT; embed, rerank and qwen3.5-0.8b were pre-staged, so check 2b and the 13 pull diff are un-runnable as written.
 * After any `model rm` cascade of a capability slot assert `systemctl --failed` stays empty (a podman healthcheck transient was left failed); the dangling capability itself is #2724, known.
+
+## Added in kit 22
+
+* Kit 19 profiles.toml item is corrected: after the last custom profile is deleted (API DELETE; no CLI delete verb) the file is exactly `[profile]\n`, 0600 hal0:hal0 (known `profiles-toml-empty-table-after-last-delete`). Fail only on anything else.
+* After rm of a pulled model assert `find <store>/<cap> -name meta.json` is empty (#2706 item 2; bge-base-en-v1.5-q4_k_m is 65 MB).
+* Idle-evicted rerank (enabled + offline) must reload on the next /v1/rerank, not 404/503. Record applied-to-ready per row (embed ~4 s, rerank <5 s, tts <10 s) and flag > 30 s on CPU/Vulkan boxes.
+* Record the img seed's resolved device (gpu-rocm) against `.backends` on every non-ROCm box; fail only if img can be enabled at it.
+* Slot TOML comments disappearing after any apply is known (`slot-write-strips-toml-comments`); do not report.

@@ -22,8 +22,8 @@
 # delete the entry. Moving work out of this kit and into CI is the goal, not a loss.
 
 schema: 1
-updated: 2026-11-27
-updated_for: v1.8.0-nightly.20261127015252
+updated: 2026-11-28
+updated_for: v1.8.1-nightly.20261127231904
 
 # NOTE on the v1.0.0-rc.6 entries: that run executed in mode=report, so nothing was filed.
 # Entries carry `issue: null` until the operator files them; replace null with the issue number
@@ -5207,6 +5207,9 @@ regressions:
     summary: >-
       The THROUGHPUT hero (GET /api/stats/throughput/history, ThCellThroughput) over-reads non-streaming completions (whole completion_tokens in one 5 s bin) and keeps
       showing the last non-empty bin for up to 100 s after traffic stops while the per-slot tile reads 0.0.
+    # v1.8.1-nightly.20261127231904: the one-bin lump was REFUTED on a quiet-enough check (skeptic: per_slot spreads at the decode rate;
+    # the lane read total_tps, which also carried concurrent brain traffic). Read per_slot.<slot>, never total_tps, and see
+    # known-issues throughput-history-nonstream-backfill. The 'reads 0 within a bin after traffic stops' half still stands.
     repro: |
       # one non-streaming completion decoding >5 s, then poll for 100 s
       curl -s $API/api/stats/throughput/history | jq -c '.samples[-3:]'
@@ -5292,6 +5295,7 @@ regressions:
       hal0/agent id must return a stamp (or discoverable=False).
 
   - id: agent-identity-cards-pending-retain-duplicates
+    serialize: true  # repro restarts hal0-api 3x; run only when no other lane is live (kit 22)
     issue: 3876
     last_result: { release: v1.8.0-nightly.20261120045628, result: regressed }
     from: v1.8.0-nightly.20261120045628
@@ -5538,3 +5542,31 @@ regressions:
     promote_ready: true
     promote_to: >-
       pytest tests/mcp: open a session + GET stream in-process, DELETE, assert no ERROR record on mcp.server.streamable_http.
+
+  - id: retain-cancel-does-not-stop-extraction
+    issue: 4051
+    from: v1.8.1-nightly.20261127231904
+    severity: major
+    tier: judgment
+    lane: memory
+    summary: >-
+      Cancelling the retain child of a single-document /api/memory/add while it is `processing` returns 200 success and marks child + parent `cancelled`
+      (completed_at null), but the extraction LLM call runs to completion and the document and facts are committed and recallable. Engine cancel is cooperative
+      (checkpoints only between documents / sub-batches, hindsight memory_engine.py ~7398, ~7940), so a one-doc retain cannot be stopped once claimed.
+      hal0's MCP memory_operation_cancel promises "Aborts in-flight work" (src/hal0/mcp/memory.py:2313, :1098) and the UI maps cancelled to "stopped"
+      (ui/src/dash/memory-area/operations-pure.ts:80). Decision pending on #4051: fix wording only, or make cancel abort.
+    repro: |
+      # unique text so recall is unambiguous; do NOT rely on brain n_decoded (other banks share the brain). Use journal attribution by op id.
+      R=$(curl -s -X POST $API/api/memory/add -H 'content-type: application/json' -d '{"text":"The keeper of the Zzcancel lighthouse is named Odile Zzbrask.","bank":"hal0:shared"}')
+      # find the child op id (hal0 memory ops list --bank hal0:shared --json), wait until its status is `processing`
+      # (journalctl -u hindsight-api: "[BATCH_RETAIN_TASK] Starting ... operation_id=<child8>")
+      curl -s -X DELETE "$API/api/memory/banks/hal0%3Ashared/operations/<child>"        # 200 {"success":true,...cancelled}
+      # wait for the journal line "Extract facts: N facts" for that op id (can take minutes on a CPU box), then:
+      curl -s "$API/api/memory/banks/hal0%3Ashared/operations/<child>" | jq -c '{status,completed_at}'
+      curl -s "$API/api/memory/banks/hal0%3Ashared/documents/<doc_id>" | jq .memory_unit_count
+      curl -s -X POST $API/api/memory/search -H 'content-type: application/json' -d '{"query":"Zzcancel lighthouse keeper"}'
+      # cleanup: delete the probe document
+    expect: >-
+      After a cancel acknowledged with success on a `processing` retain, either the extraction stops and memory_unit_count == 0 with nothing recallable,
+      or the cancel response/MCP description/UI state says plainly that in-flight work may finish and the status does not read as stopped.
+      (Cancelling a PENDING op, or a multi-doc/multi-sub-batch retain, does stop at the next boundary and is not part of this.)

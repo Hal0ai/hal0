@@ -1,6 +1,6 @@
 ---
 title: "Update and roll back: upgrade notes by release"
-description: "Per-release upgrade notes for hal0 — what changes and what to check when upgrading to 1.3.0, 1.6.0, 1.7.0, 1.7.1, 1.8.0, 1.8.1 and 1.8.2, and from an older release."
+description: "Per-release upgrade notes for hal0 — what changes and what to check when upgrading to 1.3.0, 1.6.0, 1.7.0, 1.7.1, 1.8.0, 1.8.1, 1.8.2 and 1.8.3, and from an older release."
 sidebar:
   order: 111
 ---
@@ -74,6 +74,43 @@ The first `hal0 update` to 1.6.0 changes how Hermes is installed. One step is ne
 - **Open WebUI gets the default Hermes profile after one repair.** If the default profile is missing from the picker on a box that had Hermes installed before 1.6.0, run `sudo hal0 agent reprovision hermes --repair` once; `hal0 doctor` flags this on the `hermes-api` row. See [Talking to Hermes](/docs/guides/open-webui#talking-to-hermes).
 - **The agent chat proxy is removed.** `/api/agents/{id}/events`, `/submit` and `/session/*` return 404.
 - **Key rotation now ends open sockets and streams** (WebSocket close code `4401`, SSE `event: revoked`).
+
+## Upgrading to 1.8.3
+
+1.8.3 is a fix release on 1.8.2. An ordinary `hal0 update` takes it, and the
+config schema version is unchanged.
+
+- **Replace removed llama-server flags in your own profiles.** llama-server
+  removed `--mmap`, `--no-mmap`, `--mlock`, `--direct-io` and
+  `--no-direct-io` (and `-dio`, `-ndio`) in favour of `-lm`/`--load-mode`,
+  and a slot whose profile carries one has not started since 1.8.1. Change
+  `--no-mmap` to `-lm none`, `--mmap` to `-lm mmap`, `--mlock` to
+  `-lm mmap+mlock` and `--direct-io` to `-lm dio`, and delete
+  `--no-direct-io`. From 1.8.3 the dashboard refuses to save a profile that
+  still carries one, with a 422 that names the replacement, and importing an
+  exported profile or stack that carries one is refused as a whole. hal0 does
+  not rewrite stored profiles. The bundled tune skill used to suggest
+  `--no-mmap`; an updated box keeps that copy of the skill until the
+  installer is run again, so an agent may still propose it.
+- **A request for the NPU embed slot with the NPU embed role off now answers
+  404.** `POST /v1/embeddings` with `model` set to `flm-embed`, `embed-npu`
+  or the NPU embed model used to be answered by another embed slot, with
+  that slot's vectors. A client that sends one of those names must either
+  have the NPU embed role turned on and the NPU chat slot loaded, or name
+  the embedding model it wants.
+- **The first update on a box whose system Python changed rebuilds the
+  memory decision server.** After an OS release upgrade the decision
+  server's venv could not start. The update rebuilds it (one to two minutes)
+  and restarts the memory engine once.
+- **A rollback between a nightly and the stable release of the same number
+  now says that `hal0-api` needs a restart.** `hal0 update --rollback`
+  prints "restart required" with the command, `systemctl restart hal0-api`;
+  it used to print "no restart needed" and leave the old build serving.
+  This holds when the daemon answering the rollback is 1.8.3 or later; a
+  rollback answered by an older daemon still prints the old message, so
+  after one, compare `/api/health` with the installed release and restart
+  `hal0-api` if they differ. `/api/health` and `/api/status` carry a new
+  `release` field for that.
 
 ## Upgrading to 1.8.2
 

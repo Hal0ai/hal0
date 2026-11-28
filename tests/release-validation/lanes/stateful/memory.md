@@ -187,3 +187,10 @@ every operation you created — the hermes lane will look for its own marker sep
 * Entry gate for the marker timing check: require brain requests_processing=0 and no foreign hal0:private ops (the hermes lane's private burst makes 'lone retain under 60 s' unmeasurable).
 * Run check 16 (cancel child, retry child) FIRST, before other retains, so the child does not wait behind marker traffic; poll the parent only while the child can still go terminal.
 * Failed retains: curl the engine list with limit=100 and limit=200 (#3944, 422 on 200) before trusting any 'auto-retry recovered it' reading.
+
+## Added in kit 22
+
+* Check 27 (orphan-decode) cannot be judged from brain `n_decoded` when another bank retains on the same brain. Attribute by op id: the journal line `[BATCH_RETAIN_TASK] Starting ... operation_id=<child8>` and the later `Extract facts: N facts` / `already terminal or deleted, skipping mark-completed` for that same op. Then GET the document: `memory_unit_count > 0` after a cancel is #4051 (known, filed), not a new finding.
+* After any retain-child DELETE, GET the document and assert `memory_unit_count`; record it beside the op's `cancelled` status.
+* Compare `hal0 memory status` 'served by <slot>' and busy count with a live /metrics read of the slot that actually resolves; a stale cached extraction row once named an offline `agent` while brain was idle.
+* GET /api/memory/banks/{b}/operations with `?limit=100` and `?limit=200` through the hal0 REST route; record whether REST clamps or returns a bare 422 (#3944 REST-side residue).

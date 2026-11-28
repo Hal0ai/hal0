@@ -762,7 +762,7 @@ def test_extraction_model_name_matches_the_drop_in_spelling():
 
 
 def test_resolve_extraction_window_below_floor_on_the_repro_shape(tmp_path: Path):
-    """The reported ct151-cpu-fresh shape: extraction slot resolves to a live 4096-token
+    """The reported ct151-fresh shape: extraction slot resolves to a live 4096-token
     window — clearly under the extraction prompt's own footprint."""
     entry = {"id": "hal0/utility", "context_length": 4096}
     catalog = [{"id": "utility", "context_length": 4096}]
