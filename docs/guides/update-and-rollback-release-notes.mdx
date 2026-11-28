@@ -84,9 +84,15 @@ The first `hal0 update` to 1.6.0 changes how Hermes is installed. One step is ne
   box cannot go back to v0.13.4 with the converted database. hal0 does not
   copy the data for you. Before the update, stop the container with
   `sudo systemctl stop hal0-openwebui`, copy `/var/lib/hal0/openwebui` to a
-  place outside that directory, and check that the copy holds a `webui.db`
-  of the same size. The conversion runs in batches and resumes if it is
-  interrupted. A box with no chats needs nothing.
+  place outside that directory, and check that the copy holds the same
+  number of files and a `webui.db` of the same size. After the update,
+  start it again with `sudo systemctl start hal0-openwebui`: the update
+  restarts Open WebUI only if it is running, so a container you stopped
+  stays stopped, and the conversion runs on that start. It runs in batches
+  and resumes if it is interrupted. The same release renames Open WebUI's
+  saved terminal connections to machines, so take the backup on a box with
+  saved Open WebUI settings too, even if it has no chats. A box whose Open
+  WebUI was never used needs nothing.
 - **A phone shows a different dashboard layout.** At phone width there is a
   bottom tab bar (Overview, Slots, Models, Agents, More), the status dock is
   one line, and long sections fold behind a toggle. Nothing changes on a
