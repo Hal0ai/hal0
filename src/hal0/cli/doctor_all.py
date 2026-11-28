@@ -1579,7 +1579,7 @@ def check_api_env_entries(
     Advisory (WARN): the row cannot tell a planted entry from one the operator
     added deliberately.
     """
-    from hal0.api._env_store import is_process_control_env, is_proxy_env, tls_trust_violation
+    from hal0.config.env_guard import is_process_control_env, is_proxy_env, tls_trust_violation
 
     key, label = "api-env-entries", "api.env entries"
     path = api_env_path if api_env_path is not None else paths.api_env()

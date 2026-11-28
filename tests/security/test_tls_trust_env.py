@@ -29,8 +29,8 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from hal0.api import _env_store
 from hal0.api._env_store import TLS_TRUST_ENV_NAMES, tls_trust_violation, upsert_env_value
+from hal0.config import env_guard
 from hal0.upstreams.registry import Upstream
 
 NAMES = ["SSL_CERT_FILE", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE", "NODE_EXTRA_CA_CERTS"]
@@ -51,8 +51,8 @@ def trusted(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """Treat the test user as "root" and ``tmp_path`` as the trusted top."""
     root = tmp_path.resolve() / "trust"
     root.mkdir(mode=0o755)
-    monkeypatch.setattr(_env_store, "_TRUSTED_UID", os.getuid())
-    monkeypatch.setattr(_env_store, "_TRUST_ANCHOR", root.parent)
+    monkeypatch.setattr(env_guard, "_TRUSTED_UID", os.getuid())
+    monkeypatch.setattr(env_guard, "_TRUST_ANCHOR", root.parent)
     return root
 
 
@@ -120,7 +120,7 @@ def test_ssl_cert_dir_refuses_a_file_and_ssl_cert_file_refuses_a_dir(trusted: Pa
 
 def test_refuses_a_file_not_owned_by_root(trusted: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     path = _bundle(trusted)
-    monkeypatch.setattr(_env_store, "_TRUSTED_UID", os.getuid() + 1)
+    monkeypatch.setattr(env_guard, "_TRUSTED_UID", os.getuid() + 1)
     assert tls_trust_violation("SSL_CERT_FILE", str(path)) is not None
 
 
@@ -309,7 +309,7 @@ def test_ssl_cert_dir_with_too_many_entries_is_refused(
     d.mkdir(mode=0o755)
     for i in range(4):
         _bundle(d, f"{i}.pem")
-    monkeypatch.setattr(_env_store, "_TLS_MAX_DIR_ENTRIES", 3)
+    monkeypatch.setattr(env_guard, "_TLS_MAX_DIR_ENTRIES", 3)
     assert tls_trust_violation("SSL_CERT_DIR", str(d)) is not None
 
 

@@ -387,7 +387,7 @@ def _safe_read_text(
 def _write_redacted_toml(dest: Path, data: dict[str, Any]) -> None:
     import tomli_w
 
-    from hal0.api._redact import redact_config
+    from hal0.redaction import redact_config
 
     _write_file(dest, tomli_w.dumps(redact_config(data)))
 
@@ -400,7 +400,7 @@ def _write_redacted_env(dest: Path, text: str) -> None:
     ``redact_config``'s ``{value, set}`` projection, adapted to the flat
     ``KEY=value`` line format api.env actually uses.
     """
-    from hal0.api._redact import MASK, is_sensitive_key
+    from hal0.redaction import MASK, is_sensitive_key
 
     out_lines: list[str] = []
     for line in text.splitlines():
