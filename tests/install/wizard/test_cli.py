@@ -1047,3 +1047,43 @@ def test_the_graphics_card_wording_lives_in_one_place() -> None:
 
     assert cli.GPU_REASON_OTHER is flow_basic.GPU_REASON_OTHER
     assert flow_basic.GPU_REASON_OTHER not in Path(cli.__file__).read_text()
+
+
+def test_a_session_never_writes_over_an_unrelated_file(
+    catalog: Catalog, usable_facts: Facts, tmp_path: Path
+) -> None:
+    other = tmp_path / "hosts"
+    other.write_bytes(b"127.0.0.1 localhost\n")
+    inp = Inputs(catalog, usable_facts, None, None, (), "v")
+    erase = ["BACKSPACE"] * len(str(other))
+    keys = ["ENTER", "ENTER", "s", *str(other), "ENTER", *erase, "ENTER", "q"]  # refused, cancel
+    term = _ScriptedTerminal(keys)
+    made: list[object] = []
+
+    def document(chosen: object) -> dict[str, object]:
+        made.append(chosen)
+        return {"version": 1, "meta": {"saved_by": "v"}}
+
+    Session(inp, term, document, plain=False).run()  # type: ignore[arg-type]
+    assert other.read_bytes() == b"127.0.0.1 localhost\n"
+    assert made == []
+    shown = [" ".join(strip_ansi(frame).split()) for frame in term.frames]
+    assert any("already exists; choose another name" in frame for frame in shown)
+
+
+def test_a_session_writes_the_same_copy_again_when_it_is_confirmed_twice(
+    catalog: Catalog, usable_facts: Facts, tmp_path: Path
+) -> None:
+    copy = tmp_path / "copy.json"
+    inp = Inputs(catalog, usable_facts, None, None, (), "v")
+    path = [*str(copy)]
+    term = _ScriptedTerminal(["ENTER", "ENTER", "s", *path, "ENTER", "s", *path, "ENTER", "q"])
+    writes: list[int] = []
+
+    def document(chosen: object) -> dict[str, object]:
+        writes.append(len(writes))
+        return {"written": len(writes)}  # not shaped like an answers document
+
+    Session(inp, term, document, plain=False).run()  # type: ignore[arg-type]
+    assert json.loads(copy.read_text()) == {"written": 2}
+    assert not any("already exists" in frame for frame in term.frames)

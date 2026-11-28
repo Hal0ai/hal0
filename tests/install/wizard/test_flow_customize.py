@@ -7,12 +7,14 @@ from pathlib import Path
 import pytest
 
 from hal0.install.wizard.catalog import Catalog, ModelRow, Option, load_catalog
-from hal0.install.wizard.document import Override
+from hal0.install.wizard.document import Override, effective
 from hal0.install.wizard.facts import Facts, load_facts
 from hal0.install.wizard.flow import (
+    Outcome,
     Screen,
     State,
     chosen,
+    outcome,
     press,
     secret,
     sequence,
@@ -696,3 +698,63 @@ def test_a_brain_row_is_in_the_ladder_but_offered_on_no_screen(
         s = press(s, "ENTER")
     assert {"s-1", "i-1"} <= offered
     assert "b-1" not in offered
+
+
+def _document(catalog: Catalog, s: State) -> dict[str, object]:
+    return effective(
+        catalog, chosen=chosen(s), saved=None, given=None, over=[], hal0_version="v", now="t"
+    )
+
+
+def _untick_chat_and_assistant(catalog: Catalog, facts: Facts) -> State:
+    s = run(custom(catalog, facts), "SPACE", "DOWN", "SPACE")
+    rows = {r.id: r.value for r in view(s).rows}
+    assert rows["openwebui"] is False and rows["hermes"] is False
+    return press(s, "b")
+
+
+@pytest.mark.parametrize(("moves", "plain"), [(["UP", "UP"], 0), (["UP"], 1)])
+def test_changing_the_type_after_a_customize_detour_drops_the_customize_choices(
+    catalog: Catalog, usable_facts: Facts, moves: list[str], plain: int
+) -> None:
+    s = _untick_chat_and_assistant(catalog, usable_facts)
+    assert view(s).screen is Screen.TYPE
+    s = run(s, *moves, "ENTER", "ENTER", "ENTER")
+    direct = run(start(catalog, usable_facts), *(["DOWN"] * plain), "ENTER", "ENTER", "ENTER")
+    assert outcome(s) is Outcome.DONE and outcome(direct) is Outcome.DONE
+    assert chosen(s) == chosen(direct)
+    assert _document(catalog, s) == _document(catalog, direct)
+
+
+def test_picking_customize_again_keeps_the_customize_choices(
+    catalog: Catalog, usable_facts: Facts
+) -> None:
+    s = press(_untick_chat_and_assistant(catalog, usable_facts), "ENTER")
+    assert view(s).screen is Screen.JOBS
+    rows = {r.id: r.value for r in view(s).rows}
+    assert rows["openwebui"] is False and rows["hermes"] is False
+    assert chosen(s)["apps.openwebui.enabled"] is False
+
+
+def test_changing_the_type_keeps_the_folder_the_consent_and_the_copy_and_drops_the_token(
+    ladder_catalog: Catalog, consent_facts: Facts, tmp_path: Path
+) -> None:
+    facts = replace(consent_facts, gpu_pool_gb=96.0)
+    s = run(start(ladder_catalog, facts), "UP", "ENTER", "DOWN", "DOWN", "ENTER")
+    s = run(s, "ENTER", "DOWN", "DOWN", "ENTER", *"hf_abc", "ENTER")  # jobs, big-1 and a token
+    assert secret(s) == "hf_abc"
+    folder = str(tmp_path / "models")
+    s = run(open_field(s, "model_store"), *folder, "ENTER", "ENTER", "ENTER", "ENTER")
+    copy = str(tmp_path / "copy.json")
+    s = run(s, "s", *copy, "ENTER")
+    assert view(s).screen is Screen.REVIEW
+    s = run(s, *["b"] * 6)
+    assert view(s).screen is Screen.TYPE
+    s = run(s, "UP", "ENTER")  # Minimal
+    assert chosen(s) == {
+        "hardware.allow_cpu_only": True,
+        "install.type": "minimal",
+        "model_store.path": folder,
+        "_save_copy_to": copy,
+    }
+    assert secret(s) is None

@@ -1,12 +1,14 @@
 from __future__ import annotations
 
+import json
+import os
 from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
 from hal0.install.wizard.catalog import Catalog
-from hal0.install.wizard.document import Override, effective
+from hal0.install.wizard.document import Override, effective, write_document
 from hal0.install.wizard.facts import Disk, Facts, load_facts
 from hal0.install.wizard.flow import (
     Outcome,
@@ -492,11 +494,16 @@ def _save(catalog: Catalog, facts: Facts, text: str) -> State:
     return run(start(catalog, facts), "ENTER", "ENTER", "s", *text, "ENTER")
 
 
+def _earlier_copy(catalog: Catalog, path: Path) -> Path:
+    doc = effective(catalog, chosen={}, saved=None, given=None, over=[], hal0_version="v", now="t")
+    write_document(doc, path)
+    return path
+
+
 def test_a_copy_can_be_saved_over_an_earlier_copy(
     catalog: Catalog, usable_facts: Facts, tmp_path: Path
 ) -> None:
-    earlier = tmp_path / "copy.json"
-    earlier.write_text("{}")
+    earlier = _earlier_copy(catalog, tmp_path / "copy.json")
     s = _save(catalog, usable_facts, str(earlier))
     assert view(s).error is None
     assert view(s).editing is None
@@ -574,3 +581,62 @@ def test_the_graphics_card_line_spells_the_vendor(
 ) -> None:
     facts = replace(usable_facts, gpu_vendor=vendor, gpu_pool_gb=96.0)
     assert f"  Graphics card: {shown}, 96 GB memory" in view(start(catalog, facts)).intro
+
+
+_TAKEN = "already exists; choose another name"
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        b"UUID=1234 / ext4 defaults 0 1\n",
+        b"{}",
+        b'{"version": 1}',
+        b'{"version": 1, "meta": {"saved_at": "t"}}',
+        b'{"version": 1, "meta": "saved_by"}',
+        b'[{"version": 1, "meta": {"saved_by": "v"}}]',
+        b"\xff\xfe not text",
+        b"[" * 200000,
+    ],
+)
+def test_an_unrelated_existing_file_is_refused_and_left_alone(
+    catalog: Catalog, usable_facts: Facts, tmp_path: Path, content: bytes
+) -> None:
+    other = tmp_path / "fstab"
+    other.write_bytes(content)
+    s = _save(catalog, usable_facts, str(other))
+    assert view(s).error == f"{other} {_TAKEN}"
+    assert view(s).editing is not None
+    assert "_save_copy_to" not in chosen(s)
+    assert other.read_bytes() == content
+
+
+def test_an_answers_document_over_one_mib_is_not_taken_for_a_copy(
+    catalog: Catalog, usable_facts: Facts, tmp_path: Path
+) -> None:
+    big = tmp_path / "big.json"
+    big.write_text(json.dumps({"version": 1, "meta": {"saved_by": "v"}, "pad": "x" * 2**20}))
+    assert view(_save(catalog, usable_facts, str(big))).error == f"{big} {_TAKEN}"
+
+
+def test_a_fifo_is_refused_without_waiting_on_it(
+    catalog: Catalog, usable_facts: Facts, tmp_path: Path
+) -> None:
+    fifo = tmp_path / "pipe"
+    os.mkfifo(fifo)
+    assert view(_save(catalog, usable_facts, str(fifo))).error == f"{fifo} {_TAKEN}"
+
+
+def test_a_device_is_refused(catalog: Catalog, usable_facts: Facts) -> None:
+    assert view(_save(catalog, usable_facts, "/dev/null")).error == f"/dev/null {_TAKEN}"
+
+
+def test_the_path_confirmed_earlier_in_this_run_is_accepted_again(
+    catalog: Catalog, usable_facts: Facts, tmp_path: Path
+) -> None:
+    copy = tmp_path / "copy.json"
+    s = _save(catalog, usable_facts, str(copy))
+    copy.write_text("written by this run")  # whatever is there now came from this run
+    s = run(s, "s", *str(copy), "ENTER")
+    assert view(s).error is None and view(s).editing is None
+    assert chosen(s)["_save_copy_to"] == str(copy)
