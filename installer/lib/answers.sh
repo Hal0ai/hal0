@@ -712,6 +712,10 @@ hal0_run_wizard() {
     # Where the entry point and the catalog are (hal0_wizard_present does the
     # same, ahead of everything, in install.sh).
     _hal0_wizard_paths
+    if [[ ! -f "${_HAL0_WIZARD_ENTRY_PATH}" ]]; then
+        _hal0_answers_err "the setup screens are missing from this tree (${_HAL0_WIZARD_ENTRY_PATH}); download the installer again"
+        return 1
+    fi
     local dir="" rc=0
     # An interrupt of the installer itself (Ctrl-C reaches the whole process
     # group, also before the wizard has its own handler, and while the reader

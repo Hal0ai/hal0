@@ -149,7 +149,6 @@ def test_second_half_order() -> None:
     second = _second_half()
     order = [
         "persist_bootstrap_cosign",
-        "_hal0_resolve_main_python_or_die",
         "preflight_venv",
         "preflight_container_runtime",
         "gpu_rc == HAL0_GPU_RC_BROKEN_GID",
@@ -305,23 +304,6 @@ def test_it_dies_when_python_is_still_missing_after_the_install_try(tmp_path: Pa
         c.startswith("die: python interpreter 'no-such-python-xyz' not found") for c in calls
     )
     assert "seam" not in calls
-
-
-def test_no_file_and_no_python_still_dies_without_trying_install(tmp_path: Path) -> None:
-    fn_head = TEXT.index("_hal0_resolve_main_python_or_die() {")
-    fn = TEXT[fn_head : TEXT.index("\n}\n", fn_head) + 3]
-    script = f"""
-die() {{ echo "die: $*"; exit 1; }}
-python_venv_hint() {{ echo hint; }}
-resolve_main_python() {{ echo RESOLVED; echo python3.12; }}
-PY=no-such-python-xyz
-{fn}
-_hal0_resolve_main_python_or_die
-"""
-    proc = _run(script)
-    assert proc.returncode == 1
-    assert "RESOLVED" not in proc.stdout
-    assert "not found" in proc.stdout
 
 
 # ── the facts section ───────────────────────────────────────────────────────

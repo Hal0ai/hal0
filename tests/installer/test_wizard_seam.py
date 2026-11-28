@@ -622,8 +622,12 @@ def test_usage_text_describes_the_setup_screens_and_the_headless_run() -> None:
     assert "the setup screens ask for it with the other choices" in usage
     assert "a piped (\\`curl … | bash\\`) run shows them too when a terminal can be opened" in usage
     assert "HAL0_NONINTERACTIVE=1, or when no terminal can be opened" in usage
-    assert "an upgrade reuses the answers saved by the last install unless --reconfigure" in usage
-    assert "nothing is asked" in usage and "--answers" in usage
+    assert (
+        "On an upgrade, or after an install that did not finish, the screens are skipped "
+        "and the answers saved by the last install are used, unless --reconfigure"
+    ) in usage
+    assert "With --answers, nothing is asked: the document is used." in usage
+    assert "With HAL0_NONINTERACTIVE=1, or with no terminal, nothing is asked either" in usage
     # the words of the interactive prompts and of a tree without the screens are gone
     for stale in (
         "Without the setup screens",
@@ -1750,6 +1754,30 @@ rc=0; hal0_run_wizard || rc=$?; echo "RC=$rc"
     )
     assert "RC=1" in proc.stdout and "3.12" in proc.stderr, proc.stdout + proc.stderr
     assert _records(tmp_path) == []
+
+
+def test_the_wizard_says_so_when_its_entry_file_is_missing(tmp_path: Path) -> None:
+    proc = _run_group(
+        [
+            "bash",
+            "-c",
+            f"""
+set -u
+PY="{sys.executable}" REPO_ROOT="{tmp_path}/no-screens" DEV_MODE=1
+source "{ANSWERS_SH}"
+err() {{ echo "ERR: $*" >&2; }}
+_HAL0_INSTALL_ARGS=()
+rc=0; hal0_run_wizard || rc=$?; echo "RC=$rc"
+""",
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env={"PATH": os.environ["PATH"]},
+    )
+    assert "RC=1" in proc.stdout, proc.stdout + proc.stderr
+    assert "ERR: the setup screens are missing from this tree" in proc.stderr, proc.stderr
+    assert "can't open file" not in proc.stderr, proc.stderr
 
 
 # ── the CPU-only prompt ─────────────────────────────────────────────────────

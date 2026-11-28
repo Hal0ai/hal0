@@ -325,10 +325,11 @@ fixed instead of asking.
 
 The setup screens ask every question up front (components, models dir,
 HuggingFace token, Hermes terminal tool) when a terminal can be opened, also
-under \`curl … | bash\`; an upgrade reuses the answers saved by the last install
-unless --reconfigure is given. Set HAL0_NONINTERACTIVE=1, or run with no
-terminal, and nothing is asked: the flags, the variables and the defaults are
-used, or the document from --answers.
+under \`curl … | bash\`. On an upgrade, or after an install that did not finish,
+the screens are skipped and the answers saved by the last install are used,
+unless --reconfigure is given. With --answers, nothing is asked: the document
+is used. With HAL0_NONINTERACTIVE=1, or with no terminal, nothing is asked
+either: the flags, the variables and the defaults are used.
 
 HAL0_HERMES_TERMINAL=1 gives the bundled Hermes agent a terminal tool, letting
 it run commands as the hal0 user (root-equivalent on this box). It is OFF by
@@ -809,17 +810,11 @@ trap 'err "install failed at line ${LINENO} during: ${CURRENT_STEP:-pre-init}"
     exit 1' ERR
 
 # ── Main Python: resolve or auto-install ────────────────────────────────────
-# The block below ran in line in the pre-flight step before the step was split
-# into detection, then checks that depend on the answers. It still runs once,
-# in the second half. It is a function only so the file-origin branch of the
-# first half can run it ahead of the answers seam (a person who passes an
-# answers file has already chosen to let the installer install Python).
+# Runs once, in the Python-first block before the answers seam, when the default
+# interpreter is not usable (the setup screens need Python 3.12 or newer too).
+# The installer must try to install a missing interpreter before giving up, so
+# the not-found guard comes after that try.
 _hal0_resolve_main_python_or_die() {
-    # With an answers file the installer must try to install a missing
-    # interpreter before giving up, so the not-found guard comes after that try.
-    if [[ "${1:-}" != "install-first" ]] && ! command -v "${PY}" >/dev/null 2>&1; then
-        die "python interpreter '${PY}' not found — install with: $(python_venv_hint)"
-    fi
     local resolve_rc=0
     resolved_py="$(HAL0_PY_AUTOINSTALL=1 resolve_main_python)" || resolve_rc=$?
     # Ctrl-C while the interpreter is installed: neither "not found" nor "below
@@ -955,8 +950,8 @@ if [[ "${DEV_MODE}" -eq 0 ]]; then
 fi
 
 # Detection only: is the default Python usable? The comment on
-# _hal0_resolve_main_python_or_die (above this step) and the second half of this
-# step cover what happens when it is not.
+# _hal0_resolve_main_python_or_die (above this step) and the Python-first block
+# below cover what happens when it is not.
 _main_python_usable=1
 preflight_python || _main_python_usable=0
 
@@ -1085,21 +1080,6 @@ unset _pre_seam_flm
 # own tools.
 if [[ "${DEV_MODE}" -eq 0 ]]; then
     persist_bootstrap_cosign
-fi
-
-# Resolve or auto-install a usable Python (see _hal0_resolve_main_python_or_die).
-# preflight_python returns 1 when python is missing OR the version is
-# below hal0's floor (pyproject.toml requires-python >=3.12; it logs an
-# `err`/`warn` itself). A below-floor interpreter is NOT survivable — pip
-# install "${REPO_ROOT}" always fails on it — so unlike a merely-missing
-# python (which just needs installing per the hint below), we actively try
-# to resolve or auto-install a compatible interpreter (mirrors the
-# Hindsight venv's resolve_hindsight_python) instead of limping ahead only
-# to die minutes later, deep inside "pip install", on Debian 12 (python3
-# 3.11) / Ubuntu 22.04 (python3 3.10) — every stock LTS whose system
-# python3 predates 3.12.
-if [[ "${_main_python_usable}" -eq 0 ]]; then
-    _hal0_resolve_main_python_or_die
 fi
 
 # `python3 -m venv` capability is a hard requirement — the install always
