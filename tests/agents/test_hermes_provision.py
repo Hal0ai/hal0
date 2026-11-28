@@ -2109,6 +2109,21 @@ def test_resolve_auxiliary_tasks_shared_mode_uses_main_even_with_npu() -> None:
     assert upgraded["compression"]["model"] == "hal0/npu"
 
 
+def test_custom_extraction_target_picks_utility_only_when_the_box_has_one() -> None:
+    """The production rule for `auxiliary_slot`: an existing `utility` slot, else `memory`."""
+    memory = {"name": "memory", "type": "llm", "state": "ready", "model_id": "memory-m"}
+    agent = _ROLE_SLOTS[1]
+    utility = _ROLE_SLOTS[2]
+    assert utility["name"] == "utility"
+    for kwargs in ({"extraction_slot": "utility"}, {"extraction_model": "cloud-model"}):
+        old_box = hp._resolve_auxiliary_tasks(
+            [agent, memory, utility], hal0_base_url=_HAL0_V1, **kwargs
+        )
+        fresh_box = hp._resolve_auxiliary_tasks([agent, memory], hal0_base_url=_HAL0_V1, **kwargs)
+        assert old_box["compression"]["model"] == utility["model_id"], kwargs
+        assert fresh_box["compression"]["model"] == "hal0/memory", kwargs
+
+
 def test_resolve_auxiliary_tasks_uses_bound_memory_when_cold() -> None:
     slots = [
         _ROLE_SLOTS[0],
