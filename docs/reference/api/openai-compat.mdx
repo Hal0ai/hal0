@@ -188,28 +188,38 @@ rendered through.
 - **`/v1/models` default filtering** — hides non-text-modality models unless
   `?show_all=true` is passed; `GET /v1/models/{id}` bypasses the filter.
 
-Responses from `/v1/chat/completions`, `/v1/completions`, `/v1/embeddings`, `/v1/rerankings` and
-`/v1/audio/transcriptions` carry two hal0 headers that name what answered:
+Responses from `/v1/chat/completions`, `/v1/completions`, `/v1/embeddings`,
+`/v1/rerankings`, `/v1/rerank`, `/v1/audio/transcriptions` and `/v1/audio/speech`
+carry two hal0 headers that name what answered:
 
-- **`X-hal0-Resolved-Model`**: for a slot, the registry id of the model that
-  slot had loaded when it answered; for a remote provider, the model id hal0
-  sent to it. It can differ from the `model` you sent: a slot name or alias
-  resolves to the slot's model, and a request for a model no slot is bound to
-  can be answered by the default slot of the right kind, which serves its own
-  model. The `model` field in the body is whatever the backend returns and may
-  echo your request, so read this header when the exact model matters, for
-  example before storing embeddings. The header may be absent: hal0 sets it
-  only when it can vouch for the model, and never repeats the name you sent as
-  a guess. It is absent when the slot stopped serving before the response was
-  built, and on a FastFlowLM (NPU) slot whenever the request named a model
-  other than the one the slot has recorded, including speech-to-text on the
-  NPU, because FastFlowLM chooses the model from the request.
-- **`X-hal0-Slot`**: the slot that served the request. Absent for a remote
-  provider that is not a slot.
+- **`X-hal0-Slot`**: the slot that served the request, on any response from a
+  slot, errors included. Absent for a remote provider that is not a slot.
+- **`X-hal0-Resolved-Model`**: the model, on a successful (2xx) response only,
+  and only when hal0 can vouch for it. It is one of two things, never a guess
+  and never the name you sent repeated back:
 
-hal0 sets both itself and drops any header of the same name an upstream sends.
-They are not set on `/v1/images/generations`, `/v1/systemone` or a response
-assembled by the `"omni": true` loop, which may involve more than one slot.
+  | What answered | The header carries |
+  |---|---|
+  | A slot running llama-server or a single-purpose engine (speech, rerank, embeddings) | The registry id of the model that slot had loaded. The engine serves that one model whatever the request names. |
+  | A FastFlowLM (NPU) chat slot | The slot's recorded model, only when the request named exactly that model. FastFlowLM chooses the model from the request, so for any other name the header is absent. |
+  | NPU embeddings (`flm-embed`) | The FastFlowLM tag hal0 sent, taken from the slot's configuration. A FastFlowLM tag, not a registry id. |
+  | NPU speech-to-text (`flm-stt`) | Nothing: the upload is forwarded as you sent it and FastFlowLM chooses. Only the slot header is set. |
+  | A remote provider | The model id hal0 sent to the provider. If the provider picks a model itself (an auto-routing id, an agent profile), this is what hal0 asked for, not necessarily what answered. |
+
+It can differ from the `model` you sent: a slot name or alias resolves to the
+slot's model, and a request for a model no slot is bound to can be answered by
+the default slot of the right kind, which serves its own model. The `model`
+field in the response body is whatever the backend returns and may echo your
+request, so read this header when the exact model matters, for example before
+storing embeddings, and treat its absence as "unknown".
+
+It is also absent on an error response, and when the slot stopped serving
+before the response was built.
+
+hal0 sets both headers itself and drops any header of the same name an upstream
+sends. They are not set on `/v1/images/generations`, `/v1/systemone` or a
+response assembled by the `"omni": true` loop, which may involve more than one
+slot.
 
 ## Hermes models
 

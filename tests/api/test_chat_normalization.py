@@ -896,7 +896,3 @@ async def test_other_requests_sharing_memory_targets_are_not_tagged(model):
     await v1._normalize_chat_body(req, {"model": model, "messages": []})
     assert getattr(req.state, MEMORY_REQUEST_ATTR, False) is False
     assert read_timeout_override(req) is None
-
-
-# #4017: the dispatcher path names the model and slot that answered, since a
-# slot may be sent a model it serves in place of the one the caller named.

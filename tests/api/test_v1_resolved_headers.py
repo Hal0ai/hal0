@@ -137,9 +137,22 @@ async def test_a_slot_manager_that_raises_costs_only_the_model_header() -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_remote_provider_names_the_model_sent_and_no_slot() -> None:
-    call = _call(upstream_name="openrouter", resolved_model="vendor/model-x")
-    assert await v1._resolved_identity(_request({"agent": "local"}), call) == ("vendor/model-x", "")
+async def test_a_remote_provider_names_the_id_on_the_wire_and_no_slot() -> None:
+    """Not ``resolved_model``: the body hal0 forwards is what the provider got."""
+    call = _call(
+        upstream_name="openrouter",
+        resolved_model="model-x",
+        body=b'{"model": "vendor/model-x"}',
+    )
+    request = _request({"agent": "local"})
+    assert await v1._resolved_identity(request, call) == ("vendor/model-x", "")
+    # A multipart body is not JSON; the route passes the form's model field.
+    upload = _call(upstream_name="openrouter", resolved_model="model-x", body=b"--b\r\nraw")
+    assert await v1._resolved_identity(request, upload) == ("", "")
+    assert await v1._resolved_identity(request, upload, sent_model="prov/model-x") == (
+        "prov/model-x",
+        "",
+    )
 
 
 @pytest.mark.asyncio
@@ -299,7 +312,11 @@ async def test_a_streaming_response_carries_the_headers_before_its_first_byte() 
 
 @pytest.mark.asyncio
 async def test_a_remote_answer_end_to_end_has_no_slot_header() -> None:
-    call = _call(upstream_name="openrouter", resolved_model="vendor/model-x")
+    call = _call(
+        upstream_name="openrouter",
+        resolved_model="vendor/model-x",
+        body=b'{"model": "vendor/model-x"}',
+    )
     upstream = Response(
         content=b"{}", media_type="application/json", headers={"X-hal0-Slot": "theirs"}
     )
@@ -343,3 +360,24 @@ async def test_an_unreadable_config_is_treated_as_picking_by_request() -> None:
     assert await v1._slot_picks_model_by_request(request, "x") is True
     request.app.state.slot_manager = None
     assert await v1._slot_picks_model_by_request(request, "x") is True
+
+
+# ── only a successful response names a model ─────────────────────────────────
+
+
+@pytest.mark.parametrize("status", [400, 404, 429, 500, 503])
+def test_an_error_response_names_the_slot_and_no_model(status: int) -> None:
+    response = Response(
+        content=b"{}", status_code=status, headers={"X-hal0-Resolved-Model": "from-upstream"}
+    )
+    v1._stamp_resolved(response, model="qwen3-27b", slot="agent")
+    assert "x-hal0-resolved-model" not in response.headers
+    assert response.headers["x-hal0-slot"] == "agent"
+
+
+@pytest.mark.parametrize("status", [200, 201, 206])
+def test_a_successful_response_names_both(status: int) -> None:
+    response = Response(content=b"{}", status_code=status)
+    v1._stamp_resolved(response, model="qwen3-27b", slot="agent")
+    assert response.headers["x-hal0-resolved-model"] == "qwen3-27b"
+    assert response.headers["x-hal0-slot"] == "agent"

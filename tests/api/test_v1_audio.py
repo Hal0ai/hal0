@@ -442,9 +442,7 @@ def test_v1_audio_transcriptions_names_the_slot_and_drops_an_upstream_copy(
     )
 
     assert r.status_code == 200, r.text
-    assert r.headers.get("x-hal0-slot") not in (None, "from-upstream")
-    assert r.headers.get("x-hal0-resolved-model") != "from-upstream"
-    assert r.headers.get("x-hal0-resolved-model") != "moonshine-small-streaming-en" or (
-        client.app.state.slot_manager.loaded_model_id(r.headers["x-hal0-slot"])
-        == "moonshine-small-streaming-en"
-    )
+    # Exact: the agent anchor slot answered, and it is a single-model engine,
+    # so the header is that slot's recorded model, not the name in the form.
+    assert r.headers["x-hal0-slot"] == "agent"
+    assert r.headers["x-hal0-resolved-model"] == "test-model"

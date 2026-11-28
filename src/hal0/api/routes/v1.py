@@ -1223,26 +1223,32 @@ async def _resolved_identity(
 ) -> tuple[str, str]:
     """``(model, slot)`` that answered ``call``; either may be ``""`` (unknown).
 
-    The model is stated only when hal0 can vouch for it:
+    THE RULE (#4017), applied at every stamp site through this function and
+    :func:`_stamp_resolved`: the model header appears only on a successful
+    response, and carries only one of two things hal0 can vouch for:
 
-    * a remote provider (no slot): the id hal0 sent upstream;
-    * a slot whose engine serves the one model it loaded whatever the request
-      names (llama-server and the single-purpose engines): the registry id in
-      the slot's own state. Never the routing decision's ``resolved_model``:
-      the dispatcher's fallback path records the caller's requested name
-      there, the one value this header must not repeat;
-    * a slot whose engine picks the model from the request (FastFlowLM): the
-      slot's recorded model only when it is also the id hal0 sent. A request
-      that named another tag was answered by something hal0 did not see, so
-      the model is left out and the slot alone is named.
+    1. the id hal0 put on the wire, or
+    2. the slot's own record of what it has loaded.
 
-    ``sent_model`` is for callers whose forwarded body is not JSON.
+    Never the routing decision's ``resolved_model``, which on some paths is
+    the caller's requested name and on others an id the provider never saw.
+
+    * Remote provider (no slot): (1). The JSON body the dispatcher built, or
+      ``sent_model`` when the forwarded body is not JSON (a multipart upload
+      keeps the caller's own ``model`` field). hal0 states what it asked for;
+      a provider that chooses a model itself is not second-guessed.
+    * Slot whose engine serves the one model it loaded whatever the request
+      names (llama-server and the single-purpose engines): (2).
+    * Slot whose engine picks the model from the request (FastFlowLM): (2)
+      only when it equals (1); otherwise the model is left out and the slot
+      alone is named.
     """
+    wire = (sent_model if sent_model is not None else _sent_model(call)).strip()
     slot = (
         getattr(call, "slot_name", "") or getattr(call, "container_slot_name", "") or ""
     ).strip()
     if not slot:
-        return (getattr(call, "resolved_model", "") or "").strip(), ""
+        return wire, ""
     slot_manager = getattr(request.app.state, "slot_manager", None)
     loaded = getattr(slot_manager, "loaded_model_id", None)
     try:
@@ -1251,22 +1257,27 @@ async def _resolved_identity(
         return "", slot
     if not isinstance(model, str) or not model:
         return "", slot
-    if await _slot_picks_model_by_request(request, slot):
-        sent = (sent_model if sent_model is not None else _sent_model(call)).strip()
-        if sent != model:
-            return "", slot
+    if await _slot_picks_model_by_request(request, slot) and wire != model:
+        return "", slot
     return model, slot
 
 
 def _stamp_resolved(response: Response, *, model: str, slot: str) -> None:
     """Set the resolved-model and slot headers on ``response``, or remove them.
 
+    The second half of the rule in :func:`_resolved_identity`: the model is
+    stated only on a successful (2xx) response. An upstream's error, mirrored
+    to the client, was not produced by a model hal0 can name. The slot is
+    stated on any response, since it says who answered, errors included.
+
     Whatever the upstream sent under these names is dropped first: they are
     hal0's statement, and an upstream that happens to send one (another hal0
     behind this one) must not be passed through as if hal0 had said it. A
-    value hal0 does not know, or one a header cannot carry (non-ASCII,
-    control characters, surrounding spaces), leaves the header absent.
+    value a header cannot carry (non-ASCII, control characters, surrounding
+    spaces) leaves the header absent.
     """
+    if not 200 <= getattr(response, "status_code", 200) < 300:
+        model = ""
     for header, value in ((RESOLVED_MODEL_HEADER, model), (RESOLVED_SLOT_HEADER, slot)):
         if header in response.headers:
             del response.headers[header]
