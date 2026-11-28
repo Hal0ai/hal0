@@ -404,6 +404,18 @@ if [[ "${MODELS_DIR}" != /* ]]; then
     die "--models-dir must be an absolute path (got: ${MODELS_DIR})"
 fi
 
+# ── HAL0_NPU_SETUP ───────────────────────────────────────────────────────────
+# Decides whether the "NPU prerequisites (FastFlowLM)" step runs: auto (the
+# default, also when unset or empty) installs the NPU software only on a box
+# with an NPU device, on runs the step even with no device visible (an NPU that
+# is passed through after the install), off skips it. Checked here, before the
+# installer changes anything.
+HAL0_NPU_SETUP="${HAL0_NPU_SETUP:-auto}"
+case "${HAL0_NPU_SETUP}" in
+    auto | on | off) ;;
+    *) die "HAL0_NPU_SETUP must be auto, on or off (got: ${HAL0_NPU_SETUP})" ;;
+esac
+
 # Step total. Kept here so editors who add or remove a ui_step bump the
 # visible counter in the same diff. Verify with:
 #   grep -c '^ui_step ' installer/install.sh
@@ -3219,6 +3231,8 @@ fi
 #      releases. Verified BEFORE dpkg install; fail-soft if unreachable
 #      (NPU-less hal0 still ships — FLM trio gates on `flm validate`).
 #
+# The step runs only when the NPU device node is present, or with HAL0_NPU_SETUP=on.
+#
 # Refs: ADR-0009 (FLM trio NPU packing).
 ui_step "NPU prerequisites (FastFlowLM)" "~10-60s (apt hosts only)"
 
@@ -3267,7 +3281,17 @@ esac
 FLM_DEB_SHA256="$(_flm_sha_for_suffix "${FLM_DEB_SUFFIX}")"
 FLM_DEB_URL="https://github.com/ROCm/FastFlowLM/releases/download/v${FLM_DEB_VERSION}/fastflowlm_${FLM_DEB_VERSION}_${FLM_DEB_SUFFIX}_amd64.deb"
 
-if [[ "${DEV_MODE}" -eq 1 ]]; then
+# Has this box an NPU? The same device node, with the same test override, that
+# preflight_gpu (installer/lib/preflight.sh) looks for. In an LXC container or a
+# box the node exists only when it was passed through, which is the test wanted.
+# This comes before the dev-mode and no-apt branches: a box with no NPU is told
+# that, not about Debian packages it does not need.
+_npu_node="${HAL0_NPU_ACCEL_NODE:-/dev/accel/accel0}"
+if [[ "${HAL0_NPU_SETUP:-auto}" == "off" ]]; then
+    info "HAL0_NPU_SETUP=off — NPU software not installed; unset it and re-run the installer to install it later"
+elif [[ "${HAL0_NPU_SETUP:-auto}" == "auto" && ! -e "${_npu_node}" ]]; then
+    info "no NPU device (${_npu_node}), so the NPU software is not installed. If this box has an NPU, load its driver (amdxdna) or pass the device into this container, then re-run the installer; or set HAL0_NPU_SETUP=on."
+elif [[ "${DEV_MODE}" -eq 1 ]]; then
     # Dev installs don't touch the host's apt or third-party package
     # sources — devs install once manually (see installer/README.md).
     # We still log what *would* have happened so the dev knows the gap
