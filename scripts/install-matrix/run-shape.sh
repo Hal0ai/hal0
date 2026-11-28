@@ -36,7 +36,7 @@ source "${HERE}/lib/pve.sh"
 
 # Deadlines (seconds) for guest commands longer than ct_exec's default 120.
 T_SLOW=300      # package install, unpacking a tree, downloading install.sh
-T_PROBE=900     # collect.sh probe (a chat, a memory write, a Hermes reply)
+T_PROBE="$(_pve_t PROBE 900)"  # collect.sh probe (a chat, a memory write, a Hermes reply); HAL0_MATRIX_TIMEOUT_PROBE
 T_UNINSTALL=600
 
 INSTALL_URL="https://hal0.dev/install.sh"
@@ -662,6 +662,7 @@ if [[ "$DRY_RUN" == "1" ]]; then
   SCRATCH="$(mktemp -d)"
   ART="$SCRATCH"
   plan "would write artifacts to ${OUT:-tests/harness/reports/install-matrix/<UTC timestamp>-${SHAPE_ID}}"
+  plan "probe deadline: ${T_PROBE} s (HAL0_MATRIX_TIMEOUT_PROBE)"
 else
   [[ -n "$OUT" ]] || OUT="${REPORT_ROOT}/$(date -u +%Y%m%dT%H%M%SZ)-${SHAPE_ID}"
   mkdir -p "$OUT"

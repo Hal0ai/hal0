@@ -332,6 +332,32 @@ def test_dry_run_plan_shows_the_needed_sum(host):
     assert "host must show 54 GB available to start" in gpu
 
 
+def test_dry_run_plan_shows_the_probe_deadline_and_its_override(host):
+    default = "\n".join(plan_lines(host.dry("u2604-cpu-unattended")))
+    assert "probe deadline: 900 s" in default
+    set_to = "\n".join(
+        plan_lines(host.dry("u2604-cpu-unattended", HAL0_MATRIX_TIMEOUT_PROBE="1200"))
+    )
+    assert "probe deadline: 1200 s" in set_to
+    for bad in ("0", "12x", "-5", ""):
+        got = "\n".join(plan_lines(host.dry("u2604-cpu-unattended", HAL0_MATRIX_TIMEOUT_PROBE=bad)))
+        assert "probe deadline: 900 s" in got, bad
+
+
+def test_the_probe_deadline_override_ends_a_slow_probe(host):
+    """HAL0_MATRIX_TIMEOUT_PROBE=2 against a probe that sleeps 10 s: the probe
+    is cut by its 2 s deadline, the run goes on and still destroys its container."""
+    r = host.run(
+        "u2604-cpu-unattended", "--vmid", "172", "--out", str(host.out),
+        HAL0_MATRIX_TIMEOUT_PROBE="2", FAKE_PROBE_SLEEP="10",
+    )  # fmt: skip
+    assert "collect probe failed" in r.stderr, r.stderr
+    assert (host.state / "probe-started").exists()
+    note = (host.out / "collect.err").read_text()
+    assert "passed its 2s deadline" in note, note
+    assert not (host.state / "present").exists()
+
+
 def _watch_env(**extra):
     return {"HAL0_MATRIX_WATCH_SECONDS": "1", **extra}
 
