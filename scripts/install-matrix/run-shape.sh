@@ -937,9 +937,10 @@ install_in_terminal() {
   local remote tty_argv drv rc=0
   ct_owned "$VMID" "$NONCE" \
     || end_run not_owned "the container could not be proven to belong to this run" "refusing: container ${VMID} is not harness-owned"
-  remote="$(ct_guard "$VMID" "$NONCE")pct exec ${VMID} -- bash -c $(sq "$INSTALL_SCRIPT")"
+  remote="$(ct_guard "$VMID" "$NONCE")pct exec ${VMID} -- ${_PVE_GUEST_ENV} bash -c $(sq "$INSTALL_SCRIPT")"
   # -e none: no escape character, so nothing the guest prints or a reply types can be taken for one.
-  tty_argv=(ssh -tt -e none -o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=15 -o ServerAliveCountMax=4
+  # env LC_ALL=C LANG=C: the operator's locale is not sent to the host (see _pve_ssh).
+  tty_argv=(env LC_ALL=C LANG=C ssh -tt -e none -o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=15 -o ServerAliveCountMax=4
     -- "$PVE_ALIAS" "$remote")
   drv=(python3 -I "${HERE}/tty_drive.py" --answers "$ANSWERS_FILE" --transcript "${ART}/transcript.txt"
     --result "${ART}/driver.json" --timeout "$TIMEOUT" -- "${tty_argv[@]}")

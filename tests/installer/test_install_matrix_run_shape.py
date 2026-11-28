@@ -36,6 +36,7 @@ desc_line() {
   printf 'description: %s%s\n' "$d" "${FAKE_DESC_SUFFIX-%0A}"
 }
 printf '%s\n' "$*" >> "$FAKE_STATE/ssh.log"
+printf '%s\n' "${LC_ALL-unset}" >> "$FAKE_STATE/locale.log"
 printf '%s %s\n' "$(date +%s.%N)" "${*: -1}" >> "$FAKE_STATE/ssh.times"
 cmd="${*: -1}"
 plain="${cmd//\\/}"
@@ -527,6 +528,23 @@ def test_the_dry_run_creates_no_create_log(host):
     r = host.dry("u2604-cpu-unattended")
     assert r.returncode == 0, r.stderr
     assert not host.out.exists()
+
+
+@pytest.mark.parametrize("shape", ["u2604-cpu-unattended", "u2604-cpu-terminal"])
+def test_every_guest_command_runs_with_lc_all_c_whatever_the_operators_locale(host, shape):
+    # The operator's en_US.UTF-8 reached the guest through ssh's SendEnv and made
+    # every guest bash print a setlocale warning ahead of the real error.
+    r = host.run(
+        shape, "--vmid", "172", "--out", str(host.out),
+        LC_ALL="en_US.UTF-8", LANG="en_US.UTF-8",
+    )  # fmt: skip
+    assert r.returncode == 0, r.stderr
+    execs = [c for c in host.calls() if "pct exec 172" in c]
+    assert execs
+    for call in execs:
+        assert "pct exec 172 -- env LC_ALL=C LANG=C bash -c" in call, call
+    seen = (host.state / "locale.log").read_text().split()
+    assert seen and set(seen) == {"C"}, "no call to the host carries the operator's locale"
 
 
 def test_the_tree_push_and_unpack_failures_record_their_reasons(host, tmp_path):

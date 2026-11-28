@@ -21,6 +21,10 @@
 # The four features scripts/proxmox-ve/ct/hal0.sh declares (var_fuse, var_keyctl,
 # var_mknod, and nesting from the README); a test pins the equality.
 _PVE_FEATURES="nesting=1,keyctl=1,fuse=1,mknod=1"
+# Every command run in a guest starts with this, in the fixed command text: the C
+# locale needs no locale files, so no setlocale warning can be mistaken for the
+# error of a failed step. (The operator's own locale is not sent either; see _pve_ssh.)
+_PVE_GUEST_ENV="env LC_ALL=C LANG=C"
 _PVE_TAG="hal0-matrix"
 _PVE_HOST_PREFIX="hal0-mx-"
 # ct_create returns this when it refused before running `pct create`: nothing
@@ -184,7 +188,10 @@ _pve_ssh() {
   # pipefail makes ssh's own failure reach the `||`; the caller's setting is put back.
   [[ -o pipefail ]] && had_pf=1
   set -o pipefail
-  "${tmo[@]}" ssh "${nflag[@]}" -o BatchMode=yes -o ConnectTimeout=10 \
+  # LC_ALL=C: ssh's default SendEnv sends LANG and LC_* to the host, and a locale
+  # the host or guest does not have makes every bash there print a setlocale
+  # warning ahead of the real error. The guest side is set in the command text.
+  LC_ALL=C LANG=C "${tmo[@]}" ssh "${nflag[@]}" -o BatchMode=yes -o ConnectTimeout=10 \
     -o ServerAliveInterval=15 -o ServerAliveCountMax=4 -- "$host" "$2" 2>&"$errfd" \
     | _pve_cap_stream "$name" "$cap" || rc="${PIPESTATUS[0]}"
   [[ "$had_pf" == 1 ]] || set +o pipefail
@@ -622,7 +629,7 @@ ct_exec() {
   _PVE_DEADLINE="$(_pve_t EXEC 120 "${CT_EXEC_TIMEOUT:-}")"
   _ct_require_owned "$vmid" "$CT_NONCE" || return 1
   [[ $# -ge 2 ]] || { _pve_err "ct_exec: no command given"; return 1; }
-  pve_run "$(ct_guard "$vmid" "$CT_NONCE")pct exec ${vmid} -- bash -c $(_pve_q "$2")"
+  pve_run "$(ct_guard "$vmid" "$CT_NONCE")pct exec ${vmid} -- ${_PVE_GUEST_ENV} bash -c $(_pve_q "$2")"
 }
 
 # What the network wait found, set by every call to ct_wait_network:
@@ -727,7 +734,7 @@ ct_push() {
   _ct_require_owned "$vmid" "$CT_NONCE" || return 1
   [[ -f "$src" ]] || { _pve_err "no such local file: ${src}"; return 1; }
   [[ -n "$dst" ]] || { _pve_err "ct_push: no remote path"; return 1; }
-  _pve_ssh 1 "$(ct_guard "$vmid" "$CT_NONCE")pct exec ${vmid} -- bash -c $(_pve_q "cat > $(_pve_q "$dst")")" <"$src"
+  _pve_ssh 1 "$(ct_guard "$vmid" "$CT_NONCE")pct exec ${vmid} -- ${_PVE_GUEST_ENV} bash -c $(_pve_q "cat > $(_pve_q "$dst")")" <"$src"
 }
 
 # ct_pull <vmid> <remote> <local>: stream a guest file out.
@@ -739,7 +746,7 @@ ct_pull() {
   tmp="$(mktemp "${dst}.XXXXXX")" || { _pve_err "cannot create a temporary file beside ${dst}"; return 1; }
   # The path may come from the guest: only a regular file is read (test -f is
   # false for a device, a FIFO or a symlink to one), in the same remote command.
-  if _PVE_STREAM="$(basename -- "$dst")" pve_run "$(ct_guard "$vmid" "$CT_NONCE")pct exec ${vmid} -- bash -c $(_pve_q "test -f $(_pve_q "$src") && cat $(_pve_q "$src")")" >"$tmp"; then
+  if _PVE_STREAM="$(basename -- "$dst")" pve_run "$(ct_guard "$vmid" "$CT_NONCE")pct exec ${vmid} -- ${_PVE_GUEST_ENV} bash -c $(_pve_q "test -f $(_pve_q "$src") && cat $(_pve_q "$src")")" >"$tmp"; then
     mv -f -- "$tmp" "$dst"
   else
     rc=$?

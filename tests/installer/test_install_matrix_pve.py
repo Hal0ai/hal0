@@ -80,6 +80,8 @@ class Fake:
         ssh.write_text(
             "#!/usr/bin/env bash\n"
             f'printf "%s\\n" "$*" >> {shlex.quote(str(self.log))}\n'
+            # the locale the call was made with, one line per call
+            f'printf "%s\\n" "${{LC_ALL-unset}}" >> {shlex.quote(str(self.dir / "locale.log"))}\n'
             'has_n=0; for a in "$@"; do [[ "$a" == -n ]] && has_n=1; [[ "$a" == -- ]] && break; done\n'
             f'[[ "$has_n" == 1 ]] || cat > {shlex.quote(str(self.stdin_dump))}\n'
             'cmd="${*: -1}"\n'
@@ -614,9 +616,9 @@ def test_pick_vmid_range_full(fake):
 
 ACTIONS = [
     ("ct_start 172", "pct start 172"),
-    ("ct_exec 172 'id'", "pct exec 172 -- bash -c"),
-    ("ct_push 172 /etc/hostname /root/x", "pct exec 172 -- bash -c"),
-    ("ct_pull 172 /root/x {tmp}", "pct exec 172 -- bash -c"),
+    ("ct_exec 172 'id'", "pct exec 172 -- env LC_ALL=C LANG=C bash -c"),
+    ("ct_push 172 /etc/hostname /root/x", "pct exec 172 -- env LC_ALL=C LANG=C bash -c"),
+    ("ct_pull 172 /root/x {tmp}", "pct exec 172 -- env LC_ALL=C LANG=C bash -c"),
     ("ct_apply_device_rules 172 0 226", "lxc.cgroup2.devices.allow"),
     ("ct_destroy 172 $CT_NONCE", "pct destroy 172 --force --purge"),
 ]
@@ -1276,7 +1278,7 @@ def test_exec_quotes_command_as_one_argument(fake):
     fake.run(f"ct_exec 172 {shlex.quote(cmd)}")
     call = next(c for c in fake.calls() if "pct exec" in c)
     tokens = shlex.split(call)
-    assert tokens[-5:-2] == ["172", "--", "bash"]
+    assert tokens[-8:-2] == ["172", "--", "env", "LC_ALL=C", "LANG=C", "bash"]
     assert tokens[-2:] == ["-c", cmd]
     assert " -t" not in call.replace("testpve", "")
 
@@ -1462,6 +1464,31 @@ def test_the_wait_deadline_has_its_own_override(fake):
         env={**NET_ENV, "HAL0_MATRIX_TIMEOUT_NETWORK": "1"},
     )
     assert "rc=1" in r.stdout and "after 1s" in r.stderr
+
+
+# --- the guest's locale: commands run with LC_ALL=C, set in the command text --
+
+
+def test_guest_commands_carry_lc_all_c_in_the_remote_command_text(fake, tmp_path):
+    _owned_rules(fake, 172)
+    fake.rule("pct exec 172", "")
+    fake.run(
+        "ct_exec 172 'echo hi'\n"
+        "ct_push 172 /etc/hostname /root/x\n"
+        f"ct_pull 172 /root/x {shlex.quote(str(tmp_path / 'out'))}",
+    )
+    execs = [c for c in fake.calls() if "pct exec" in c]
+    assert len(execs) == 3
+    for call in execs:
+        assert "pct exec 172 -- env LC_ALL=C LANG=C bash -c" in call, call
+
+
+def test_the_local_locale_is_not_forwarded_to_the_host(fake):
+    _owned_rules(fake, 172)
+    fake.rule("pct exec 172", "")
+    fake.run("ct_exec 172 'echo hi'", env={"LC_ALL": "en_US.UTF-8"})
+    seen = (fake.dir / "locale.log").read_text().split()
+    assert seen and set(seen) == {"C"}, seen
 
 
 # --- host-devices.sh --------------------------------------------------------
