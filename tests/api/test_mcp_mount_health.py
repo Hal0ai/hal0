@@ -25,10 +25,11 @@ def test_healthy_app_reports_mcp_mounted(client: TestClient) -> None:
     assert set(body["checks"]["mcp_mount"]["servers"]) >= {"hal0-admin"}
 
 
-def test_failed_mount_degrades_health_and_names_the_reason(
+def test_failed_mount_degrades_health_and_points_at_the_journal(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A mount failure must flip /api/health/system to degraded and say why."""
+    """A mount failure flips /api/health/system to degraded. The reply says
+    where the reason is; the reason itself stays in the journal."""
     app = client.app
     monkeypatch.setattr(
         app.state,
@@ -43,7 +44,8 @@ def test_failed_mount_degrades_health_and_names_the_reason(
     assert body["status"] == "degraded"
     check = body["checks"]["mcp_mount"]
     assert check["ok"] is False
-    assert "catalog drift" in check["detail"]
+    assert "hal0.mcp.mount_failed" in check["detail"]
+    assert "catalog drift" not in check["detail"]
 
 
 def test_mount_failure_is_recorded_on_app_state(monkeypatch: pytest.MonkeyPatch) -> None:

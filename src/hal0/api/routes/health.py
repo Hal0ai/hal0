@@ -33,6 +33,16 @@ from hal0.upstreams.catalog import curated_model_ids
 
 log = structlog.get_logger(__name__)
 
+#: What ``GET /api/health/system`` says when a check fails with an exception.
+#: The route is open, so it reports that the check failed and where the reason
+#: is, never the text of the exception.
+_SLOT_MANAGER_FAILED_DETAIL = (
+    "the slot manager did not answer; see the hal0-api journal (hal0.health.slot_manager_failed)"
+)
+_MCP_MOUNT_FAILED_DETAIL = (
+    "the MCP servers failed to mount; see the hal0-api journal (hal0.mcp.mount_failed)"
+)
+
 router = APIRouter()
 
 # Below this free-space floor a disk check reports "degraded" (not down —
@@ -344,7 +354,10 @@ async def health_system(request: Request) -> dict[str, Any]:
             }
             degraded = degraded or not sm_ok
         except Exception as exc:
-            checks["slot_manager"] = {"ok": False, "detail": str(exc)}
+            # This route answers without a credential, so the reply carries a
+            # fixed sentence; the exception itself goes to the journal.
+            log.warning("hal0.health.slot_manager_failed", error=str(exc))
+            checks["slot_manager"] = {"ok": False, "detail": _SLOT_MANAGER_FAILED_DETAIL}
             degraded = True
 
     # ── event bus alive ─────────────────────────────────────────────────
@@ -363,7 +376,9 @@ async def health_system(request: Request) -> dict[str, Any]:
     mcp_ok = not mount_error and bool(servers)
     checks["mcp_mount"] = {"ok": mcp_ok, "servers": servers}
     if mount_error:
-        checks["mcp_mount"]["detail"] = str(mount_error)
+        # The reason was logged when the mount failed (``hal0.mcp.mount_failed``);
+        # the reply only points there.
+        checks["mcp_mount"]["detail"] = _MCP_MOUNT_FAILED_DETAIL
     elif not servers:
         checks["mcp_mount"]["detail"] = "no MCP servers mounted"
     degraded = degraded or not mcp_ok

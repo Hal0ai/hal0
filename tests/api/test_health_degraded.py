@@ -7,6 +7,7 @@ endpoint lied.
 
 from __future__ import annotations
 
+import pytest
 from fastapi.testclient import TestClient
 
 from hal0.slots.manager import Slot
@@ -98,3 +99,22 @@ def test_health_system_failure_reasons_are_machine_readable(client: TestClient) 
     mcp = checks["mcp_mount"]
     if mcp["ok"] is False:
         assert isinstance(mcp["detail"], str) and mcp["detail"]
+
+
+def test_a_failing_slot_manager_reports_a_fixed_detail(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The check fails and degrades the status; the reply carries a fixed
+    sentence, and the exception text goes to the journal only."""
+
+    class _Broken:
+        async def list(self) -> list[object]:
+            raise RuntimeError("internal reason 7f3a")
+
+    monkeypatch.setattr(client.app.state, "slot_manager", _Broken(), raising=False)
+    body = client.get("/api/health/system").json()
+    assert body["status"] == "degraded"
+    check = body["checks"]["slot_manager"]
+    assert check["ok"] is False
+    assert "hal0.health.slot_manager_failed" in check["detail"]
+    assert "7f3a" not in str(body)
