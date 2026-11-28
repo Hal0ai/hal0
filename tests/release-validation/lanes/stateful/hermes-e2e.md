@@ -209,3 +209,9 @@ every config file you touched and its final contents in `box_state_on_exit`.
 * slot_list count must equal real slots only, and REST state must agree with MCP slot_list; REST has virtual rows state=null while MCP shows status=serving (#2697, known).
 * Record /var/lib/hal0/.hermes/config.yaml owner and mode at lane entry and exit (640 vs 600 seen, unattributed).
 * Install-time smoke memory_roundtrip warn is #2671 (race), later reprovisions pass on stale markers; a chat_completions timeout in smoke is a #3809 recurrence candidate only if brain was idle.
+
+## Added in kit 22
+
+* Run the 10 s checks (c0, c4, c6, c9, c23, c24, c27) FIRST, before any chat turn, so the memory queue cannot starve them. Gate chat turns on a drained Hindsight queue AND a loaded brain (the reaper evicted brain between stages).
+* Record the slot_list ground truth (real slot count and ready names from REST) before the tool-use turn so the answer can be scored automatically.
+* Two cancelled batch_retain ops in hal0:shared need an attributable cause (an earlier lane's bank or embed change); note it.

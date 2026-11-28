@@ -235,3 +235,10 @@ uses it); rerank unloaded; every throwaway slot deleted and its unit reset. Stat
 * Record the CLI progress banner budget ('up to N s': load 2139, restart 3243, unload 1104 on 20261127) against the documented 180 s server budget; note it, do not file until the budget source is verified.
 * Hand-registered fixtures keep their upstream filenames; confirm registered capabilities (embed/rerank, not chat) after `model add`.
 * A slot deleted then recreated under the same name inherits a stale models[] (#3879); use fresh slot names.
+
+## Added in kit 22
+
+* After slot swap A->B->A assert /api/slots/<n>.models equals [TOML default] only (#3879 shape also appears after a swap round trip).
+* Assert capacity Total for a CPU-pinned slot books zero VRAM after the vulkan->cpu edit+load.
+* Clear a bad image_pin then load straight away; the slot stayed in error until an explicit unload+load. Record, do not file until confirmed intended.
+* Seed comment stripping on slot edit is known (`slot-write-strips-toml-comments`).
