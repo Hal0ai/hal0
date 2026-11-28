@@ -32,7 +32,7 @@ from .document import (
 from .facts import FactsError, load_facts
 from .flow_basic import GPU_REASON_OTHER
 from .flow_model import Outcome, State
-from .session import SAVE_COPY, Inputs, Interrupted, run_screens
+from .session import Inputs, Interrupted, run_screens
 from .term import can_open
 
 EXIT_OK = 0
@@ -187,7 +187,7 @@ def _keep_token(inp: Inputs, doc: Document, token: str, secret_out: Path | None)
 
 def _refresh_copy(state: State, doc: Document) -> None:
     """Write the saved copy again so it never holds answers the person later changed."""
-    path = flow.chosen(state).get(SAVE_COPY)
+    path = flow.chosen(state).get(flow.SAVE_COPY_KEY)
     if path is None:
         return
     try:

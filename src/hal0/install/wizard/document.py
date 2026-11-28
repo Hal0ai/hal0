@@ -103,7 +103,6 @@ def preset(catalog: Catalog, install_type: str) -> Document:
     return doc
 
 
-_FLAG_VALUE_NEEDED = frozenset({"--models-dir"})
 _FLAG_NO_VALUE: dict[str, tuple[tuple[str, object], ...]] = {
     "--no-owui": (("apps.openwebui.enabled", False),),
     "--no-comfyui": (("gen.mode", "off"),),
@@ -194,7 +193,7 @@ def _flag_overrides(flags: Sequence[str]) -> list[Override]:
             continue
         elif name in _FLAG_NO_VALUE and not has_value:
             out.extend(Override(key, val, name) for key, val in _FLAG_NO_VALUE[name])
-        elif name in _FLAG_NO_VALUE or name in _FLAG_VALUE_NEEDED:
+        elif name in _FLAG_NO_VALUE:
             raise DocumentError(f"{name} does not take a value")
         else:
             raise DocumentError(f"unknown flag {name}")

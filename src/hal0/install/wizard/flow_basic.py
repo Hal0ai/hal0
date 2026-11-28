@@ -17,6 +17,7 @@ from .facts import Disk, Facts
 from .flow_model import (
     DEFAULT_HOST,
     DEFAULT_PORT,
+    SAVE_COPY_KEY,
     Outcome,
     Pick,
     Row,
@@ -170,7 +171,7 @@ def type_enter(s: State) -> State:
     picked = type_rows(s)[s.cursor].value
     if picked != current_type(s):
         named = (s.catalog.questions.get(q) for q in ("model_store", "cpu_only"))
-        kept = {"_save_copy_to", *(q.answer_key for q in named if q is not None)}
+        kept = {SAVE_COPY_KEY, *(q.answer_key for q in named if q is not None)}
         s = replace(s, answers={k: v for k, v in s.answers.items() if k in kept}, token=None)
     return go_on(record_answer(s, key, picked))
 
@@ -433,7 +434,7 @@ def _warnings(s: State, doc: Document) -> list[str]:
 
 
 def review_intro(s: State) -> tuple[str, ...]:
-    path = s.answers.get("_save_copy_to")
+    path = s.answers.get(SAVE_COPY_KEY)
     return () if path is None else (f"Saving a copy of these answers to {path}.",)
 
 
@@ -442,9 +443,9 @@ def review_enter(s: State) -> State:
 
 
 def commit_save(s: State, text: str) -> State:
-    path, error = _check_copy(text, s.answers.get("_save_copy_to"))
+    path, error = _check_copy(text, s.answers.get(SAVE_COPY_KEY))
     if error is not None:
         return replace(s, error=error)
     return replace(
-        s, answers={**s.answers, "_save_copy_to": path}, editing=None, field="", error=None
+        s, answers={**s.answers, SAVE_COPY_KEY: path}, editing=None, field="", error=None
     )

@@ -88,7 +88,7 @@ def test_no_drawn_row_is_wider_than_the_terminal(
 ) -> None:
     for v in all_views:
         for line in render(v, width=width, plain=plain, color=not plain):
-            assert len(strip_ansi(line)) <= width
+            assert len(strip_ansi(line)) < width
 
 
 def test_cursor_form_marks_the_highlighted_row_and_ticks(jobs_view: View) -> None:

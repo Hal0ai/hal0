@@ -24,8 +24,6 @@ from .flow_model import Outcome, Row, Screen, State, View
 from .render import render
 from .term import Terminal, TerminalUnavailable
 
-SAVE_COPY = "_save_copy_to"
-_SAVE_FIELD = "save"
 _SIGNALS = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
 
 MakeDocument = Callable[[Mapping[str, object]], Document]
@@ -145,7 +143,7 @@ class Session:
             if key in ("INTERRUPT", "EOF"):
                 raise Interrupted
             return state, [key]
-        secret = state.editing is not None and state.field == "token"
+        secret = flow.secret_field_open(state)
         try:
             line = self.term.read_line("> ", echo=not secret)
         except termios.error:
@@ -156,7 +154,7 @@ class Session:
         return (state if cursor is None else replace(state, cursor=cursor)), keys
 
     def _save_copy(self, state: State) -> None:
-        path = flow.chosen(state).get(SAVE_COPY)
+        path = flow.chosen(state).get(flow.SAVE_COPY_KEY)
         if path is None:
             return
         try:
@@ -167,7 +165,7 @@ class Session:
 
     def _press(self, state: State, key: str) -> State:
         """Press a key; write the copy each time the save field is confirmed."""
-        saving = state.editing is not None and state.field == _SAVE_FIELD
+        saving = flow.save_field_open(state)
         after = flow.press(state, key)
         # Confirming a good path is the only thing that replaces the answers while
         # the field is open; a cancelled or refused entry leaves them as they were.

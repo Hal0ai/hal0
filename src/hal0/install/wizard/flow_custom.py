@@ -18,7 +18,9 @@ from .flow_basic import validate_folder
 from .flow_model import (
     DEFAULT_HOST,
     DEFAULT_PORT,
+    TOKEN_FIELD,
     TOO_SMALL,
+    UNCHECKED,
     Row,
     State,
     auto_outcome,
@@ -40,12 +42,10 @@ from .flow_model import (
 _IMAGE_JOB = "images"
 _ASSISTANT_JOB = "hermes"
 _MEMORY_JOB = "memory"
-_UNCHECKED = "could not be checked on this box"
 _NPU_FOUND = "found; set up if it passes its check"
 _PROXMOX = "; in a Proxmox container the host has to pass it through first"
 _AFTER_CHECK = "chosen after hal0 has checked this box"
 _NO_MODELS = "no models to choose from yet; they are added after install"
-_TOKEN = "token"
 _FIELD = "q:"
 _TOKEN_TEXT = re.compile(r"[A-Za-z0-9_-]+")
 _BAD_TOKEN = "a token has only letters, digits, _ and -"
@@ -73,7 +73,7 @@ def _job_state(s: State, c: Component) -> tuple[str, str]:
     if s.facts.npu_device is True and "npu_device" in c.needs:
         return "open", _NPU_FOUND
     if any(satisfied(n, s.facts) is None for n in c.needs):
-        return "open", _UNCHECKED
+        return "open", UNCHECKED
     return "open", ""
 
 
@@ -187,13 +187,13 @@ def models_cursor(s: State) -> int:
 
 
 def models_title(s: State) -> str:
-    qid = "hf_token" if s.editing is not None and s.field == _TOKEN else _role(s)[1]
+    qid = "hf_token" if s.editing is not None and s.field == TOKEN_FIELD else _role(s)[1]
     q = _question(s, qid)
     return "" if q is None else q.title
 
 
 def models_question(s: State) -> str:
-    return "hf_token" if s.editing is not None and s.field == _TOKEN else _role(s)[1]
+    return "hf_token" if s.editing is not None and s.field == TOKEN_FIELD else _role(s)[1]
 
 
 def _models_next(s: State) -> State:
@@ -227,7 +227,7 @@ def models_enter(s: State) -> State:
     )
     asks = picked is not None and picked.needs_account and _question(s, "hf_token") is not None
     if asks and (s.step == 0 or s.token is None):
-        return replace(s, editing="", field=_TOKEN, error=None)
+        return replace(s, editing="", field=TOKEN_FIELD, error=None)
     # Only the chat step clears a token; the image step keeps what was typed.
     return _models_next(replace(s, token=None) if s.step == 0 and not asks else s)
 

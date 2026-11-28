@@ -78,6 +78,10 @@ class State:
 
 DEFAULT_HOST = "hal0.local"
 DEFAULT_PORT = 8080
+SAVE_COPY_KEY = "_save_copy_to"  # where a copy goes; never written to the document
+SAVE_FIELD = "save"
+TOKEN_FIELD = "token"
+UNCHECKED = "could not be checked on this box"
 TOO_SMALL = "no larger chat model fits this box; the small assistant model will be used"
 UNKNOWN_SIZE = "a chat model; its size is shown before it downloads"
 
@@ -242,7 +246,7 @@ def model_requirement(row: ModelRow, facts: Facts) -> tuple[str, str]:
             continue
         text = f"needs {fmt_gb(need)} GB of {what}"
         if have is None:
-            unchecked = unchecked or f"{text}; could not be checked on this box"
+            unchecked = unchecked or f"{text}; {UNCHECKED}"
         elif have < need:
             return "unavailable", f"{text}; this box has {fmt_gb(have)}"
     return "open", unchecked
@@ -282,6 +286,16 @@ def download_total(s: State) -> float | None:
 
 def gpu_consent(s: State) -> bool:
     return s.facts.gpu_outcome == "cpu_only_needs_consent"
+
+
+def save_field_open(s: State) -> bool:
+    """Whether the field for the copy's path is open."""
+    return s.editing is not None and s.field == SAVE_FIELD
+
+
+def secret_field_open(s: State) -> bool:
+    """Whether the token field is open: what is typed there is never shown."""
+    return s.editing is not None and s.field == TOKEN_FIELD
 
 
 def go_on(s: State) -> State:

@@ -53,6 +53,9 @@ from .flow_custom import (
     storage_rows,
 )
 from .flow_model import (
+    SAVE_COPY_KEY,
+    SAVE_FIELD,
+    TOKEN_FIELD,
     Outcome,
     Row,
     Screen,
@@ -63,9 +66,12 @@ from .flow_model import (
     gpu_consent,
     key_of,
     row_help,
+    save_field_open,
+    secret_field_open,
 )
 
 __all__ = [
+    "SAVE_COPY_KEY",
     "Outcome",
     "Row",
     "Screen",
@@ -74,7 +80,9 @@ __all__ = [
     "chosen",
     "outcome",
     "press",
+    "save_field_open",
     "secret",
+    "secret_field_open",
     "sequence",
     "start",
     "validate_folder",
@@ -168,8 +176,8 @@ _SCREENS: dict[Screen, _Spec] = {
 }
 _FIELDS: dict[str, Callable[[State, str], State]] = {
     "folder": commit_folder,
-    "save": commit_save,
-    "token": commit_token,
+    SAVE_FIELD: commit_save,
+    TOKEN_FIELD: commit_token,
 }
 
 
@@ -223,7 +231,7 @@ def start(
 def _edit(s: State, key: str) -> State:
     text = s.editing or ""
     if key == "ENTER":
-        if not text and s.field != "token":
+        if not text and s.field != TOKEN_FIELD:
             return replace(s, editing=None, field="", error=None)
         return _FIELDS.get(s.field, commit_field)(s, text)
     if key == "BACKSPACE":
@@ -258,7 +266,7 @@ def press(state: State, key: str) -> State:
     if key == "b":
         return _back(s)
     if key == "s" and s.screen is Screen.REVIEW:
-        return replace(s, editing="", field="save")
+        return replace(s, editing="", field=SAVE_FIELD)
     if key not in ("SPACE", "UP", "DOWN", "ENTER"):
         return s
     spec = _SCREENS[s.screen]
@@ -290,7 +298,7 @@ def _position(state: State) -> str:
 
 def _hint(state: State) -> str:
     if state.editing is not None:
-        return _HINT_TOKEN if state.field == "token" else _HINT_FIELD
+        return _HINT_TOKEN if secret_field_open(state) else _HINT_FIELD
     if state.screen is Screen.REVIEW:
         return _HINT_REVIEW
     if state.screen is Screen.GPU and not gpu_consent(state):
@@ -311,7 +319,6 @@ def view(state: State) -> View:
         text = row_help(state, row, spec.question(state))
         if text:
             intro = (*intro, text)
-    secret_field = state.editing is not None and state.field == "token"
     return View(
         state.screen,
         spec.title(state),
@@ -319,7 +326,7 @@ def view(state: State) -> View:
         intro,
         rows,
         state.cursor,
-        "" if secret_field else state.editing,
+        "" if secret_field_open(state) else state.editing,
         state.error,
         _hint(state),
     )

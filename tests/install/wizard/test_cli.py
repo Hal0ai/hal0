@@ -1221,3 +1221,32 @@ def test_a_catalog_without_the_consent_question_is_a_usage_error_on_the_headless
     r = wizard("--catalog", bare, "--facts", consent_facts_path, "--out", out, "--headless")
     assert r.returncode == 2 and not out.exists()
     assert r.stderr == f"hal0 setup: {bare}: question 'cpu_only' is missing\n"
+
+
+def test_the_field_names_and_the_copy_key_have_one_owner(
+    catalog: Catalog, usable_facts: Facts, tmp_path: Path
+) -> None:
+    from hal0.install.wizard import flow, session
+
+    for module in (session, cli):
+        text = Path(module.__file__).read_text()
+        assert '"_save_copy_to"' not in text
+        assert '"save"' not in text and '"token"' not in text
+    review = flow.start(catalog, usable_facts)
+    for key in ("ENTER", "ENTER"):
+        review = flow.press(review, key)
+    saving = flow.press(review, "s")
+    assert flow.save_field_open(saving) and not flow.save_field_open(review)
+    assert not flow.secret_field_open(saving)
+    saved = saving
+    for key in [*str(tmp_path / "c.json"), "ENTER"]:
+        saved = flow.press(saved, key)
+    assert flow.chosen(saved)[flow.SAVE_COPY_KEY] == str(tmp_path / "c.json")
+
+
+def test_the_unchecked_wording_lives_in_one_place() -> None:
+    package = Path(cli.__file__).parent
+    owners = [
+        p.name for p in package.glob("*.py") if "could not be checked on this box" in p.read_text()
+    ]
+    assert owners == ["flow_model.py"]
