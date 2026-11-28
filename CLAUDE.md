@@ -26,7 +26,9 @@ Issues live in GitHub Issues; use the `gh` CLI. Labels have four axes:
 - **Priority**, exactly one once triaged. It says how bad the defect is, not
   when it ships: `P0` (breaks a feature, loses data or state, or is a security
   or privacy exposure), `P1` (wrong or confusing for a user), `P2` (nice to
-  have). The milestone says when; see "Planning" below.
+  have). The milestone says when; see "Planning" below. A `P0` defaults to the
+  current patch milestone. Putting it on a later one is the operator's
+  decision, recorded as a Decision comment on the issue.
 - **Type**, optional: `bug`, `enhancement`, `documentation`, and `epic` for a
   parent issue whose sub-issues carry the work.
 - **Area**, at least one on every new issue: `area:installer`, `area:updater`,
@@ -70,14 +72,18 @@ part a session does itself:
 - **Record a decision where it applies.** When the operator decides something
   in your session, write `Decision (YYYY-MM-DD, operator): ...` as a comment on
   the issue it settles, then bring that issue's labels, milestone and body in
-  line. Say "relayed" when you heard it from another session. A plan kept in a
-  local file or an outside document does not count until an issue summarises
-  it.
+  line. Say "relayed" when you heard it from another session. A relayed
+  decision is a record, not an approval: for anything that needs the
+  operator's yes (a release merge or tag, a change to CI or credentials, an
+  operation on a host, a security disclosure), the session that will act asks
+  the operator itself. A plan kept in a local file or an outside document
+  does not count until an issue summarises it.
 - **A scope change is a line in the scope log**, in the release tracking issue
   and in the milestone description. Do not move an issue between release
   milestones without one.
 - **A fix that still owes a check on a real box** gets a line under "Owed
-  proofs" in the release tracking issue when it merges.
+  proofs" in the release tracking issue when it merges, or earlier when the
+  proof gates the merge.
 - **Before you finish**, run `scripts/plan-lint.sh` and fix what it reports
   about your own issues and pull requests.
 
@@ -96,4 +102,7 @@ spec that a source comment cites under `docs/superpowers/...`, it is in the
 history, not the working tree.
 
 Anything written into the tracked part of the repo is published. Keep host
-names, LAN addresses, and operator-local paths out of it.
+names, LAN addresses, and operator-local paths out of it. The same holds for
+issue, pull request and comment text. For a security finding, write what is
+now enforced, never how to reach the weakness; `SECURITY.md` says how to
+report one.

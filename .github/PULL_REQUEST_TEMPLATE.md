@@ -15,7 +15,8 @@ risk grade, touched surfaces, and test-tier runs before requesting review.
 
 _Waits on:_ <!-- nothing | review | a tag | the operator | hardware -->
 _Owed proof:_ <!-- none, or the check this still owes on a real box; add it
-     to the release tracking issue when this merges -->
+     to the release tracking issue when this merges, or earlier if the proof
+     gates the merge -->
 
 ## Risk grade
 

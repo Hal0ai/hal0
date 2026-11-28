@@ -139,6 +139,11 @@ tracker honest, and they apply to agent sessions exactly as to people:
    for a user) or `P2` (nice to have), and a milestone.
 3. **Cosmetic findings are not filed** unless the same change fixes them.
 
+Issue, pull request and comment text is published, exactly as the tracked
+files are. Keep host names, LAN addresses and local paths out of it. For a
+security finding, write what is now enforced, never how to reach the
+weakness; [`SECURITY.md`](./SECURITY.md) says how to report one.
+
 Every open issue carries exactly one status label (`needs-triage`,
 `needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`) and, once
 triaged, exactly one priority label. New issues also carry at least one
@@ -164,6 +169,9 @@ saying who decided it. `Backlog` holds triaged work with no release.
 Priority and milestone are set separately. Priority says how bad a defect
 is; the milestone says when the fix ships. A `P1` can ride a patch release,
 and a `P2` can be planned into a minor when someone is already in that file.
+A `P0` has a default: it goes to the current patch milestone. Putting it on
+a later one is the operator's decision, recorded as a Decision comment on
+the issue.
 
 **Every open issue and pull request has a milestone.** The one exception is
 an issue still labelled `needs-triage`. A pull request takes the next tag
@@ -196,7 +204,11 @@ Three habits keep those four honest:
 
 - **A decision is written on the issue it settles**, as a comment that
   starts `Decision (YYYY-MM-DD, who):`, and the issue's labels, milestone and
-  body are brought in line with it.
+  body are brought in line with it. A decision heard second-hand is marked
+  "relayed". A relayed decision is a record, not an approval: for anything
+  that needs the operator's yes (a release merge or tag, a change to CI or
+  credentials, an operation on a host, a security disclosure), whoever will
+  act asks the operator directly.
 - **An issue is claimed by a draft pull request that links it.** A
   `ready-for-agent` issue with no linked pull request and no claiming comment
   is free to take.
