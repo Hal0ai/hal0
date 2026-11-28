@@ -109,7 +109,7 @@ You do not edit units. What the person runs:
   `hermes gateway start`: those regenerate the unit and pin it to one release's paths.
   hal0-api also restarts it: `POST /api/agents/hermes/gateway/restart`.
 - **Restart the agent:** `sudo systemctl restart hal0-agent@hermes`, or `POST /api/agents/hermes/restart`.
-- **Reconverge a drifted install** (missing tools, stale unit, wrong ownership): first
+- **Reconverge a drifted install** (missing tools, stale unit; for wrong file ownership see `references/dashboard-permission-mismatch.md`): first
   `sudo hal0 agent reprovision hermes`. It re-runs each provisioning phase whose result drifted,
   and builds a new Hermes release when it finds a reason to (for example a configured platform's
   SDK missing from the live release). Never `hermes setup`: it overwrites the model wiring.

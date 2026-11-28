@@ -19,7 +19,8 @@ The variable names hal0 reads to decide which platforms a box uses are `TELEGRAM
 `DISCORD_BOT_TOKEN` (one per platform; hal0 knows a longer list of platforms, each with its own
 variables).
 
-hal0 has no command, dashboard page or admin tool that writes a Telegram or Discord token.
+hal0 has no command, dashboard page or admin tool meant for an agent to set a Telegram or Discord
+token; the person sets them.
 `provider_credential_write` is **not** it: it stores a model upstream provider's API key.
 The vault is the file the person edits as root.
 
