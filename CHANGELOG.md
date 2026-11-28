@@ -34,7 +34,7 @@ applying. Add those subsections to a version's section to surface them; see
 
 - **The installer asks its questions once, at the start, on a few screens.** Right after its first checks it shows how you want to set up hal0 (Recommended, Minimal or Customize), asks where models are stored, shows a review, and then installs without stopping. It used to ask six questions at three separate moments. (#4049, #4050)
 - **A flag fixes one row on the screens instead of hiding every question.** On the Customize screens `--no-hermes`, `--no-owui` and the other component flags show their row as set by the flag; on the Recommended and Minimal path there is no component row, so the flag simply applies. `--bare` fixes the setup type to Minimal, shown as set by the flag.
-- **An upgrade reuses your answers.** An upgrade reuses the answers saved by the last install. A box installed before this change has none saved, so it is asked once (or, with no terminal, takes the defaults); `--reconfigure` asks again.
+- **An upgrade reuses your answers.** It reuses the answers saved by the last install. A box installed before this change has none saved, so it is asked once (or, with no terminal, takes the defaults); `--reconfigure` asks again.
 
 ### Breaking
 

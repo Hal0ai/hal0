@@ -18,10 +18,14 @@ hal0 ships a bundled agent (Hermes). Its terminal tool — the one that executes
 arbitrary shell commands on the host — is **off by default** as of v1.0 and is
 an explicit opt-in: a row on the installer's Customize screens that you tick
 yourself, `sudo hal0 agent install hermes --terminal-tool`, or
-`HAL0_HERMES_TERMINAL=1` for an unattended install. An answers file or the
-answers saved by an earlier install never turn it on, and an install that shows
-no screens leaves it off unless that variable is set. `hal0 agent status
-hermes` prints the current posture.
+`HAL0_HERMES_TERMINAL=1` for an unattended install. On a fresh box it is off
+unless you do one of those. The answers saved by an earlier install and an
+answers file never turn it on. Once it has been turned on, the box remembers
+that in `/etc/hal0/agents/hermes-terminal-tool`, and running the installer again
+with the row unticked does not turn it off; use
+`sudo hal0 agent install hermes --no-terminal-tool`, or set
+`HAL0_HERMES_TERMINAL=0` on the next install run. `hal0 agent status hermes`
+prints the current posture.
 
 Turning it on makes the agent root-equivalent, and the rest of this section
 describes that state. Even with the terminal tool off, the agent runs under

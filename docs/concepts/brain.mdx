@@ -70,8 +70,11 @@ pull.
 <Steps>
 1. **At install time**: set `HAL0_BRAIN_MODEL` before running `install.sh` to
    pull the other curated id instead — `hal0-brain-sft-f16` (2.0 GB, plain
-   GGUF, runs on a CPU-only box too). An unrecognized id is ignored with a
-   warning and the default is pulled instead.
+   GGUF, runs on a CPU-only box too). An id that is not in the installer's
+   model list stops the install before anything changes, with a message naming
+   the id. (If the model list file cannot be read, ids are checked by pattern
+   only and the install step's old behaviour applies: an unrecognized id is
+   ignored with a warning and the default is pulled.)
 2. **After install, per-turn**: point `[brain_chat] model` in `hal0.toml` (or
    the "Model / slot override" field on the dashboard's Agent Chat settings
    page) at any `hal0/<slot>` — e.g. `hal0/npu` to run the steward on the NPU

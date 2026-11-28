@@ -51,10 +51,13 @@ aggregate self-check), so a failure tells you roughly where to look.
    model loads). `hal0/brain` is a virtual model name for the brain slot,
    not a raw model id; hal0
    rewrites the alias before dispatching. The `agent` slot (`hal0/agent`)
-   stays model-less unless the chat model was downloaded: the Recommended setup
-   picks one when one fits this box, while Minimal, or "No chat model for now" on the
-   Customize models screen, leaves it empty (`HAL0_PULL_AGENT_MODEL=1` or
-   `HAL0_AGENT_MODEL=<id>` settles it unattended). Use that name only once the
+   stays model-less unless a chat model was downloaded. On the setup screens
+   the Recommended setup picks one when it fits this box and shows its size on
+   the review screen, while Minimal, or "No chat model for now" on the Customize
+   models screen, leaves it empty. An unattended install leaves the slot
+   without a model unless you asked for one with `HAL0_PULL_AGENT_MODEL=1`,
+   `HAL0_AGENT_MODEL=<id>` (an id from the installer's model list), or an
+   answers file that names `models.starter`. Use that name only once the
    slot has a model. See
    [Send your first chat](/docs/getting-started/first-chat/) for the
    streaming variant and OpenWebUI equivalent.

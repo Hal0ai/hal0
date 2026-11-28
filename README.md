@@ -182,7 +182,10 @@ runs without stopping. The one-line `curl | sudo bash` install shows the
 screens too when a terminal can be opened; over ssh without `-t`, or in CI
 with no terminal, there are no screens and the install is unattended. A script
 that runs the installer inside a terminal session sets `HAL0_NONINTERACTIVE=1`
-or passes `--answers=FILE`. An unattended run takes the Recommended setup without the large chat model; to download it on an unattended run, set `HAL0_PULL_AGENT_MODEL=1` or name it in an answers file (`models.starter`). An upgrade reuses the answers saved by
+or passes `--answers=FILE`. An unattended run takes the Recommended setup
+without the large chat model; to download it on an unattended run, set
+`HAL0_PULL_AGENT_MODEL=1` or name it in an answers file (`models.starter`). An
+upgrade reuses the answers saved by
 the last install; a box installed before this change has none saved, so it is
 asked once. Add `--reconfigure` to be asked again. A component flag such as
 `--no-hermes` shows its row as fixed on the Customize screens (on the other
