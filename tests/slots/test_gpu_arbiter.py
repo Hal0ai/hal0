@@ -1796,7 +1796,13 @@ class _EditorPrompt:
     ) -> None:
         self.gate = _load_gate(gate_path)
         self.gate._SWITCH_POLL_S = 0.05
-        self.gate._SWITCH_TIMEOUT_S = 2.0
+        # The gate has one deadline for a prompt, counted from when it arrives.
+        # Every test that uses this helper expects the prompt to get through,
+        # and several hold a switch open on purpose while the gate polls, so
+        # the time they hold is spent out of this deadline. At 2 s a loaded
+        # runner tripped it (#4067, #4068). None of these tests asserts that the
+        # deadline expires; their own ``wait_for`` timeouts bound them instead.
+        self.gate._SWITCH_TIMEOUT_S = 30.0
         self.gate._fetch_status = self._fetch_status
         self.gate._post_switchover = self._post_switchover
         if hasattr(self.gate, "_announce_prompt"):
@@ -2234,12 +2240,6 @@ async def test_the_gate_asks_again_when_a_restore_beats_its_prompt(
     fake_mgr.ready.add("img")
     arb = GpuArbiter(fake_mgr, state_path=state_path)
     prompt = _EditorPrompt(arb, comfyui_http)
-    # The gate has one deadline for the whole prompt, counted from its start,
-    # and this test parks the gate's polls behind the restore below. On a loaded
-    # runner the restore can take longer than the helper's 2 s deadline, and the
-    # gate then closes on its first poll after the hold. The hold is the test's
-    # own, so give the deadline room for it; the waits below still bound the test.
-    prompt.gate._SWITCH_TIMEOUT_S = 30.0
     # Hold the gate's polls once it has asked for the switch, so the restore
     # lands before the gate can see image mode. Unheld, a loaded runner lets the
     # gate poll first and queue its prompt, and the chat then waits out the
