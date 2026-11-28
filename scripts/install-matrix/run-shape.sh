@@ -356,10 +356,50 @@ finish_result() {
 # it sends USR1 first (the trap is then pending), then kills every process
 # below the main shell except itself. Cleanup runs its own ownership-checked
 # destroy afterwards, and reports LEFT BEHIND if that fails.
+#
+# It also ends by itself when the run that started it is gone (kill -9, the
+# kernel's OOM killer): every second it checks that its parent is still that
+# process, and when it is not it ends what the run had started (found by
+# pid and start time, so a reused pid is left alone), says so, and exits. It
+# holds neither the run lock nor the run's stdout.
+
+# stat_field <pid> <n>: field n (0 = state, 1 = ppid, 19 = start time) of /proc/<pid>/stat.
+stat_field() {
+  local s f
+  { read -r s <"/proc/$1/stat"; } 2>/dev/null || return 1
+  s="${s##*) }"
+  read -ra f <<<"$s"
+  [[ -n "${f[$2]:-}" ]] || return 1
+  printf '%s' "${f[$2]}"
+}
+
+# snap_tree <pid> <skip>: pid:starttime of everything below pid except <skip>.
+snap_tree() {
+  local c st
+  for c in $(pgrep -P "$1" 2>/dev/null || true); do
+    [[ "$c" != "$2" ]] || continue
+    st="$(stat_field "$c" 19)" || continue
+    printf '%s:%s\n' "$c" "$st"
+    snap_tree "$c" "$2"
+  done
+}
+
 watchdog() {
-  local parent="$1" me="$BASHPID" n bad=0 reason="" detail="" c
+  local parent="$1" me="$BASHPID" n bad=0 reason="" detail="" c i e
+  local -a seen=()
+  exec 8>&- >/dev/null
   while :; do
-    sleep "$WATCH_EVERY"
+    for ((i = 0; i < WATCH_EVERY; i++)); do
+      sleep 1
+      if [[ "$(stat_field "$me" 1)" != "$parent" ]]; then
+        for e in ${seen[@]+"${seen[@]}"}; do
+          [[ "$(stat_field "${e%%:*}" 19)" != "${e#*:}" ]] || kill_tree "${e%%:*}"
+        done
+        log "the run that started this watchdog is gone; container ${VMID} may still exist: $(destroy_hint)" >&7
+        exit 0
+      fi
+      mapfile -t seen < <(snap_tree "$parent" "$me")
+    done
     if n="$(pve_mem_available_gb 2>/dev/null)" && [[ "$n" =~ ^[0-9]{1,9}$ ]]; then
       bad=0
       if ((10#$n < 10#$WATCH_FLOOR)); then
@@ -377,6 +417,7 @@ watchdog() {
     fi
   done
   printf 'reason=%s\ndetail=%s\n' "$reason" "$detail" >"$WATCH_FILE"
+  [[ "$(stat_field "$me" 1)" == "$parent" ]] || exit 0
   kill -USR1 "$parent" 2>/dev/null || true
   for c in $(pgrep -P "$parent" 2>/dev/null || true); do
     [[ "$c" == "$me" ]] || kill_tree "$c"

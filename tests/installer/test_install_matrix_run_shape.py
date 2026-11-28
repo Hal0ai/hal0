@@ -358,6 +358,43 @@ def test_after_an_abort_cleanup_destroys_first_and_collects_nothing(host, env):
     assert not (host.state / "present").exists()
 
 
+def _session_members(sid: int) -> list[str]:
+    out = subprocess.run(
+        ["pgrep", "-a", "-s", str(sid)], capture_output=True, text=True, check=False, timeout=10
+    )
+    return [x for x in out.stdout.splitlines() if x]
+
+
+def test_a_killed_run_leaves_no_watchdog_and_no_lock_behind(host):
+    """N3: after kill -9 of the main shell the watchdog ends by itself, with the
+    processes the run had started, and a new run can take the lock."""
+    import fcntl
+
+    proc = spawn(
+        host, "u2604-cpu-unattended", "--vmid", "172", "--out", str(host.out),
+        **_watch_env(FAKE_INSTALL_SLEEP="20"),
+    )  # fmt: skip
+    try:
+        deadline = time.monotonic() + 60
+        while not (host.state / "install-started").exists():
+            assert proc.poll() is None and time.monotonic() < deadline
+            time.sleep(0.05)
+        time.sleep(2.5)  # a few watchdog ticks while the install runs
+        assert len(_session_members(proc.pid)) > 2, "the run's processes should be there"
+        os.kill(proc.pid, signal.SIGKILL)
+        proc.wait(timeout=30)
+        deadline = time.monotonic() + 8
+        left = _session_members(proc.pid)
+        while left and time.monotonic() < deadline:
+            time.sleep(0.2)
+            left = _session_members(proc.pid)
+        assert not left, f"processes of the killed run remain: {left}"
+        with open(host.root / "reports" / ".lock", "w") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    finally:
+        kill_group(proc)
+
+
 def test_watchdog_aborts_after_three_unreadable_readings_in_a_row(host):
     r = host.run(
         "u2604-cpu-unattended", "--vmid", "172", "--out", str(host.out),
