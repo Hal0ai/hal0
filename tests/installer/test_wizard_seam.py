@@ -132,7 +132,7 @@ def _kill_group(pid: int) -> None:
 
 
 def _run_group(
-    argv: list[str], *, timeout: float, **kwargs: object
+    argv: list[str], *, timeout: float = 60, **kwargs: object
 ) -> subprocess.CompletedProcess[str]:
     """subprocess.run in its own session; the whole process group is killed on every exit.
 
@@ -546,12 +546,12 @@ NO_START=0
 {block}
 echo "LOOP DONE reconfigure=${{_HAL0_RECONFIGURE}} args=${{#_HAL0_INSTALL_ARGS[@]}}"
 """
-    return subprocess.run(
+    return _run_group(
         ["bash", "-c", script, "bash", *args],
-        capture_output=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
         text=True,
         env={"PATH": os.environ["PATH"], **env},
-        check=False,
     )
 
 
@@ -1201,7 +1201,9 @@ stat() {{ printf '41ed 1000\\n'; }}
 {block}
 echo DONE
 """
-        proc = subprocess.run(["bash", "-c", script], capture_output=True, text=True, check=False)
+        proc = _run_group(
+            ["bash", "-c", script], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+        )
         assert expect in proc.stdout, proc.stdout + proc.stderr
         if expect == "MKDIR":
             assert "MKDIR -p" in proc.stdout and store in proc.stdout and "DONE" in proc.stdout
@@ -1238,7 +1240,9 @@ _HAL0_SAVED_STORE="{var}/models2" hal0_store_is_operator_choice "{var}/models2" 
 {block}
 echo DONE
 """
-    proc = subprocess.run(["bash", "-c", script], capture_output=True, text=True, check=False)
+    proc = _run_group(
+        ["bash", "-c", script], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+    )
     out = proc.stdout
     assert "DONE" in out, out + proc.stderr
     for p in (store, f"{store}/", f"{var}/models", f"{var}//models/./x/"):
@@ -1278,7 +1282,9 @@ hal0_doc_flm_prepare "$HAL0_FLM_MODELS_DIR" "{store}" "{default}"
 echo "FLM=${{HAL0_FLM_MODELS_DIR-unset}} EXPORTED=${{HAL0_ANSWERS_EXPORTED[*]}}"
 bash -c 'echo "CHILD=${{HAL0_FLM_MODELS_DIR-unset}}"'
 """
-    return subprocess.run(["bash", "-c", script], capture_output=True, text=True, check=False)
+    return _run_group(
+        ["bash", "-c", script], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+    )
 
 
 def test_npu_folder_from_document_only_inside_default_or_operator_store(tmp_path: Path) -> None:
@@ -1362,7 +1368,9 @@ _main_python_usable={usable}
 {region}
 echo "usable=$_main_python_usable" >> "$LOG"
 """
-    subprocess.run(["/bin/bash", "-c", script], capture_output=True, text=True, check=False)
+    _run_group(
+        ["/bin/bash", "-c", script], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+    )
     return log.read_text().splitlines()
 
 
@@ -1389,7 +1397,7 @@ def test_the_wizard_refuses_an_old_python(tmp_path: Path, stub: dict[str, str]) 
     )
     fake.chmod(0o755)
     script_env = {**stub, "STUB_DOC": DOC}
-    proc = subprocess.run(
+    proc = _run_group(
         [
             "bash",
             "-c",
@@ -1403,9 +1411,9 @@ _HAL0_INSTALL_ARGS=()
 rc=0; hal0_run_wizard || rc=$?; echo "RC=$rc"
 """,
         ],
-        capture_output=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
         text=True,
-        check=False,
         env={"PATH": os.environ["PATH"], **script_env},
     )
     assert "RC=1" in proc.stdout and "3.12" in proc.stderr, proc.stdout + proc.stderr
@@ -1465,8 +1473,12 @@ echo "FROM_DOC=${{MODELS_DIR_FROM_DOC}} DIR=${{MODELS_DIR}} SAVED=${{HAL0_ANSWER
     env = {"PATH": os.environ["PATH"]}
     if env_models is not None:
         env["HAL0_MODELS_DIR"] = env_models
-    proc = subprocess.run(
-        ["bash", "-c", script, "bash", *args], capture_output=True, text=True, check=False, env=env
+    proc = _run_group(
+        ["bash", "-c", script, "bash", *args],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env=env,
     )
     assert proc.returncode == 0, proc.stdout + proc.stderr
     return proc.stdout.strip()
@@ -1529,7 +1541,9 @@ for p in /home/alice/models/ //a//b/ /a/././b /a/./ /. / /a/. /a/.b/ /a/../b /a/
     printf '%s=%s\\n' "$p" "$(hal0_path_norm "$p")"
 done
 """
-    proc = subprocess.run(["bash", "-c", script], capture_output=True, text=True, check=False)
+    proc = _run_group(
+        ["bash", "-c", script], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+    )
     got = dict(line.split("=", 1) for line in proc.stdout.splitlines())
     assert got == {
         "/home/alice/models/": "/home/alice/models",
