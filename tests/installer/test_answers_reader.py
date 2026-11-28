@@ -15,6 +15,24 @@ import pytest
 
 READER = Path(__file__).resolve().parents[2] / "installer" / "lib" / "answers_reader.py"
 
+LADDER = {
+    "version": 1,
+    "model_ladder": [
+        {"role": "starter", "model": "llama-3.2-3b", "label": "x", "download_gb": 1.0},
+        {"role": "starter", "model": "qwen3.5-9b"},
+        {"role": "brain", "model": "qwen3-8b"},
+        {"role": "image", "model": "flux-1.dev"},
+        {"role": "image", "model": "sdxl_turbo"},
+    ],
+}
+
+
+def _manifest(tmp_path: Path, data: object = LADDER) -> Path:
+    path = tmp_path / "ladder.json"
+    path.write_text(json.dumps(data), encoding="utf-8")
+    return path
+
+
 FULL = {
     "version": 1,
     "model_store": {"path": "/mnt/my models/a=b", "flm_path": "/mnt/flm"},
@@ -24,15 +42,14 @@ FULL = {
         "pi": {"enabled": True},
     },
     "memory": {"enabled": False},
-    "gen": {"mode": "custom", "models": ["flux-1.dev", "sdxl_turbo"]},
+    "gen": {"mode": "scaffold_and_download", "models": ["flux-1.dev", "sdxl_turbo"]},
     "models": {"brain": "qwen3-8b", "starter": "llama-3.2-3b"},
     "hardware": {"allow_cpu_only": True},
     "network": {
         "port": 8181,
-        "bind_host": "127.0.0.1",
-        "hostname": "box-1",
+                "hostname": "box-1",
         "public_url": "chat.example.com",
-        "allowed_origins": ["https://a.example.com", "http://10.0.0.5:8080"],
+        "allowed_origins": ["https://a.example.com", "http://192.0.2.5:8080"],
     },
     "access": {"admin_key": "create"},
     "maintenance": {"weekly_benchmark": True},
@@ -40,11 +57,13 @@ FULL = {
 }
 
 
-def run(doc: object, tmp_path: Path, origin: str = "wizard", raw: bytes | None = None):
+def run(doc: object, tmp_path: Path, origin: str = "wizard", raw: bytes | None = None,
+        manifest: Path | None = None):
     path = tmp_path / "answers.json"
     path.write_bytes(raw if raw is not None else json.dumps(doc).encode())
+    seam = ["--models-manifest", str(manifest)] if manifest else []
     return subprocess.run(
-        [sys.executable, "-I", str(READER), "--origin", origin, "--", str(path)],
+        [sys.executable, "-I", str(READER), "--origin", origin, *seam, "--", str(path)],
         capture_output=True,
         text=True,
         check=False,
@@ -57,7 +76,7 @@ def lines(proc: subprocess.CompletedProcess[str]) -> list[str]:
 
 
 def test_full_document_maps_every_key(tmp_path: Path) -> None:
-    proc = run(FULL, tmp_path)
+    proc = run(FULL, tmp_path, manifest=_manifest(tmp_path))
     assert lines(proc) == [
         "HAL0_NONINTERACTIVE=1",
         "HAL0_MODELS_DIR=/mnt/my models/a=b",
@@ -73,10 +92,9 @@ def test_full_document_maps_every_key(tmp_path: Path) -> None:
         "HAL0_AGENT_MODEL=llama-3.2-3b",
         "HAL0_ALLOW_CPU_ONLY=1",
         "HAL0_PORT=8181",
-        "HAL0_BIND_HOST=127.0.0.1",
         "HAL0_HOSTNAME=box-1",
         "HAL0_PUBLIC_URL=https://chat.example.com",
-        "HAL0_ALLOWED_ORIGINS=https://a.example.com,http://10.0.0.5:8080",
+        "HAL0_ALLOWED_ORIGINS=https://a.example.com,http://192.0.2.5:8080",
         "HAL0_ADMIN_KEY_MODE=create",
         "HAL0_ENABLE_BENCH_TIMER=1",
         "HAL0_NPU_SETUP=off",
@@ -88,7 +106,7 @@ def test_skip_variants(tmp_path: Path) -> None:
         "version": 1,
         "apps": {"pi": {"enabled": False}},
         "models": {"brain": "none", "starter": "none"},
-        "gen": {"mode": "none"},
+        "gen": {"mode": "scaffold_only"},
         "maintenance": {"weekly_benchmark": False},
     }
     assert lines(run(doc, tmp_path)) == [
@@ -99,6 +117,206 @@ def test_skip_variants(tmp_path: Path) -> None:
         "HAL0_PULL_AGENT_MODEL=0",
         "HAL0_ENABLE_BENCH_TIMER=0",
     ]
+
+
+@pytest.mark.parametrize(
+    ("gen", "expected"),
+    [
+        ({}, "none"),
+        ({"mode": "off"}, "none"),
+        ({"mode": "scaffold_only"}, "none"),
+        ({"mode": "scaffold_and_download"}, "recommended"),
+        ({"mode": "scaffold_and_download", "models": []}, "recommended"),
+        ({"mode": "scaffold_and_download", "models": ["sdxl_turbo"]}, "sdxl_turbo"),
+    ],
+)
+def test_gen_modes(tmp_path: Path, gen: dict, expected: str) -> None:
+    proc = run({"version": 1, "gen": gen}, tmp_path, manifest=_manifest(tmp_path))
+    assert f"HAL0_IMAGE_MODELS={expected}" in lines(proc)
+
+
+@pytest.mark.parametrize(
+    "gen",
+    [
+        {"mode": "custom"},
+        {"mode": "none"},
+        {"mode": "recommended"},
+        {"mode": "off", "models": ["flux-1.dev"]},
+        {"mode": "scaffold_only", "models": ["flux-1.dev"]},
+        {"mode": "scaffold_and_download", "models": ["recommended"]},
+        {"mode": "scaffold_and_download", "models": ["none"]},
+        {"mode": "scaffold_and_download", "models": "flux-1.dev"},
+    ],
+)
+def test_gen_rejected(tmp_path: Path, gen: dict) -> None:
+    proc = run({"version": 1, "gen": gen}, tmp_path, manifest=_manifest(tmp_path))
+    assert proc.returncode == 2 and proc.stdout == ""
+
+
+def test_comfyui_app_key_is_known_and_emits_nothing(tmp_path: Path) -> None:
+    doc = {"version": 1, "strict": True, "apps": {"comfyui": {"enabled": True}}}
+    proc = run(doc, tmp_path, manifest=_manifest(tmp_path))
+    assert lines(proc) == ["HAL0_NONINTERACTIVE=1"] and proc.stderr == ""
+
+
+@pytest.mark.parametrize("strict", [False, True])
+def test_bind_host_warns_never_errors_and_is_not_emitted(tmp_path: Path, strict: bool) -> None:
+    doc = {"version": 1, "strict": strict, "network": {"bind_host": "127.0.0.1"}}
+    proc = run(doc, tmp_path)
+    assert lines(proc) == ["HAL0_NONINTERACTIVE=1"]
+    assert proc.stderr.count("network.bind_host is not applied at install") == 1
+
+
+def test_slots_and_huggingface_are_known_keys(tmp_path: Path) -> None:
+    doc = {"version": 1, "strict": True, "slots": [{"capability": "chat"}],
+           "huggingface": {"token_env": "HF_TOKEN"}}
+    proc = run(doc, tmp_path)
+    assert lines(proc) == ["HAL0_NONINTERACTIVE=1"]
+    assert "huggingface" in proc.stderr
+    for bad in ({"slots": {}}, {"huggingface": []}):
+        proc = run({"version": 1, **bad}, tmp_path)
+        assert proc.returncode == 2 and proc.stdout == ""
+
+
+# ── model ids against the installer's generated list ────────────────────────
+
+
+@pytest.mark.parametrize(
+    ("section", "key", "good", "bad"),
+    [
+        ("models", "starter", "llama-3.2-3b", "qwen3-8b"),
+        ("models", "brain", "qwen3-8b", "llama-3.2-3b"),
+    ],
+)
+def test_model_ids_checked_against_manifest(
+    tmp_path: Path, section: str, key: str, good: str, bad: str
+) -> None:
+    m = _manifest(tmp_path)
+    assert run({"version": 1, section: {key: good}}, tmp_path, manifest=m).returncode == 0
+    for other in (bad, "unknown-model"):
+        proc = run({"version": 1, section: {key: other}}, tmp_path, manifest=m)
+        assert proc.returncode == 2 and proc.stdout == ""
+        assert f"{section}.{key}" in proc.stderr
+    for word in ("auto", "none"):
+        assert run({"version": 1, section: {key: word}}, tmp_path, manifest=m).returncode == 0
+
+
+def test_image_ids_checked_against_manifest(tmp_path: Path) -> None:
+    m = _manifest(tmp_path)
+    gen = {"mode": "scaffold_and_download", "models": ["flux-1.dev"]}
+    assert run({"version": 1, "gen": gen}, tmp_path, manifest=m).returncode == 0
+    gen = {"mode": "scaffold_and_download", "models": ["nope-model"]}
+    proc = run({"version": 1, "gen": gen}, tmp_path, manifest=m)
+    assert proc.returncode == 2 and "gen.models[0]" in proc.stderr
+    # No image rows in the file: any well-formed id passes.
+    only = _manifest(tmp_path, {"model_ladder": [{"role": "starter", "model": "a-1"}]})
+    gen = {"mode": "scaffold_and_download", "models": ["nope-model"]}
+    assert run({"version": 1, "gen": gen}, tmp_path, manifest=only).returncode == 0
+
+
+@pytest.mark.parametrize(
+    "data",
+    [None, "missing", {"models": []}, {"model_ladder": [{"role": "starter"}]},
+     {"model_ladder": [{"model": "x"}]}, {"model_ladder": "x"}],
+)
+def test_manifest_unreadable_falls_back_to_pattern_with_one_warning(
+    tmp_path: Path, data: object
+) -> None:
+    if data == "missing":
+        m = tmp_path / "absent.json"
+    elif data is None:
+        m = tmp_path / "bad.json"
+        m.write_text("{not json", encoding="utf-8")
+    else:
+        m = _manifest(tmp_path, data)
+    doc = {"version": 1, "models": {"starter": "any-id", "brain": "other-id"}}
+    proc = run(doc, tmp_path, manifest=m)
+    assert lines(proc) == ["HAL0_NONINTERACTIVE=1", "HAL0_BRAIN_MODEL=other-id",
+                           "HAL0_PULL_AGENT_MODEL=1", "HAL0_AGENT_MODEL=any-id"]
+    assert proc.stderr.count("model list") == 1
+    assert run({"version": 1, "models": {"starter": "Bad Id"}}, tmp_path,
+               manifest=m).returncode == 2
+
+
+def test_default_manifest_is_found_beside_the_reader_not_the_cwd(tmp_path: Path) -> None:
+    import shutil
+
+    lib = tmp_path / "installer" / "lib"
+    lib.mkdir(parents=True)
+    shutil.copy(READER, lib / "answers_reader.py")
+    (tmp_path / "installer" / "manifests").mkdir()
+    (tmp_path / "installer" / "manifests" / "setup-models.json").write_text(
+        json.dumps(LADDER), encoding="utf-8"
+    )
+    doc = tmp_path / "d.json"
+    doc.write_text(json.dumps({"version": 1, "models": {"brain": "qwen3-8b"}}), encoding="utf-8")
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    proc = subprocess.run(
+        [sys.executable, "-I", str(lib / "answers_reader.py"), "--origin", "file", str(doc)],
+        capture_output=True, text=True, check=False, cwd=elsewhere,
+    )
+    assert proc.returncode == 0 and proc.stderr == "", proc.stderr
+    doc.write_text(json.dumps({"version": 1, "models": {"brain": "nope"}}), encoding="utf-8")
+    proc = subprocess.run(
+        [sys.executable, "-I", str(lib / "answers_reader.py"), "--origin", "file", str(doc)],
+        capture_output=True, text=True, check=False, cwd=elsewhere,
+    )
+    assert proc.returncode == 2
+
+
+# ── messages never carry document bytes that move a terminal ────────────────
+
+HOSTILE_KEY = "\x1b[2J\x1b]0;pwn\x07\x00\x7f\u0085\u202e"
+HOSTILE_DOCS = [
+    {"version": 1, HOSTILE_KEY: 1},
+    {"version": 1, "strict": True, HOSTILE_KEY: 1},
+    {"version": 1, "network": {HOSTILE_KEY: 1}},
+    {"version": 1, "apps": {HOSTILE_KEY: {"enabled": True}}},
+    {"version": 1, "access": {HOSTILE_KEY: "x"}},
+    {"version": 1, "model_store": {"path": "/mnt/" + HOSTILE_KEY}},
+    {"version": 1, "models": {"starter": HOSTILE_KEY}},
+    {"version": 1, "network": {"hostname": HOSTILE_KEY, "public_url": HOSTILE_KEY,
+                                "allowed_origins": [HOSTILE_KEY]}},
+    {"version": 1, "gen": {"mode": HOSTILE_KEY}},
+    {"version": 1, "access": {"admin_key": HOSTILE_KEY}},
+    {"version": HOSTILE_KEY},
+    {"version": 1, "x": {HOSTILE_KEY: {HOSTILE_KEY: HOSTILE_KEY}}},
+]
+
+
+@pytest.mark.parametrize("doc", HOSTILE_DOCS)
+def test_stderr_has_no_control_bytes(tmp_path: Path, doc: dict) -> None:
+    proc = run(doc, tmp_path, manifest=_manifest(tmp_path))
+    data = proc.stderr.encode("utf-8", "surrogatepass")
+    assert proc.stderr, "expected a message"
+    assert all(b >= 0x20 or b == 0x0A for b in data), data
+    assert b"\x7f" not in data
+    assert all(b < 0x80 for b in data), data
+
+
+def test_duplicate_key_message_is_escaped(tmp_path: Path) -> None:
+    raw = b'{"version": 1, "\\u001b[2J": 1, "\\u001b[2J": 2}'
+    proc = run(None, tmp_path, raw=raw)
+    assert proc.returncode == 2
+    assert b"\x1b" not in proc.stderr.encode()
+
+
+def test_huge_values_are_not_echoed_whole(tmp_path: Path) -> None:
+    raw = b'{"version": 1, "network": {"port": ' + b"9" * 100_000 + b"}}"
+    proc = run(None, tmp_path, raw=raw)
+    assert proc.returncode == 2 and proc.stdout == ""
+    assert len(proc.stderr) < 1000
+    long_path = "/mnt/" + "a$" * 50_000
+    proc = run({"version": 1, "model_store": {"path": long_path}}, tmp_path)
+    assert proc.returncode == 2 and len(proc.stderr) < 1000
+
+
+def test_path_percent_and_dotdot_rejected(tmp_path: Path) -> None:
+    for bad in ("/mnt/%h", "/mnt/../etc", "/mnt/a/../b", "/.."):
+        proc = run({"version": 1, "model_store": {"path": bad}}, tmp_path)
+        assert proc.returncode == 2 and proc.stdout == "", bad
+    assert run({"version": 1, "model_store": {"path": "/mnt/a..b/c"}}, tmp_path).returncode == 0
 
 
 def test_defaults_emit_only_noninteractive(tmp_path: Path) -> None:
@@ -126,7 +344,9 @@ def test_terminal_tool_only_for_wizard_origin(tmp_path: Path) -> None:
     ],
 )
 def test_starter_three_ways(tmp_path: Path, value: str, expected: list[str]) -> None:
-    assert lines(run({"version": 1, "models": {"starter": value}}, tmp_path)) == expected
+    proc = run({"version": 1, "models": {"starter": value}}, tmp_path,
+               manifest=_manifest(tmp_path))
+    assert lines(proc) == expected
 
 
 _BAD = ["$(reboot)", "`id`", "a;b", "a\nb", '"quoted"', "a\x00b", "a\rb", "a'b", "a\\b", "a|b"]
@@ -189,9 +409,8 @@ def test_port_range(tmp_path: Path, port: object, ok: bool) -> None:
         {"allowed_origins": ["x.example.com"]},
         {"allowed_origins": ["https://x.example.com/path"]},
         {"allowed_origins": "https://x.example.com"},
-        {"bind_host": "bad host"},
         {"hostname": "-bad"},
-        {"hostname": "10.0.0.1"},
+        {"hostname": "192.0.2.1"},
     ],
 )
 def test_network_values_rejected(tmp_path: Path, net: dict) -> None:

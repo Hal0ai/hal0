@@ -216,6 +216,8 @@ MODELS_DIR="${HAL0_MODELS_DIR:-}"
 # Set when --models-dir / HAL0_MODELS_DIR supplied the value: an EXPLICIT
 # choice is never re-asked at the TTY prompt below.
 MODELS_DIR_EXPLICIT=0
+# Set by the --models-dir flag only; the answers document must not override it.
+MODELS_DIR_FLAG_GIVEN=0
 [[ -n "${MODELS_DIR}" ]] && MODELS_DIR_EXPLICIT=1
 # --summary-json=PATH: write a machine-readable install summary (schema
 # hal0.install-summary.v1) at PATH once the install finishes successfully.
@@ -230,7 +232,7 @@ for arg in "$@"; do
     case "$arg" in
         --dev) DEV_MODE=1 ;;
         --no-start) NO_START=1 ;;
-        --models-dir=*) MODELS_DIR="${arg#--models-dir=}" ;;
+        --models-dir=*) MODELS_DIR="${arg#--models-dir=}"; MODELS_DIR_FLAG_GIVEN=1 ;;
         --summary-json=*) SUMMARY_JSON_PATH="${arg#--summary-json=}" ;;
         --answers=*) HAL0_ANSWERS_FILE="${arg#--answers=}" ;;
         --no-owui) export HAL0_SKIP_OPENWEBUI=1; COMPONENT_FLAG_GIVEN=1 ;;
@@ -657,6 +659,27 @@ fi
 # The one place answers enter the install. Everything below this line may
 # change the host or depends on a choice.
 hal0_collect_answers
+
+# answers-models-dir: begin
+# MODELS_DIR was settled above, before the seam, so a document's model_store.path
+# has to be applied here. Precedence: a --models-dir flag wins over the document
+# (one warning); the document wins over an inherited HAL0_MODELS_DIR; then the
+# default. HAL0_ANSWERS_EXPORTED says the document (not the environment) set it.
+if [[ "${HAL0_ANSWERS_APPLIED:-0}" == "1" ]]; then
+    for _answered in "${HAL0_ANSWERS_EXPORTED[@]+"${HAL0_ANSWERS_EXPORTED[@]}"}"; do
+        if [[ "${_answered}" == "HAL0_MODELS_DIR" ]]; then
+            if [[ "${MODELS_DIR_FLAG_GIVEN}" -eq 1 ]]; then
+                warn "--models-dir was given, so the model folder in the answers document was ignored"
+                export HAL0_MODELS_DIR="${MODELS_DIR}"
+            else
+                MODELS_DIR="${HAL0_MODELS_DIR}"
+                MODELS_DIR_EXPLICIT=1
+            fi
+        fi
+    done
+    unset _answered
+fi
+# answers-models-dir: end
 
 # Persist bootstrap's digest-pinned cosign so the updater's signature
 # gate works on the very first `hal0 update` (#2052). Soft: warns and

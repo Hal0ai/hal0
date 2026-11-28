@@ -363,3 +363,71 @@ def test_dev_mode_facts_file_lives_under_the_prefix(tmp_path: Path) -> None:
 def test_dev_mode_respects_an_explicit_facts_file(tmp_path: Path) -> None:
     _run(_facts_section_script(tmp_path, dev=True, facts_file="/elsewhere/f.json"))
     assert "path=/elsewhere/f.json" in _calls(tmp_path)
+
+
+# ── model folder precedence after the seam ──────────────────────────────────
+
+_MD_BEGIN = "# answers-models-dir: begin"
+_MD_END = "# answers-models-dir: end"
+
+
+def _models_dir_script(
+    *, flag: bool, doc: str | None, inherited: str | None, applied: bool = True
+) -> str:
+    head = TEXT.index(_MD_BEGIN)
+    block = TEXT[head : TEXT.index(_MD_END, head)]
+    exported = '("HAL0_NONINTERACTIVE" "HAL0_MODELS_DIR")' if doc else '("HAL0_NONINTERACTIVE")'
+    # What the seam leaves behind: the document's value exported over any
+    # inherited one, and the record of what the document exported.
+    env = f'export HAL0_MODELS_DIR="{doc or inherited or ""}"\n' if (doc or inherited) else ""
+    start = f"/inherited" if inherited else ""
+    return f"""
+set -uo pipefail
+warn() {{ echo "WARN: $*"; }}
+MODELS_DIR="{"/flag" if flag else (start or "/default")}"
+MODELS_DIR_EXPLICIT={1 if (flag or inherited) else 0}
+MODELS_DIR_FLAG_GIVEN={1 if flag else 0}
+HAL0_ANSWERS_APPLIED={1 if applied else 0}
+HAL0_ANSWERS_EXPORTED={exported if applied else "()"}
+{env}{block}
+echo "MODELS_DIR=${{MODELS_DIR}} EXPLICIT=${{MODELS_DIR_EXPLICIT}} ENV=${{HAL0_MODELS_DIR:-}}"
+"""
+
+
+def test_models_dir_flag_beats_document(tmp_path: Path) -> None:
+    proc = _run(_models_dir_script(flag=True, doc="/doc", inherited=None))
+    assert proc.returncode == 0, proc.stderr
+    out = proc.stdout.splitlines()
+    assert out[0].startswith("WARN:") and "ignored" in out[0]
+    assert out[1] == "MODELS_DIR=/flag EXPLICIT=1 ENV=/flag"
+    assert sum(1 for ln in out if ln.startswith("WARN:")) == 1
+
+
+def test_models_dir_document_beats_inherited_environment(tmp_path: Path) -> None:
+    proc = _run(_models_dir_script(flag=False, doc="/doc", inherited="/inherited"))
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout.splitlines() == ["MODELS_DIR=/doc EXPLICIT=1 ENV=/doc"]
+
+
+def test_models_dir_document_beats_default(tmp_path: Path) -> None:
+    proc = _run(_models_dir_script(flag=False, doc="/doc", inherited=None))
+    assert proc.stdout.splitlines() == ["MODELS_DIR=/doc EXPLICIT=1 ENV=/doc"]
+
+
+def test_models_dir_untouched_when_document_does_not_set_it(tmp_path: Path) -> None:
+    proc = _run(_models_dir_script(flag=False, doc=None, inherited="/inherited"))
+    assert proc.stdout.splitlines() == ["MODELS_DIR=/inherited EXPLICIT=1 ENV=/inherited"]
+    proc = _run(_models_dir_script(flag=False, doc=None, inherited=None))
+    assert proc.stdout.splitlines() == ["MODELS_DIR=/default EXPLICIT=0 ENV="]
+
+
+def test_models_dir_ignored_when_no_document_applied(tmp_path: Path) -> None:
+    proc = _run(_models_dir_script(flag=False, doc="/doc", inherited=None, applied=False))
+    assert proc.stdout.splitlines() == ["MODELS_DIR=/default EXPLICIT=0 ENV=/doc"]
+
+
+def test_models_dir_block_sits_right_after_the_seam() -> None:
+    code = _code(TEXT)
+    seam = code.index("\nhal0_collect_answers\n")
+    assert code.index("MODELS_DIR_FLAG_GIVEN", seam) < code.index("persist_bootstrap_cosign", seam)
+    assert "MODELS_DIR_FLAG_GIVEN=1" in TEXT[: TEXT.index(_SEAM)]

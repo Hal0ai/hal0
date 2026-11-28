@@ -43,8 +43,7 @@ ALLOWED_NAMES = (
     "HAL0_AGENT_MODEL",
     "HAL0_ALLOW_CPU_ONLY",
     "HAL0_PORT",
-    "HAL0_BIND_HOST",
-    "HAL0_HOSTNAME",
+        "HAL0_HOSTNAME",
     "HAL0_PUBLIC_URL",
     "HAL0_ALLOWED_ORIGINS",
     "HAL0_ADMIN_KEY_MODE",
@@ -61,7 +60,7 @@ _DNS_LABEL = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$")
 # A models directory: absolute, and only characters that are inert in a shell
 # and in a systemd unit or env file. Spaces and '=' are fine (they are data);
 # $ ` " ' \\ ; & | < > ( ) * ? ! # { } [ ] are not.
-_FS_PATH = re.compile(r"^/[\w.+@,:%~= /-]*$")
+_FS_PATH = re.compile(r"^/[\w.+@,:~= /-]*$")
 _URL_PATH = re.compile(r"^[A-Za-z0-9._~/%-]*$")
 
 # Keys the document may carry, per object. Anything else is "unknown".
@@ -79,6 +78,8 @@ _TOP_KEYS = frozenset(
         "access",
         "maintenance",
         "npu",
+        "huggingface",
+        "slots",
     }
 )
 _SECTION_KEYS = {
@@ -95,7 +96,60 @@ _APP_KEYS = {
     "openwebui": frozenset({"enabled"}),
     "hermes": frozenset({"enabled", "terminal_tool"}),
     "pi": frozenset({"enabled"}),
+    "comfyui": frozenset({"enabled"}),
 }
+_GEN_MODES = ("off", "scaffold_only", "scaffold_and_download")
+
+# Generated beside the reader (scripts/gen_setup_models.py); located from this
+# file, never from the working directory.
+_MANIFEST = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "manifests", "setup-models.json"
+)
+
+
+MAX_ECHO = 80
+
+
+def _esc(value: Any) -> str:
+    """Text safe to print: printable ASCII kept, everything else escaped, capped.
+
+    Anything that came from the document and goes into a message passes through
+    here, so a key or value holding a terminal escape sequence can never reach
+    the root user's terminal. Non-strings are shown by repr.
+    """
+    if isinstance(value, str):
+        text = value
+    else:
+        try:
+            text = repr(value)
+        except ValueError:  # an int past the interpreter's digit limit
+            text = "<number too large to show>"
+    clipped = len(text) > MAX_ECHO
+    out: list[str] = []
+    for ch in text[:MAX_ECHO]:
+        code = ord(ch)
+        if ch == "\\":
+            out.append("\\\\")
+        elif 0x20 <= code < 0x7F:
+            out.append(ch)
+        elif code < 0x100:
+            out.append(f"\\x{code:02x}")
+        elif code < 0x10000:
+            out.append(f"\\u{code:04x}")
+        else:
+            out.append(f"\\U{code:08x}")
+    return "".join(out) + ("..." if clipped else "")
+
+
+def _q(value: Any) -> str:
+    return "'" + _esc(value) + "'"
+
+
+def _scrub(msg: str) -> str:
+    """Last line of defence: no byte outside printable ASCII leaves in a message."""
+    return "".join(
+        ch if 0x20 <= ord(ch) < 0x7F else _esc(ch) for ch in msg
+    )
 
 
 class _Problems:
@@ -104,11 +158,14 @@ class _Problems:
         self.warnings: list[str] = []
 
     def error(self, msg: str) -> None:
+        msg = _scrub(msg)
         if msg not in self.errors:
             self.errors.append(msg)
 
     def warn(self, msg: str) -> None:
-        self.warnings.append(msg)
+        msg = _scrub(msg)
+        if msg not in self.warnings:
+            self.warnings.append(msg)
 
 
 class _DuplicateKey(ValueError):
@@ -125,7 +182,7 @@ def _pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
 
 
 def _bad_constant(token: str) -> Any:
-    raise ValueError(f"the value {token} is not allowed")
+    raise ValueError(f"the value {_esc(token)} is not allowed")
 
 
 def _has_control(text: str) -> bool:
@@ -148,7 +205,7 @@ def _walk_strings(node: Any, where: str, problems: _Problems) -> None:
                 problems.error(f"{where}: is not valid text")
     elif isinstance(node, dict):
         for key, value in node.items():
-            _walk_strings(key, f"{where} key {key!r}"[:120], problems)
+            _walk_strings(key, f"{where} key {_q(key)}"[:120], problems)
             _walk_strings(value, f"{where}.{key}" if where else str(key), problems)
     elif isinstance(node, list):
         for index, value in enumerate(node):
@@ -159,7 +216,7 @@ def _load(path: str, problems: _Problems) -> dict[str, Any] | None:
     try:
         info = os.stat(path)
         if not stat.S_ISREG(info.st_mode):
-            problems.error(f"{path}: not a regular file")
+            problems.error(f"{_q(path)}: not a regular file")
             return None
         with open(path, "rb") as handle:
             raw = handle.read(MAX_BYTES + 1)
@@ -177,7 +234,7 @@ def _load(path: str, problems: _Problems) -> dict[str, Any] | None:
     try:
         doc = json.loads(text, object_pairs_hook=_pairs, parse_constant=_bad_constant)
     except _DuplicateKey as exc:
-        problems.error(f"the answers document repeats the key {exc.args[0]!r}")
+        problems.error(f"the answers document repeats the key {_q(exc.args[0])}")
         return None
     except RecursionError:
         problems.error("the answers document is nested too deeply")
@@ -207,9 +264,9 @@ def _section(doc: dict[str, Any], name: str, problems: _Problems) -> dict[str, A
 def _unknown(obj: dict[str, Any], known: frozenset[str], where: str, strict: bool,
              problems: _Problems) -> None:
     for key in sorted(set(obj) - known):
-        full = f"{where}.{key}" if where else key
+        full = f"{where}.{_esc(key)}" if where else _esc(key)
         if strict:
-            problems.error(f"unknown key {full!r} (strict is true)")
+            problems.error(f"unknown key {_q(full)} (strict is true)")
         else:
             problems.warn(f"answers key '{full}' is not recognized and was ignored")
 
@@ -237,9 +294,12 @@ def _abs_path(obj: dict[str, Any], key: str, where: str, problems: _Problems) ->
         return None
     if not _FS_PATH.match(value):
         problems.error(
-            f"{full}: {value!r} has characters other than letters, digits, space "
-            "and . _ + @ , : % ~ = / -"
+            f"{full}: {_q(value)} has characters other than letters, digits, space "
+            "and . _ + @ , : ~ = / -"
         )
+        return None
+    if ".." in value.split("/"):
+        problems.error(f"{full}: must not contain a '..' segment")
         return None
     return value
 
@@ -292,54 +352,102 @@ def _http_url(raw: str, full: str, problems: _Problems, *, allow_path: bool,
         return None
     if "://" not in text:
         if not bare_ok:
-            problems.error(f"{full}: {text!r} must start with http:// or https://")
+            problems.error(f"{full}: {_q(text)} must start with http:// or https://")
             return None
         text = f"https://{text}"
     if any(c.isspace() for c in text) or not text.isascii():
-        problems.error(f"{full}: {raw!r} must be plain ASCII without whitespace")
+        problems.error(f"{full}: {_q(raw)} must be plain ASCII without whitespace")
         return None
     try:
         parts = urlsplit(text)
         port = parts.port
     except ValueError:
-        problems.error(f"{full}: {raw!r} is not a valid URL")
+        problems.error(f"{full}: {_q(raw)} is not a valid URL")
         return None
     scheme = parts.scheme.lower()
     if scheme not in ("http", "https"):
-        problems.error(f"{full}: {raw!r} must use http or https")
+        problems.error(f"{full}: {_q(raw)} must use http or https")
         return None
     if "@" in parts.netloc:
-        problems.error(f"{full}: {raw!r} must not contain a user name or password")
+        problems.error(f"{full}: {_q(raw)} must not contain a user name or password")
         return None
     if not parts.hostname:
-        problems.error(f"{full}: {raw!r} has no host")
+        problems.error(f"{full}: {_q(raw)} has no host")
         return None
     host = _host_part(f"[{parts.hostname}]" if ":" in parts.hostname else parts.hostname)
     if host is None:
         problems.error(
-            f"{full}: {raw!r} is not a valid host: use a DNS name, an IPv4 address "
+            f"{full}: {_q(raw)} is not a valid host: use a DNS name, an IPv4 address "
             "or a bracketed IPv6 address"
         )
         return None
     if port == 0:
-        problems.error(f"{full}: {raw!r} has an invalid port")
+        problems.error(f"{full}: {_q(raw)} has an invalid port")
         return None
     if parts.query or parts.fragment or "?" in text or "#" in text:
-        problems.error(f"{full}: {raw!r} must not carry a query or fragment")
+        problems.error(f"{full}: {_q(raw)} must not carry a query or fragment")
         return None
     path = parts.path.rstrip("/")
     if path and not allow_path:
-        problems.error(f"{full}: {raw!r} must be an origin (scheme://host[:port]) with no path")
+        problems.error(f"{full}: {_q(raw)} must be an origin (scheme://host[:port]) with no path")
         return None
     if not _URL_PATH.match(path):
-        problems.error(f"{full}: {raw!r} has a path with characters other than A-Za-z0-9._~/%-")
+        problems.error(f"{full}: {_q(raw)} has a path with characters other than A-Za-z0-9._~/%-")
         return None
     default = 80 if scheme == "http" else 443
     netloc = host if port is None or port == default else f"{host}:{port}"
     return f"{scheme}://{netloc}{path}"
 
 
-def _build(doc: dict[str, Any], origin: str, problems: _Problems) -> dict[str, str]:
+def _load_manifest(path: str, problems: _Problems) -> dict[str, set[str]] | None:
+    """Model ids per role from the generated list, or None (with one warning).
+
+    Shape: {"model_ladder": [{"role": "starter|brain|image", "model": ID, ...}]};
+    other row keys are ignored. A row without role or model, or a file without
+    model_ladder, counts as unreadable.
+    """
+    try:
+        with open(path, "rb") as handle:
+            data = json.loads(handle.read(MAX_BYTES).decode("utf-8"))
+        rows = data["model_ladder"]
+        if not isinstance(rows, list):
+            raise TypeError("model_ladder is not a list")
+        roles: dict[str, set[str]] = {}
+        for row in rows:
+            role, model = row["role"], row["model"]
+            if not isinstance(role, str) or not isinstance(model, str):
+                raise TypeError("role and model must be strings")
+            roles.setdefault(role, set()).add(model)
+        return roles
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        problems.warn(
+            "the installer's model list (manifests/setup-models.json) could not be read; "
+            "model ids are checked by pattern only"
+        )
+        return None
+
+
+def _model_id(value: Any, full: str, role: str, manifest: dict[str, set[str]] | None,
+              problems: _Problems, *, require_rows: bool = True) -> str | None:
+    ident = _ident(value, full, problems)
+    if ident is None:
+        return None
+    if ident in ("recommended", "none", "auto"):
+        problems.error(f"{full}: {_q(value)} is not a model id")
+        return None
+    if manifest is not None and (manifest.get(role) or require_rows):
+        known = manifest.get(role, set())
+        if ident not in known:
+            problems.error(
+                f"{full}: {_q(value)} is not a {role} model this installer offers"
+                f" (known: {', '.join(sorted(known)) or 'none'})"
+            )
+            return None
+    return ident
+
+
+def _build(doc: dict[str, Any], origin: str, problems: _Problems,
+           manifest_path: str = _MANIFEST) -> dict[str, str]:
     out: dict[str, str] = {"HAL0_NONINTERACTIVE": "1"}
 
     strict_raw = doc.get("strict", False)
@@ -347,12 +455,23 @@ def _build(doc: dict[str, Any], origin: str, problems: _Problems) -> dict[str, s
         problems.error("strict: must be true or false")
         strict_raw = False
     strict = strict_raw
+    manifest = _load_manifest(manifest_path, problems)
 
     version = doc.get("version")
     if isinstance(version, bool) or not isinstance(version, int) or version != 1:
-        problems.error(f"version: must be 1 (got {version!r})")
+        problems.error(f"version: must be 1 (got {_q(version)})")
 
     _unknown(doc, _TOP_KEYS, "", strict, problems)
+    if doc.get("slots") is not None and not isinstance(doc["slots"], list):
+        problems.error("slots: must be a list")
+    if doc.get("huggingface") is not None:
+        if not isinstance(doc["huggingface"], dict):
+            problems.error("huggingface: must be a mapping")
+        else:
+            problems.warn(
+                "huggingface settings are not read from an answers document; "
+                "set HF_TOKEN/HUGGING_FACE_HUB_TOKEN in the environment instead"
+            )
     for name, known in _SECTION_KEYS.items():
         _unknown(_section(doc, name, problems), known, name, strict, problems)
 
@@ -379,6 +498,7 @@ def _build(doc: dict[str, Any], origin: str, problems: _Problems) -> dict[str, s
         else:
             entries[app] = entry
             _unknown(entry, known, f"apps.{app}", strict, problems)
+    _bool(entries["comfyui"], "enabled", "apps.comfyui", problems)  # known, emits nothing
     if _bool(entries["openwebui"], "enabled", "apps.openwebui", problems) is False:
         out["HAL0_SKIP_OPENWEBUI"] = "1"
     if _bool(entries["hermes"], "enabled", "apps.hermes", problems) is False:
@@ -402,30 +522,33 @@ def _build(doc: dict[str, Any], origin: str, problems: _Problems) -> dict[str, s
     if _bool(_section(doc, "memory", problems), "enabled", "memory", problems) is False:
         out["HAL0_SKIP_HINDSIGHT"] = "1"
 
-    # gen
-    gen = _section(doc, "gen", problems)
-    mode = gen.get("mode")
-    models = gen.get("models")
-    if mode is not None and mode not in ("none", "recommended", "custom"):
-        problems.error("gen.mode: must be 'none', 'recommended' or 'custom'")
-        mode = None
-    ids: list[str] = []
-    if models is not None:
-        if not isinstance(models, list) or not models:
-            problems.error("gen.models: must be a non-empty list of ids")
+    # gen: the document format's own words (off, scaffold_only,
+    # scaffold_and_download) mapped to HAL0_IMAGE_MODELS.
+    if doc.get("gen") is not None:
+        gen = _section(doc, "gen", problems)
+        mode = gen.get("mode", "off")
+        models = gen.get("models")
+        if not isinstance(mode, str) or mode not in _GEN_MODES:
+            problems.error(f"gen.mode: must be one of {', '.join(_GEN_MODES)} (got {_q(mode)})")
         else:
-            for i, item in enumerate(models):
-                ident = _ident(item, f"gen.models[{i}]", problems)
-                if ident is not None:
-                    ids.append(ident)
-            if mode in ("none", "recommended"):
-                problems.error(f"gen.models: cannot be given with gen.mode '{mode}'")
-    if mode == "custom" and models is None:
-        problems.error("gen.mode 'custom' needs gen.models")
-    if mode in ("none", "recommended"):
-        out["HAL0_IMAGE_MODELS"] = mode
-    elif ids:
-        out["HAL0_IMAGE_MODELS"] = ",".join(ids)
+            ids: list[str] = []
+            if models is not None and not isinstance(models, list):
+                problems.error("gen.models: must be a list of image model ids")
+            elif models:
+                if mode != "scaffold_and_download":
+                    problems.error(f"gen.models: cannot be given with gen.mode '{mode}'")
+                else:
+                    for i, item in enumerate(models):
+                        ident = _model_id(item, f"gen.models[{i}]", "image", manifest, problems,
+                                          require_rows=False)
+                        if ident is not None:
+                            ids.append(ident)
+            if mode != "scaffold_and_download":
+                out["HAL0_IMAGE_MODELS"] = "none"
+            elif ids:
+                out["HAL0_IMAGE_MODELS"] = ",".join(ids)
+            elif not models:
+                out["HAL0_IMAGE_MODELS"] = "recommended"
 
     # models
     mdl = _section(doc, "models", problems)
@@ -434,7 +557,7 @@ def _build(doc: dict[str, Any], origin: str, problems: _Problems) -> dict[str, s
         if brain == "none":
             out["HAL0_SKIP_BRAIN_MODEL"] = "1"
         elif brain != "auto":
-            ident = _ident(brain, "models.brain", problems)
+            ident = _model_id(brain, "models.brain", "brain", manifest, problems)
             if ident is not None:
                 out["HAL0_BRAIN_MODEL"] = ident
     starter = mdl.get("starter")
@@ -444,7 +567,7 @@ def _build(doc: dict[str, Any], origin: str, problems: _Problems) -> dict[str, s
         elif starter == "auto":
             out["HAL0_PULL_AGENT_MODEL"] = "1"
         else:
-            ident = _ident(starter, "models.starter", problems)
+            ident = _model_id(starter, "models.starter", "starter", manifest, problems)
             if ident is not None:
                 out["HAL0_PULL_AGENT_MODEL"] = "1"
                 out["HAL0_AGENT_MODEL"] = ident
@@ -461,22 +584,22 @@ def _build(doc: dict[str, Any], origin: str, problems: _Problems) -> dict[str, s
             problems.error("network.port: must be an integer from 1 to 65535")
         else:
             out["HAL0_PORT"] = str(port)
-    for key, var in (("bind_host", "HAL0_BIND_HOST"), ("hostname", "HAL0_HOSTNAME")):
-        value = net.get(key)
-        if value is None:
-            continue
+    if net.get("bind_host") is not None:
+        # A key of the document format that the installer cannot honour (it
+        # binds 0.0.0.0): a warning in every document, never an error.
+        problems.warn(
+            "network.bind_host is not applied at install; change it afterwards with hal0 network"
+        )
+    value = net.get("hostname")
+    if value is not None:
         if not isinstance(value, str):
-            problems.error(f"network.{key}: must be a string or null")
-            continue
-        text = value.strip()
-        ok = _ip_literal(text) or _dns_name(text)
-        if key == "hostname" and _ip_literal(text):
-            ok = False
-        if not ok:
-            problems.error(f"network.{key}: {value!r} is not a valid host name"
-                           + (" or IP address" if key == "bind_host" else ""))
-        elif text:
-            out[var] = text
+            problems.error("network.hostname: must be a string or null")
+        else:
+            text = value.strip()
+            if _ip_literal(text) or not _dns_name(text):
+                problems.error(f"network.hostname: {_q(value)} is not a valid host name")
+            else:
+                out["HAL0_HOSTNAME"] = text
     pub = net.get("public_url")
     if pub is not None:
         if not isinstance(pub, str):
@@ -509,7 +632,7 @@ def _build(doc: dict[str, Any], origin: str, problems: _Problems) -> dict[str, s
             problems.error("access: must be an object")
         else:
             for key in sorted(set(access) - {"admin_key"}):
-                problems.error(f"access.{key}: not allowed (a document carries no key material)")
+                problems.error(f"access.{_esc(key)}: not allowed (a document carries no key material)")
             mode_word = access.get("admin_key")
             if "admin_key" in access:
                 if mode_word in ("create", "none") and isinstance(mode_word, str):
@@ -534,14 +657,17 @@ def _build(doc: dict[str, Any], origin: str, problems: _Problems) -> dict[str, s
     return out
 
 
-def _parse_args(argv: list[str]) -> tuple[str, str] | None:
+def _parse_args(argv: list[str]) -> tuple[str, str, str] | None:
     origin = None
     path = None
+    manifest = _MANIFEST
     args = list(argv)
     while args:
         arg = args.pop(0)
         if arg == "--origin" and args and origin is None:
             origin = args.pop(0)
+        elif arg == "--models-manifest" and args:
+            manifest = args.pop(0)
         elif arg == "--":
             if len(args) == 1 and path is None:
                 path = args.pop(0)
@@ -553,21 +679,21 @@ def _parse_args(argv: list[str]) -> tuple[str, str] | None:
             return None
     if origin not in ORIGINS or not path:
         return None
-    return origin, path
+    return origin, path, manifest
 
 
 def main(argv: list[str]) -> int:
     parsed = _parse_args(argv)
     if parsed is None:
-        sys.stderr.write("usage: answers_reader.py --origin wizard|file [--] DOCUMENT.json\n")
+        sys.stderr.write("usage: answers_reader.py --origin wizard|file [--models-manifest PATH] [--] DOCUMENT.json\n")
         return 2
-    origin, path = parsed
+    origin, path, manifest_path = parsed
     problems = _Problems()
     doc = _load(path, problems)
     lines: list[str] = []
     if doc is not None:
         _walk_strings(doc, "", problems)
-        values = _build(doc, origin, problems)
+        values = _build(doc, origin, problems, manifest_path)
         for name in ALLOWED_NAMES:
             if name in values:
                 lines.append(f"{name}={values[name]}")

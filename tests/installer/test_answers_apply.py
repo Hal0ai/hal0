@@ -105,6 +105,7 @@ def test_reader_rejection_exports_nothing_and_passes_messages(tmp_path: Path) ->
     )
     assert proc.stdout.splitlines() == ["rc=2", "unset/unset"]
     assert "network.port" in proc.stderr
+    assert proc.stderr.rstrip().endswith("Stopped: the answers document was not accepted.")
 
 
 def test_bad_origin_and_missing_python(tmp_path: Path) -> None:
@@ -112,6 +113,24 @@ def test_bad_origin_and_missing_python(tmp_path: Path) -> None:
     proc = _bash(f'hal0_apply_answers "{doc}" bogus; echo "rc=$?"', tmp_path)
     assert proc.stdout.strip() == "rc=1"
     proc = _bash(f'PY=""; hal0_apply_answers "{doc}" file; echo "rc=$?"', tmp_path)
+    assert proc.stdout.strip() == "rc=1"
+
+
+def test_exported_names_are_recorded_only_on_success(tmp_path: Path) -> None:
+    doc = _doc(tmp_path, {"version": 1, "model_store": {"path": "/srv/m"}})
+    proc = _bash(
+        f'hal0_apply_answers "{doc}" file; echo "${{HAL0_ANSWERS_EXPORTED[*]}}"', tmp_path
+    )
+    assert proc.stdout.split() == ["HAL0_NONINTERACTIVE", "HAL0_MODELS_DIR"], proc.stderr
+    bad = _doc(tmp_path, {"version": 2})
+    proc = _bash(f'hal0_apply_answers "{bad}" file; echo "n=${{#HAL0_ANSWERS_EXPORTED[@]}}"', tmp_path)
+    assert proc.stdout.strip() == "n=0"
+
+
+def test_bind_host_not_accepted_from_a_reader(tmp_path: Path) -> None:
+    fake = tmp_path / "fake_reader.py"
+    fake.write_text("print('HAL0_BIND_HOST=127.0.0.1')\n", encoding="utf-8")
+    proc = _bash('hal0_apply_answers /x/d.json file; echo "rc=$?"', tmp_path, reader=fake)
     assert proc.stdout.strip() == "rc=1"
 
 
@@ -128,11 +147,14 @@ def test_collect_answers_runs_apply_for_a_file(tmp_path: Path) -> None:
 def test_allow_lists_match() -> None:
     sh = ANSWERS_SH.read_text(encoding="utf-8")
     block = re.search(r"_HAL0_ANSWER_NAMES=\(\n(.*?)\n\)", sh, re.S)
-    assert block
+    assert block, "allow-list block not found in answers.sh"
     sh_names = block.group(1).split()
+    assert sh_names, "allow-list in answers.sh parsed empty"
     py = READER.read_text(encoding="utf-8")
     tup = re.search(r"ALLOWED_NAMES = \(\n(.*?)\n\)", py, re.S)
-    assert tup
+    assert tup, "ALLOWED_NAMES not found in answers_reader.py"
     py_names = re.findall(r'"(HAL0_[A-Z0-9_]+)"', tup.group(1))
+    assert py_names, "ALLOWED_NAMES in answers_reader.py parsed empty"
     assert sh_names == py_names
-    assert len(set(sh_names)) == len(sh_names) == 23
+    assert len(set(sh_names)) == len(sh_names)
+    assert "HAL0_BIND_HOST" not in sh_names

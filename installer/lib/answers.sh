@@ -35,7 +35,6 @@ _HAL0_ANSWER_NAMES=(
     HAL0_AGENT_MODEL
     HAL0_ALLOW_CPU_ONLY
     HAL0_PORT
-    HAL0_BIND_HOST
     HAL0_HOSTNAME
     HAL0_PUBLIC_URL
     HAL0_ALLOWED_ORIGINS
@@ -53,6 +52,9 @@ _HAL0_ANSWER_NAMES=(
 # when it rejects the document, or 1 for a name off the list.
 hal0_apply_answers() {
     local path="${1:-}" origin="${2:-file}"
+    # Names exported by this call (empty until it succeeds); install.sh reads it
+    # to tell a document's value from an inherited environment variable.
+    HAL0_ANSWERS_EXPORTED=()
     if [[ -z "${path}" ]]; then
         echo "error: no answers document given" >&2
         return 1
@@ -72,6 +74,7 @@ hal0_apply_answers() {
     local output rc=0
     output="$("${PY}" -I "${_HAL0_ANSWERS_READER}" --origin "${origin}" -- "${path}")" || rc=$?
     if [[ "${rc}" -ne 0 ]]; then
+        echo "Stopped: the answers document was not accepted." >&2
         return "${rc}"
     fi
 
@@ -107,8 +110,10 @@ hal0_apply_answers() {
     done <<<"${output}"
 
     local i
+    HAL0_ANSWERS_EXPORTED=()
     for i in "${!names[@]}"; do
         export "${names[i]}=${values[i]}"
+        HAL0_ANSWERS_EXPORTED+=("${names[i]}")
     done
     # shellcheck disable=SC2034 # read by install.sh, which sources this file
     HAL0_ANSWERS_APPLIED=1
@@ -117,6 +122,7 @@ hal0_apply_answers() {
 
 hal0_collect_answers() {
     HAL0_ANSWERS_APPLIED=0
+    HAL0_ANSWERS_EXPORTED=()
     export HAL0_FACTS_FILE="${HAL0_FACTS_FILE:-/run/hal0-install/facts.json}"
     local path="${HAL0_ANSWERS_FILE:-}"
     [[ -n "${path}" ]] || return 0
