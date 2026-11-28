@@ -128,7 +128,7 @@ MEMORY_ALIAS = "hal0/memory"
 #: repo), so this is deliberately a ROUND, DEFENSIBLE floor rather than an
 #: exact token count: rc.6 validation observed the prompt (few-shot examples
 #: + narrator scaffolding + the extraction schema) run ~3-4k tokens on its
-#: own, and the reproduced failure (ct151-cpu-fresh, `known-issues.yaml:
+#: own, and the reproduced failure (ct151-fresh, `known-issues.yaml:
 #: memory-extraction-quality-is-anchor-dependent`) sat at ctx=4096 — i.e.
 #: at or below the prompt's own footprint, before a single byte of the
 #: document being retained is added. 8192 doubles that observed prompt cost

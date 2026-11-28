@@ -34,7 +34,7 @@ not content: each agent reads its own brief, `CONTEXT.md`, `known-issues.yaml`, 
 
 ```sh
 # 1. Reset and install the RC on the target boxes (operator, out of band):
-#    ct151-cpu-fresh  -> pct rollback 151 pristine, then the POST-ROLLBACK CHECKLIST in
+#    ct151-fresh      -> pct rollback 151 pristine, then the POST-ROLLBACK CHECKLIST in
 #                        boxes.toml (rollback DELETES the dev0/dev3 passthrough entries —
 #                        re-add + confirm gid=991; `pct set 151 --nameserver`, never an
 #                        in-container resolv.conf edit; `apt install -y curl jq`), then
@@ -49,7 +49,7 @@ Invoke the `rc-validate` workflow with args:
 ```json
 {
   "version": "1.0.0-rc.5",
-  "boxes": ["ct151-cpu-fresh", "ct150-update"],
+  "boxes": ["ct151-fresh", "ct150-update"],
   "mode": "file",
   "repo": "/abs/path/to/hal0/worktree"
 }
