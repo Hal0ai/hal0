@@ -26,6 +26,8 @@ import shutil
 import subprocess
 from pathlib import Path
 
+import pytest
+
 REPO = Path(__file__).resolve().parents[2]
 TEXT = (REPO / "installer" / "install.sh").read_text(encoding="utf-8")
 
@@ -188,6 +190,10 @@ class Box:
     def run(
         self, body: str, *, venv: str | None = None, normalise_rc: int = 0
     ) -> subprocess.CompletedProcess[str]:
+        if body is HERMES_BLOCK and os.geteuid() == 0:
+            # facts.sh ignores HAL0_FACTS_AGENTS_DIR as root: the Hermes block
+            # would read, and on a lift remove, the real /etc/hal0/agents record.
+            pytest.skip("the record-path override is ignored as root: the real /etc/hal0 is used")
         venv = venv or (str(self.hal0_venv) if body is HERMES_BLOCK else "/usr/lib/hal0/venv")
         prelude = (
             'info() { echo "INFO: $*"; }\nwarn() { echo "WARN: $*"; }\n'
@@ -197,6 +203,7 @@ class Box:
             f"UNIT_DIR={self.unit_dir}\nVENV_DIR={venv}\n"
             "BENCH_STATE_DIR=/var/lib/hal0-bench\nPY=python3\n"
             f"HAL0_BIN={self.bin / 'hal0'}\nAGENT_UNIT_DST={self.agent_unit}\n"
+            f"source {REPO / 'installer' / 'lib' / 'facts.sh'}\n"
         )
         script = prelude + HELPERS + body.replace(VENV, str(self.venv))
         env = {
@@ -208,8 +215,10 @@ class Box:
             "VENV": str(self.venv),
             "HERMES_STUB": str(self.bin / "hermes"),
             "NORMALISE_RC": str(normalise_rc),
+            "HAL0_FACTS_AGENTS_DIR": str(self.tmp / "agents"),
         }
         env.pop("HAL0_SKIP_HERMES", None)
+        env.pop("HAL0_HERMES_STOP", None)
         return subprocess.run(
             ["bash", "-euo", "pipefail", "-c", script],
             env=env,

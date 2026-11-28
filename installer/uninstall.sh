@@ -369,6 +369,11 @@ do
     rm_path "${UNIT_FILE}"
 done
 
+# The installer's record that it stopped the assistant from the setup screens:
+# it is about the units removed just above, so it goes with them even on a
+# default run (the rest of ${ETC_DIR}/agents is kept).
+rm_path "${ETC_DIR}/agents/hermes-stopped-by-setup"
+
 # Per-instance slot/agent drop-in dirs the orchestrator renders at runtime
 # (hal0-slot@<name>.service.d/, hal0-agent@<name>.service.d/) plus the named
 # drop-ins the installer ships. Glob-sweep so extra agents/slots come clean.

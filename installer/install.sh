@@ -335,6 +335,14 @@ HAL0_HERMES_TERMINAL=1 gives the bundled Hermes agent a terminal tool, letting
 it run commands as the hal0 user (root-equivalent on this box). It is OFF by
 default. An unattended install leaves it off unless HAL0_HERMES_TERMINAL=1 is
 set in the environment, which is the explicit opt-in.
+
+Turning the assistant off on the setup screens, on a box that already has it,
+stops it; it stays installed and stays stopped, also across upgrades, until it
+is turned on there again or started by hand (\`systemctl enable --now
+hal0-agent@hermes\`, and \`hermes-gateway\` for the messaging bridge). A skip
+flag or variable alone (--no-hermes, --no-agents, --bare, HAL0_SKIP_HERMES=1)
+does not stop an installed assistant: only setup screens that a person
+confirmed do.
 EOF
             exit 0
             ;;
@@ -4829,6 +4837,66 @@ else
             [[ "${_eff##* }" == "1" ]] && _gateway_was_active=1
         fi
     fi
+    # The record that THIS installer stopped the assistant from the setup
+    # screens (root-only, one line per unit it disabled: `agent`, `gateway`),
+    # read here, before the provisioning and enable blocks below can change
+    # anything. A lift ends the stop: a confirmed run of the setup screens with
+    # the assistant ON (HAL0_HERMES_STOP=0), or the person enabling the agent
+    # unit by hand since (it reads enabled now, which this run has not caused).
+    # A stop signal in this same run wins over both: it stops again below.
+    # Strict read: known words only, a link is never followed, and anything
+    # else makes the record "damaged": still present, nothing in it trusted.
+    _hermes_record="$(hal0_hermes_stop_record_path)"
+    _hermes_rec="none"
+    _hermes_rec_gateway=0
+    _hermes_rec_gateway_runtime=0
+    if hal0_hermes_stop_record_present; then
+        _hermes_rec="damaged"
+        if [[ -f "${_hermes_record}" && ! -L "${_hermes_record}" ]]; then
+            _hermes_rec="ok"
+            _hermes_rec_lines=0
+            while IFS= read -r _hermes_rec_line || [[ -n "${_hermes_rec_line}" ]]; do
+                _hermes_rec_lines=$((_hermes_rec_lines + 1))
+                case "${_hermes_rec_line}" in
+                    agent) ;;
+                    gateway) _hermes_rec_gateway=1 ;;
+                    gateway-runtime) _hermes_rec_gateway=1; _hermes_rec_gateway_runtime=1 ;;
+                    *) _hermes_rec="damaged" ;;
+                esac
+            done < "${_hermes_record}" 2>/dev/null || _hermes_rec="damaged"
+            [[ "${_hermes_rec_lines}" -ge 1 && "${_hermes_rec_lines}" -le 8 ]] || _hermes_rec="damaged"
+        fi
+        [[ "${_hermes_rec}" == "ok" ]] || { _hermes_rec_gateway=0; _hermes_rec_gateway_runtime=0; }
+    fi
+    _hermes_agent_state="$(unit_enable_state hal0-agent@hermes.service)"
+    # Held: the stop stays. A stop signal in this run always holds it; otherwise
+    # it holds while it is in force (facts.sh: a record, not a gateway-only
+    # leftover of a lift, and the agent unit not enabled by hand) and this run
+    # was not confirmed ON on the setup screens. A record that is not held is
+    # lifted. The same function answers the facts the screens read.
+    _hermes_held=0
+    _hermes_lift=0
+    if [[ "${_hermes_rec}" != "none" ]]; then
+        if [[ "${HAL0_HERMES_STOP:-}" == "1" ]] \
+            || { [[ "${HAL0_HERMES_STOP:-}" != "0" ]] && hal0_hermes_stop_in_force "${_hermes_agent_state}"; }; then
+            _hermes_held=1
+        else
+            _hermes_lift=1
+            # A gateway this installer disabled is read as "on", not as the
+            # person's own off switch (for one that was only on for this boot,
+            # as on for this boot). One the person masked since, or that is
+            # enabled already, stays as it is: nothing is ever unmasked.
+            if [[ "${_hermes_rec_gateway}" -eq 1 ]]; then
+                case "${_gateway_state}" in
+                    masked* | enabled*) ;;
+                    *)
+                        _gateway_state="enabled"
+                        [[ "${_hermes_rec_gateway_runtime}" -eq 1 ]] && _gateway_state="enabled-runtime"
+                        ;;
+                esac
+            fi
+        fi
+    fi
     _hermes_install_args=()
     unit_state_off "${_gateway_state}" && _hermes_install_args+=(--no-gateway)
 
@@ -4841,6 +4909,10 @@ else
     if [[ -f "${AGENT_UNIT_DST}" && ! -x "/var/lib/hal0/venvs/hermes/bin/hermes" ]]; then
         if [[ "${HAL0_SKIP_HERMES:-0}" -eq 1 ]]; then
             info "skipping hermes provisioning (HAL0_SKIP_HERMES=1) — run '${HAL0_BIN} agent install hermes' later"
+        # `agent install hermes` enables and starts the agent: while the stop
+        # from the setup screens holds, this run does not provision either.
+        elif [[ "${_hermes_held:-0}" -eq 1 ]]; then
+            info "the assistant (Hermes) was stopped from the setup screens; it is not reinstalled until it is turned on again there, or with '${HAL0_BIN} agent install hermes' by hand"
         # `hal0 agent install hermes` checks the pinned hermes-agent commit
         # out of a git mirror under /var/lib/hal0/hermes (ADR-0032), so it
         # needs a working `git`. The
@@ -4910,12 +4982,163 @@ else
         unset _ht_value
     fi
 
+    # An installed assistant that a confirmed run of the setup screens turned
+    # off is stopped and disabled, not removed: its venv, its data and its
+    # settings stay, and a later run with the assistant on enables it again
+    # through the block below. HAL0_HERMES_STOP is 1 only when the answers
+    # reader printed it for origin wizard with the screens-shown marker and the
+    # assistant off (installer/lib/answers.sh unsets an inherited one and
+    # refuses it for any other origin), so a skip flag, HAL0_SKIP_HERMES=1, a
+    # file document, a saved document or a headless run never gets here. This
+    # step does not run at all under --dev or --no-start (the service-start
+    # branch it lives in is skipped). It disables exactly the units the block
+    # below would enable: the agent unit, and the gateway unit when its state
+    # was enabled; a masked or disabled gateway, and one started by hand, are
+    # left as they are. Linger for hal0, the dashboard proxy, containers, the
+    # venv and /var/lib/hal0 are not touched.
+    _hermes_stop_signal=0
+    if [[ "${HAL0_HERMES_STOP:-}" == "1" && "${_hermes_was_provisioned}" -eq 1 && -f "${AGENT_UNIT_DST}" ]]; then
+        _hermes_stop_signal=1
+        _hermes_stop_failed=0
+        _hermes_stop_did=0
+        _hermes_stop_gateway=0
+        systemctl is-active --quiet hal0-agent@hermes.service 2>/dev/null && _hermes_stop_did=1
+        [[ "${_hermes_agent_state:-}" == enabled* ]] && _hermes_stop_did=1
+        # Enabled for this boot only: a plain disable would leave it enabled.
+        _hermes_agent_runtime=()
+        [[ "${_hermes_agent_state:-}" == "enabled-runtime" ]] && _hermes_agent_runtime=(--runtime)
+        systemctl disable ${_hermes_agent_runtime[@]+"${_hermes_agent_runtime[@]}"} --now hal0-agent@hermes.service || _hermes_stop_failed=1
+        # Every gateway unit that is really enabled or running, whichever name
+        # it has: the canonical hermes-gateway.service and hal0's hashed
+        # hermes-gateway-<hash>.service (named by the module's read-only
+        # `units` verb). Each is disabled and stopped where it stands. This
+        # step never calls `migrate`: that enables and starts the canonical
+        # unit when the hashed one was enabled, and turns linger on, which a
+        # "stop" must not do. The move onto the canonical name is left to the
+        # lift (`hermes_gateway_regen install` does it). A masked unit is never
+        # touched or unmasked; a disabled unit that runs (started by hand,
+        # "will be stopped" was confirmed) is stopped, and not named in the
+        # record.
+        _gw_units=(hermes-gateway.service)
+        if [[ -x "${VENV_DIR}/bin/python" ]]; then
+            while IFS= read -r _gw_name; do
+                if [[ "${_gw_name}" =~ ^hermes-gateway-[0-9a-f]{8}\.service$ ]]; then
+                    _gw_units+=("${_gw_name}")
+                fi
+            done < <("${VENV_DIR}/bin/python" -I -m hal0.agents.hermes_gateway_regen units 2>/dev/null || true)
+        fi
+        _hermes_stop_gateway_word="gateway"
+        for _gw_unit in "${_gw_units[@]}"; do
+            _gw_now="$(unit_enable_state "${_gw_unit}")"
+            _gw_act=0
+            systemctl is-active --quiet "${_gw_unit}" 2>/dev/null && _gw_act=1
+            case "${_gw_now}" in
+                masked*) ;;
+                enabled-runtime)
+                    systemctl disable --runtime --now "${_gw_unit}" || _hermes_stop_failed=1
+                    _hermes_stop_gateway=1
+                    _hermes_stop_gateway_word="gateway-runtime"
+                    ;;
+                enabled*)
+                    systemctl disable --now "${_gw_unit}" || _hermes_stop_failed=1
+                    _hermes_stop_gateway=1
+                    _hermes_stop_gateway_word="gateway"
+                    ;;
+                *)
+                    if [[ "${_gw_act}" -eq 1 ]]; then
+                        systemctl disable --now "${_gw_unit}" || _hermes_stop_failed=1
+                        _hermes_stop_did=1
+                    fi
+                    ;;
+            esac
+        done
+        [[ "${_hermes_stop_gateway}" -eq 1 ]] && _hermes_stop_did=1
+        # Stopped means: afterwards no gateway unit of either name is enabled or
+        # active, and neither is the agent. The effective gateway is asked too
+        # (`state`), for a hashed unit the `units` verb did not name. What is
+        # still on is named in the warning.
+        _hermes_stop_left=()
+        for _gw_unit in "${_gw_units[@]}"; do
+            _gw_now="$(unit_enable_state "${_gw_unit}")"
+            if systemctl is-active --quiet "${_gw_unit}" 2>/dev/null || [[ "${_gw_now}" == enabled* ]]; then
+                _hermes_stop_failed=1
+                _hermes_stop_left+=("${_gw_unit}")
+            fi
+        done
+        if [[ -x "${VENV_DIR}/bin/python" ]]; then
+            _gw_eff="$("${VENV_DIR}/bin/python" -I -m hal0.agents.hermes_gateway_regen state 2>/dev/null || true)"
+            case "${_gw_eff%% *}" in enabled*) _hermes_stop_failed=1 ;; esac
+            [[ -n "${_gw_eff}" && "${_gw_eff##* }" == "1" ]] && _hermes_stop_failed=1
+        fi
+        if systemctl is-active --quiet hal0-agent@hermes.service 2>/dev/null \
+            || [[ "$(unit_enable_state hal0-agent@hermes.service)" == enabled* ]]; then
+            _hermes_stop_failed=1
+            _hermes_stop_left+=(hal0-agent@hermes.service)
+        fi
+        if [[ "${_hermes_stop_failed}" -eq 0 ]]; then
+            COMPONENT_STATES["hermes"]="stopped"
+            # The record keeps what an earlier stop named: it is never reduced.
+            # A damaged one is left as it is (and already warned about).
+            if [[ "${_hermes_rec:-none}" == "damaged" ]]; then
+                warn "${_hermes_record} is not a record this installer wrote — leaving it as it is; it still holds the assistant stopped"
+            else
+                _hermes_rec_text="agent"$'\n'
+                # `gateway-runtime`: the gateway was on for this boot only, and a
+                # lift turns it on for this boot only again.
+                if [[ "${_hermes_stop_gateway}" -eq 1 ]]; then
+                    _hermes_rec_text+="${_hermes_stop_gateway_word}"$'\n'
+                elif [[ "${_hermes_rec_gateway_runtime:-0}" -eq 1 ]]; then
+                    _hermes_rec_text+="gateway-runtime"$'\n'
+                elif [[ "${_hermes_rec_gateway:-0}" -eq 1 ]]; then
+                    _hermes_rec_text+="gateway"$'\n'
+                fi
+                if nofollow dir --create --owner root:root --mode 0755 --expect root "${_hermes_record%/*}" \
+                    && printf '%s' "${_hermes_rec_text}" \
+                        | nofollow write --owner root:root --mode 0644 --require-trusted-dir "${_hermes_record}"; then
+                    :
+                else
+                    warn "could not write ${_hermes_record} — a later run without the setup screens may start the assistant again"
+                fi
+            fi
+            if [[ "${_hermes_stop_did}" -eq 1 ]]; then
+                info "the assistant (Hermes) was stopped and disabled; it stays installed and stays stopped across upgrades and unattended runs until it is turned on again on the setup screens or with 'systemctl enable --now hal0-agent@hermes'"
+            else
+                info "the assistant (Hermes) was already stopped and stays stopped; it stays installed, and stays stopped across upgrades and unattended runs until it is turned on again on the setup screens or with 'systemctl enable --now hal0-agent@hermes'"
+            fi
+        else
+            COMPONENT_STATES["hermes"]="stop-failed"
+            # Name what is still on, the hashed unit too, and put every unit
+            # that may still be on in the command to run by hand.
+            _gw_left_text="the gateway named by 'hermes_gateway_regen state'"
+            if [[ "${#_hermes_stop_left[@]}" -gt 0 ]]; then
+                _gw_left_text="${_hermes_stop_left[*]}"
+            fi
+            warn "the assistant (Hermes) may still be running — stopping it failed (still on: ${_gw_left_text}); run 'systemctl disable --now hal0-agent@hermes.service ${_gw_units[*]}' by hand (component state: stop-failed)"
+        fi
+        unset _hermes_stop_failed _hermes_stop_did _hermes_stop_gateway _hermes_stop_gateway_word _hermes_stop_left _hermes_agent_runtime
+        unset _gw_now _gw_act _gw_eff _gw_name _gw_unit _gw_units _gw_left_text _hermes_rec_text
+    elif [[ "${_hermes_held:-0}" -eq 1 && -f "${AGENT_UNIT_DST}" ]]; then
+        # Stopped from the setup screens earlier and nobody has turned it on
+        # since: this run (an upgrade, headless, --answers, saved answers) does
+        # not enable or start it, nor install or enable its gateway, and (see
+        # the provisioning block above) does not reinstall it when its venv is
+        # gone. The hold does not depend on the venv.
+        _hermes_stop_signal=1
+        COMPONENT_STATES["hermes"]="stopped"
+        if [[ "${_hermes_rec}" == "damaged" ]]; then
+            warn "${_hermes_record} is not a record this installer wrote — treating the assistant as stopped from the setup screens; nothing in it is used"
+        fi
+        if [[ "${_hermes_was_provisioned}" -eq 1 ]]; then
+            info "the assistant (Hermes) was stopped from the setup screens and stays stopped; start it again with 'systemctl enable --now hal0-agent@hermes' or turn it on on the setup screens"
+        fi
+    fi
+
     # Enable the unit + gateway for both fresh (just-provisioned) and upgrade
     # installs. `hal0 agent install hermes` already enables the agent unit, so
     # the enable here is idempotent; it also covers the upgrade path where no
     # provision ran, plus the system-scope gateway (which the provision does
     # not install).
-    if [[ -f "${AGENT_UNIT_DST}" && -x "/var/lib/hal0/venvs/hermes/bin/hermes" ]]; then
+    if [[ -f "${AGENT_UNIT_DST}" && -x "/var/lib/hal0/venvs/hermes/bin/hermes" && "${_hermes_stop_signal}" -ne 1 ]]; then
         # Non-fatal: a hermes start hiccup must NOT abort an otherwise-good
         # install (hal0-api + chat are already up). Under `set -e` a failed
         # `enable --now` (e.g. the unit tripped StartLimitBurst) would fire the
@@ -5027,7 +5250,45 @@ else
     elif [[ -f "${AGENT_UNIT_DST}" ]]; then
         # No venv after the provision block: it was skipped (HAL0_SKIP_HERMES=1)
         # or failed. The warnings above already explain; this is the summary line.
-        info "hal0-agent@hermes not enabled — provision with '${HAL0_BIN} agent install hermes'"
+        # (Not after a stop: the stop step above already said what it did.)
+        if [[ "${_hermes_stop_signal}" -ne 1 ]]; then
+            info "hal0-agent@hermes not enabled — provision with '${HAL0_BIN} agent install hermes'"
+        fi
+    fi
+
+    # The lift is complete once the block above has run (agent enabled and
+    # started, a gateway the record named enabled again): the record goes. The
+    # record is root's, in a root-only folder; `rm -f` on a link removes the link.
+    # The record goes only when everything it names is back: a gateway it names
+    # that does not read enabled now (the install or the enable failed) stays
+    # named, alone, so the next run still enables it instead of reading it as
+    # the person's own off switch. A gateway-only record is not a stop: the
+    # next run lifts again (facts.sh hal0_hermes_stop_in_force).
+    if [[ "${_hermes_lift:-0}" -eq 1 && -f "${AGENT_UNIT_DST}" && -x "/var/lib/hal0/venvs/hermes/bin/hermes" ]]; then
+        _hermes_rec_keep=""
+        if [[ "${_hermes_rec}" == "ok" && "${_hermes_rec_gateway}" -eq 1 ]]; then
+            case "$(unit_enable_state hermes-gateway.service)" in
+                enabled* | masked*) ;;
+                *)
+                    _hermes_rec_keep="gateway"
+                    [[ "${_hermes_rec_gateway_runtime}" -eq 1 ]] && _hermes_rec_keep="gateway-runtime"
+                    ;;
+            esac
+        fi
+        if [[ -n "${_hermes_rec_keep}" ]]; then
+            if nofollow dir --create --owner root:root --mode 0755 --expect root "${_hermes_record%/*}" \
+                && printf '%s\n' "${_hermes_rec_keep}" \
+                    | nofollow write --owner root:root --mode 0644 --require-trusted-dir "${_hermes_record}"; then
+                warn "the assistant (Hermes) was turned on again, but its gateway is not enabled yet: ${_hermes_record} keeps the gateway; the next run enables it again (or run 'systemctl enable --now hermes-gateway')"
+            else
+                warn "could not rewrite ${_hermes_record} — the gateway is not enabled; run 'systemctl enable --now hermes-gateway' by hand"
+            fi
+        elif rm -f "${_hermes_record}"; then
+            info "the assistant (Hermes) was turned on again: the stop from the setup screens is lifted"
+        else
+            warn "could not remove ${_hermes_record} — the assistant is running; remove the file by hand so a later run does not hold it stopped"
+        fi
+        unset _hermes_rec_keep
     fi
 
     # ── Optional: pi coding agent (cli-kind bundled agent; spec 2026-08-31) ──
@@ -5176,6 +5437,9 @@ fi
 if [[ "${IS_UPGRADE}" -eq 0 ]]; then
     _summary_skipped=()
     for _summary_cid in openwebui comfyui hermes pi hindsight brain; do
+        # `stopped` (an installed assistant the screens turned off) and
+        # `stop-failed` (the stop did not work: it may still be running) are
+        # not "skipped": the step already said so, and neither is listed here.
         if [[ "${COMPONENT_STATES[${_summary_cid}]:-}" == "skipped" ]]; then
             case "${_summary_cid}" in
                 openwebui) _summary_clabel="Open WebUI" ;;
@@ -5340,7 +5604,8 @@ for entry in blob.split("\x1e"):
         except ValueError:
             pass
 
-# Component choices: id -> selected | skipped | unavailable:<reason>, same
+# Component choices: id -> selected | skipped | stopped | stop-failed |
+# unavailable:<reason> (the state string passes through as it is), same
 # RS-joined blob (HAL0_COMPONENTS_BLOB). Additive to v1; {} when absent.
 components = {}
 for entry in os.environ.get("HAL0_COMPONENTS_BLOB", "").split("\x1e"):

@@ -9,7 +9,7 @@
 #          (HAL0_GPU_GATE=1) and passes its return code to hal0_facts_gather.
 #          Plain bash and coreutils only: this runs before any Python exists.
 # Provides: hal0_json_string, hal0_gpu_pool_gb, hal0_install_state,
-#          hal0_facts_gather, hal0_facts_write.
+#          hal0_hermes_installed, hal0_facts_gather, hal0_facts_write.
 # Safety:  Every call here only reads. Nothing installs a package, pulls an
 #          image, or changes a device or group. The functions of preflight.sh
 #          that can do so (resolve_*_python, preflight_venv, preflight_git,
@@ -21,6 +21,9 @@
 #          In --dev mode the installer keeps its tree under a prefix and has no
 #          `current` link, so the CALLER MUST SET BOTH HAL0_FACTS_VAR_DIR and
 #          HAL0_FACTS_FHS_ROOT there; the defaults look at the real system.
+#          HAL0_FACTS_UNIT_DIR (default ${UNIT_DIR:-/etc/systemd/system}, where
+#          install.sh keeps its units) and HAL0_FACTS_HERMES_BIN (default
+#          /var/lib/hal0/venvs/hermes/bin/hermes) point the assistant fact at a tree.
 
 # Print VALUE as a JSON string literal. Only printable ASCII survives (every
 # byte outside 040-176 is dropped, so the output is always valid UTF-8), then
@@ -68,6 +71,99 @@ hal0_install_state() {
     else
         printf 'fresh\n'
     fi
+}
+
+# The facts seams below (HAL0_FACTS_UNIT_DIR, HAL0_FACTS_HERMES_BIN,
+# HAL0_FACTS_AGENTS_DIR) point the detection at a test tree. They are honoured
+# only when not root, like the setup screens' own overrides: root's environment
+# never decides what the installer reads about the assistant.
+
+# The root-only record that the installer stopped the assistant from the setup
+# screens (one line per unit it disabled). ONE definition: the facts writer
+# below and the Hermes step of install.sh both ask this function.
+hal0_hermes_stop_record_path() {
+    local dir="/etc/hal0/agents"
+    if [[ "${EUID}" -ne 0 && -n "${HAL0_FACTS_AGENTS_DIR:-}" ]]; then
+        dir="${HAL0_FACTS_AGENTS_DIR}"
+    fi
+    printf '%s/hermes-stopped-by-setup\n' "${dir}"
+}
+
+# Is the assistant (Hermes) installed on this box? True when the agent unit file
+# exists AND the venv's `hermes` is executable: the test the Hermes step of
+# install.sh makes (the unit file AGENT_UNIT_DST=${UNIT_DIR}/hal0-agent@.service
+# and the executable /var/lib/hal0/venvs/hermes/bin/hermes). A test in
+# tests/installer/test_facts_writer.py keeps the two paths equal.
+hal0_hermes_installed() {
+    local unit_dir="${UNIT_DIR:-/etc/systemd/system}"
+    local bin="/var/lib/hal0/venvs/hermes/bin/hermes"
+    if [[ "${EUID}" -ne 0 ]]; then
+        unit_dir="${HAL0_FACTS_UNIT_DIR:-${unit_dir}}"
+        bin="${HAL0_FACTS_HERMES_BIN:-${bin}}"
+    fi
+    [[ -f "${unit_dir}/hal0-agent@.service" && -x "${bin}" ]]
+}
+
+# Is there anything at the record's path? Tested without following a link, so
+# a link or a folder there counts (the Hermes step reads it as a damaged
+# record, which still holds the assistant stopped).
+hal0_hermes_stop_record_present() {
+    local rec
+    rec="$(hal0_hermes_stop_record_path)"
+    [[ -L "${rec}" || -e "${rec}" ]]
+}
+
+# A record that names only a gateway (`gateway` / `gateway-runtime`), no `agent`
+# line: what a lift leaves behind when the assistant is back on but its gateway
+# could not be enabled yet. It is a lift in progress, not a stop.
+hal0_hermes_stop_record_is_gateway_only() {
+    local rec line lines=0 agent=0
+    rec="$(hal0_hermes_stop_record_path)"
+    [[ -f "${rec}" && ! -L "${rec}" ]] || return 1
+    while IFS= read -r line || [[ -n "${line}" ]]; do
+        lines=$((lines + 1))
+        case "${line}" in
+            agent) agent=1 ;;
+            gateway | gateway-runtime) ;;
+            *) return 1 ;;
+        esac
+    done < "${rec}" 2>/dev/null || return 1
+    [[ "${lines}" -ge 1 && "${lines}" -le 8 && "${agent}" -eq 0 ]]
+}
+
+# The is-enabled word of the agent unit. The seam HAL0_FACTS_AGENT_STATE is
+# honoured only when not root, like the others above.
+hal0_hermes_agent_unit_state() {
+    local state=""
+    if [[ "${EUID}" -ne 0 && -n "${HAL0_FACTS_AGENT_STATE:-}" ]]; then
+        printf '%s\n' "${HAL0_FACTS_AGENT_STATE}"
+        return 0
+    fi
+    state="$(systemctl is-enabled hal0-agent@hermes.service 2>/dev/null || true)"
+    printf '%s\n' "${state:-not-found}"
+}
+
+# "The stop from the setup screens is in force": ONE definition, asked by the
+# facts writer below and by the Hermes step of install.sh. $1 is the is-enabled
+# word of hal0-agent@hermes.service. In force when there is a record (anything
+# at its path), it is not a gateway-only leftover of a lift, and the agent unit
+# is not enabled: a person who enables the agent unit by hand has lifted the
+# stop. (A confirmed run of the setup screens lifts it too; that is the run's
+# own answer, which the Hermes step reads itself.)
+hal0_hermes_stop_in_force() {
+    hal0_hermes_stop_record_present || return 1
+    hal0_hermes_stop_record_is_gateway_only && return 1
+    [[ "${1:-}" != enabled* ]]
+}
+
+# Did the installer stop the assistant from the setup screens and has no one
+# turned it on since? This describes the BOX, not the coming run: under --dev or
+# --no-start the run never touches the assistant whatever this says (the setup
+# screens read those flags themselves). The unit state is read only when a
+# record exists, so a box without one costs no systemctl call.
+hal0_hermes_stopped_by_setup() {
+    hal0_hermes_stop_record_present || return 1
+    hal0_hermes_stop_in_force "$(hal0_hermes_agent_unit_state)"
 }
 
 # Contents of current/VERSION (first line), or nothing.
@@ -144,10 +240,24 @@ hal0_facts_gather() {
     FACT_INSTALL_VERSION=""
     [[ "${FACT_INSTALL_STATE}" == upgrade ]] && FACT_INSTALL_VERSION="$(_hal0_install_version)"
 
+    FACT_HERMES_INSTALLED=false
+    hal0_hermes_installed && FACT_HERMES_INSTALLED=true
+    # Both Hermes facts describe the BOX, not this run: under --dev or
+    # --no-start the Hermes step does not run and nothing is stopped or started
+    # whatever they say. The setup screens read those flags themselves and show
+    # nothing about the assistant in those modes.
+    FACT_HERMES_STOPPED_BY_SETUP=false
+    hal0_hermes_stopped_by_setup && FACT_HERMES_STOPPED_BY_SETUP=true
+
     FACT_MEMORY_PYTHON=false
     # Detection only: the wrapper never installs; a skip request must not read as "usable".
     (HAL0_SKIP_HINDSIGHT=0 preflight_hindsight_python) >/dev/null 2>&1 && FACT_MEMORY_PYTHON=true
     return 0
+}
+
+# JSON true or false and nothing else: anything but the word `true` is false.
+_hal0_facts_bool() {
+    if [[ "${1-}" == "true" ]]; then printf 'true'; else printf 'false'; fi
 }
 
 # JSON string, or null when empty.
@@ -199,6 +309,9 @@ hal0_facts_write() {
         printf '  "install": {"state": "%s", "version": %s},\n' \
             "${FACT_INSTALL_STATE:-fresh}" \
             "$(_hal0_facts_str_or_null "${FACT_INSTALL_VERSION:-}")"
+        printf '  "hermes": {"installed": %s, "stopped_by_setup": %s},\n' \
+            "$(_hal0_facts_bool "${FACT_HERMES_INSTALLED:-false}")" \
+            "$(_hal0_facts_bool "${FACT_HERMES_STOPPED_BY_SETUP:-false}")"
         printf '  "memory_python": %s\n' "${FACT_MEMORY_PYTHON:-false}"
         printf '}\n'
     } > "${tmp}" || { rm -f "${tmp}"; return 1; }
