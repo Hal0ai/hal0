@@ -164,6 +164,13 @@ check refuses, in every spelling llama.cpp accepts:
   listener, auth and TLS settings (`slot.host_owned_flag_denied`);
 - bare positional arguments (`slot.positional_arg_denied`).
 
+A flag llama-server has removed is refused on save with a 422
+(`slot.removed_flag_denied`) that names its replacement. Today that is the old
+memory-mapping and locking switches: `--no-mmap` is now `-lm none`, `--mmap` is
+`-lm mmap`, `--mlock` is `-lm mmap+mlock` and `--direct-io` is `-lm dio`. A
+profile already stored with one is not rewritten, and its slot does not start
+until the flag is replaced.
+
 `--reasoning-format none` is handled separately, because upstream llama.cpp
 answers every structured-output request with HTTP 400 when the server runs
 with it. Any profile save whose `flags` contain it is rejected

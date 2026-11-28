@@ -118,6 +118,7 @@ copy — they can't be edited or deleted, only cloned.
 | Host-owned | remote model fetches (`-hf`, `--model-url`), host file reads and writes (`--api-key-file`, `--log-file`, `--lora`), listener and auth/TLS settings (`--rpc`, `--api-key`), llama.cpp's built-in preset switches (`--gpt-oss-20b-default`, `--spec-default`) | `slot.host_owned_flag_denied` |
 | Bare positional arguments | a value with no flag in front of it | `slot.positional_arg_denied` |
 | `--reasoning-format none` | — | `slot.reasoning_format_none_denied` on save; stripped, not refused, at launch |
+| Removed from llama-server | `--mmap`, `--no-mmap`, `--mlock`, `--direct-io` (`-dio`), `--no-direct-io` (`-ndio`): use `-lm`/`--load-mode` with `none`, `mmap`, `mlock`, `mmap+mlock` or `dio` | `slot.removed_flag_denied` (422) on save; not checked at launch |
 
 <Aside type="note">
 The slot's own `device` enum is the single authoritative hardware

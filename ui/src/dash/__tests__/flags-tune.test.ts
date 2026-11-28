@@ -129,7 +129,7 @@ describe('findSlotHardwareFlags', () => {
     }
   })
   it('clean tuning text has no offenders', () => {
-    expect(findSlotHardwareFlags('-fa on -ctk q8_0 -ctv q8_0 --no-mmap')).toEqual([])
+    expect(findSlotHardwareFlags('-fa on -ctk q8_0 -ctv q8_0 -lm none')).toEqual([])
   })
 })
 
@@ -161,7 +161,7 @@ describe('findModelFactFlags (ADR-0029: the model owns the chat template and pro
     expect(findModelFactFlags('--chat-template-file=/x/y.jinja')).toEqual(['--chat-template-file'])
   })
   it('clean tuning text has no offenders', () => {
-    expect(findModelFactFlags('-fa on -ctk q8_0 -ctv q8_0 --no-mmap')).toEqual([])
+    expect(findModelFactFlags('-fa on -ctk q8_0 -ctv q8_0 -lm none')).toEqual([])
   })
 })
 

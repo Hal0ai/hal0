@@ -87,7 +87,7 @@ hal0-bench's GPU rule).
 ## What's worth tuning on Strix Halo (gfx1151, Radeon 8060S)
 
 Priors from the production `hal0-slot@agent` config: `-b 8192 -ub 2048 -ctk q8_0 -ctv q8_0
--fa on --no-mmap`, threads 16/32. Start near these.
+-fa on -lm none`, threads 16/32. Start near these.
 
 | Flag | Effect | Notes |
 |------|--------|-------|

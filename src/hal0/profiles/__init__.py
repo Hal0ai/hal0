@@ -607,8 +607,10 @@ def screen_profile_flags(flags: str | None, *, runtime_family: str | None = None
     ``--chat-template*``, ``--mmproj*``, ``--no-mmproj*``),
     ``--spec-draft-device`` (the slot's device decides it), a host-owned flag
     (remote model fetch, host file, listener, auth/TLS), a bare positional or
-    ``--reasoning-format none`` (#2545), in any spelling. The text must be
-    valid shell text.
+    ``--reasoning-format none`` (#2545), in any spelling, nor a flag
+    llama-server has removed (``--no-mmap`` and the rest of
+    :data:`hal0.slots.argv.REMOVED_FLAGS`, #4063). The text must be valid
+    shell text.
     """
     if runtime_family == "halogen":
         from hal0.runners.knobs import screen_halogen_flags
@@ -625,9 +627,16 @@ def screen_profile_flags(flags: str | None, *, runtime_family: str | None = None
             code="profiles.flags_malformed",
             details={"flags": flags},
         ) from exc
-    from hal0.slots.argv import deny_reasoning_format_none, screen_profile_segment
+    from hal0.slots.argv import (
+        deny_reasoning_format_none,
+        deny_removed_flags,
+        screen_profile_segment,
+    )
 
     # The launch-time screen (hardware, managed, model-fact, host-owned flags
     # and bare positionals, in every spelling), plus #2545 on the write side.
     deny_reasoning_format_none(tokens, segment="profile flags")
     screen_profile_segment(tokens, segment="profile flags")
+    # Last, so a flag hal0 refuses for its own reasons reports that reason: a
+    # spelling the pinned llama-server no longer has (#4063).
+    deny_removed_flags(tokens, segment="profile flags")
