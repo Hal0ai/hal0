@@ -103,17 +103,25 @@ done < <(jq -r '.[] | select(.milestone == null and (.author.is_bot | not)) | .n
 # shellcheck disable=SC2016  # GraphQL variables, not shell
 shipped_query='query($owner:String!,$name:String!,$number:Int!,$endCursor:String){repository(owner:$owner,name:$name){
   milestone(number:$number){issues(states:CLOSED,first:100,after:$endCursor){pageInfo{hasNextPage endCursor} nodes{number
-    closedByPullRequestsReferences(first:10){nodes{number merged milestone{title}}}}}}}}'
+    closedByPullRequestsReferences(first:10){totalCount nodes{number merged milestone{title}}}}}}}}'
+# One row per merged closing pull request, and a CUTOFF row for an issue with
+# more closing pull requests than one page holds.
 # shellcheck disable=SC2016  # jq variables, not shell
 shipped_filter='.data.repository.milestone.issues.nodes[] | .number as $n
-    | .closedByPullRequestsReferences.nodes[] | select(.merged)
-    | [$n, .number, (.milestone.title // "no milestone")] | @tsv'
+    | .closedByPullRequestsReferences as $c
+    | ($c.nodes[] | select(.merged) | [$n, .number, (.milestone.title // "no milestone")]),
+      (select($c.totalCount > ($c.nodes | length)) | [$n, 0, "CUTOFF"])
+    | @tsv'
 while IFS=$'\t' read -r ms_number ms_title; do
     [[ "$ms_title" == "Backlog" ]] && continue
     shipped="$(gh api graphql --paginate -f query="$shipped_query" -F owner="$OWNER" -F name="$NAME" \
         -F number="$ms_number" --jq "$shipped_filter")"
     while IFS=$'\t' read -r number pr pr_ms; do
         [[ -n "$number" ]] || continue
+        if [[ "$pr_ms" == "CUTOFF" ]]; then
+            fail "#$number has more closing pull requests than this check reads; check it by hand"
+            continue
+        fi
         [[ "$pr_ms" == "$ms_title" ]] && continue
         fail "#$number is closed on $ms_title, but pull request #$pr that closed it is on $pr_ms"
     done <<<"$shipped"
@@ -121,11 +129,19 @@ done < <(jq -r '.[] | [.number, .title] | @tsv' <<<"$milestones")
 
 # --- 6. sunset markers --------------------------------------------------------
 while IFS=$'\t' read -r file version; do
-    # A milestone that does not exist makes this call fail; that is reported
-    # below as "no open issue mentions it", not as a broken run.
-    bodies="$(gh issue list --repo "$REPO" --state open --milestone "$version" --limit 1000 --json body \
-        --jq '.[].body' 2>/dev/null || true)"
-    if ! grep -qF -- "$file" <<<"$bodies"; then
+    # A milestone that does not exist makes this call fail. That is an error
+    # for the marker, named as what it is, and the other markers still run.
+    if ! sunset_issues="$(gh issue list --repo "$REPO" --state open --milestone "$version" \
+        --limit "$ISSUE_LIMIT" --json body 2>/dev/null)"; then
+        fail "$file carries HAL0-SUNSET: $version, and the open issues on $version could not be read (is there such a milestone?)"
+        continue
+    fi
+    if [[ "$(jq length <<<"$sunset_issues")" -ge "$ISSUE_LIMIT" ]]; then
+        fail "the open issue list for $version reached $ISSUE_LIMIT entries and may be cut off; raise ISSUE_LIMIT"
+    fi
+    # Tested inside jq: a pipe into `grep -q` ends early on a match, and with
+    # pipefail that would read as "not found".
+    if ! jq -e --arg f "$file" 'any(.[]; (.body // "") | contains($f))' <<<"$sunset_issues" >/dev/null; then
         fail "$file carries HAL0-SUNSET: $version, and no open issue on $version mentions it"
     fi
 done < <(cd "$ROOT" && grep -rnoE 'HAL0-SUNSET: v[0-9]+\.[0-9]+(\.[0-9]+)?' src 2>/dev/null \
