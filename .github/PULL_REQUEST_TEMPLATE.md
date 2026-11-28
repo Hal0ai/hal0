@@ -8,6 +8,15 @@ risk grade, touched surfaces, and test-tier runs before requesting review.
 
 <!-- one paragraph: what + why -->
 
+## Lands in
+
+<!-- Set the milestone to the next tag that will contain this change, docs
+     and CI changes included. See CONTRIBUTING.md "Planning a release". -->
+
+_Waits on:_ <!-- nothing | review | a tag | the operator | hardware -->
+_Owed proof:_ <!-- none, or the check this still owes on a real box; add it
+     to the release tracking issue when this merges -->
+
 ## Risk grade
 
 <!-- pick one. See CONTRIBUTING.md "Test tiers" and PLAN §21.15. -->

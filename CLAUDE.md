@@ -18,16 +18,20 @@ commits exactly as they apply to human ones.
 
 ## Issues
 
-Issues live in GitHub Issues; use the `gh` CLI. Labels have three axes:
+Issues live in GitHub Issues; use the `gh` CLI. Labels have four axes:
 
 - **Status**, exactly one per open issue: `needs-triage`, `needs-info`,
   `ready-for-agent`, `ready-for-human`, `wontfix`. Use them unmodified rather
   than inventing new ones.
-- **Priority**, exactly one once triaged: `P0` (breaks a feature, loses data
-  or state, or is a security or privacy exposure; goes to the current patch
-  milestone), `P1` (wrong or confusing for a user; the next minor milestone),
-  `P2` (nice to have; the `Backlog` milestone).
-- **Type**, optional: `bug`, `enhancement`, `documentation`.
+- **Priority**, exactly one once triaged. It says how bad the defect is, not
+  when it ships: `P0` (breaks a feature, loses data or state, or is a security
+  or privacy exposure), `P1` (wrong or confusing for a user), `P2` (nice to
+  have). The milestone says when; see "Planning" below.
+- **Type**, optional: `bug`, `enhancement`, `documentation`, and `epic` for a
+  parent issue whose sub-issues carry the work.
+- **Area**, at least one on every new issue: `area:installer`, `area:updater`,
+  `area:memory`, `area:slots`, `area:api`, `area:agents`, `area:ui`,
+  `area:runners`, `area:security`, `area:ci`, `area:docs`.
 
 `ready-for-agent` means an agent can fix it unsupervised with unit tests,
 without hardware or a design decision, and the change is small.
@@ -45,6 +49,35 @@ Filing rules, for agents exactly as for people:
 A weekly routine triages `needs-triage`, picks `ready-for-agent` work, and
 posts a plain-English summary on the pinned "Weekly triage digest" issue.
 Prefer filing an issue over documenting around a product bug.
+
+## Planning
+
+The plan lives on GitHub: milestones, release tracking issues, epics and the
+roadmap project. `CONTRIBUTING.md`, "Planning a release", has the rules. The
+part a session does itself:
+
+- **At the start**, find the issue your work serves and read its milestone and
+  its parent. If there is none, file one before you write code. The milestone
+  description names the release tracking issue; read it for the current scope.
+- **Claim the issue** with a draft pull request that links it. Until a pull
+  request exists, say in a comment on the issue that you are on it. Every
+  session pushes as the same account, so nothing else shows who holds what.
+- **Put a milestone on everything you open.** An issue gets the release it is
+  planned for, or `Backlog`. A pull request gets the next tag that will
+  contain it, docs and CI changes included.
+- **Record a decision where it applies.** When the operator decides something
+  in your session, write `Decision (YYYY-MM-DD, operator): ...` as a comment on
+  the issue it settles, then bring that issue's labels, milestone and body in
+  line. Say "relayed" when you heard it from another session. A plan kept in a
+  local file or an outside document does not count until an issue summarises
+  it.
+- **A scope change is a line in the scope log**, in the release tracking issue
+  and in the milestone description. Do not move an issue between release
+  milestones without one.
+- **A fix that still owes a check on a real box** gets a line under "Owed
+  proofs" in the release tracking issue when it merges.
+- **Before you finish**, run `scripts/plan-lint.sh` and fix what it reports
+  about your own issues and pull requests.
 
 ## Architecture decisions
 
