@@ -810,7 +810,10 @@ def test_the_document_is_read_through_one_nonblocking_descriptor() -> None:
     text = READER.read_text(encoding="utf-8")
     assert "os.O_NONBLOCK" in text and "os.fstat(fd)" in text
     assert text.count("_read_capped(path)") == 2  # the document and the model list
-    assert "with open(" not in text and "os.stat(" not in text  # no second look by name
+    # The one os.stat is _identity, which looks at the denied trees and the
+    # store path's ancestors, never at the document or the model list.
+    without_identity = text.replace("info = os.stat(path)", "")
+    assert "with open(" not in without_identity and "os.stat(" not in without_identity
 
 
 # ── network.bind_host: checked in every mode, kept when valid ───────────────
@@ -1006,3 +1009,63 @@ def test_the_model_store_path_is_not_subject_to_the_ancestor_rule(tmp_path: Path
 def test_a_nonsense_seam_value_means_root_is_uid_0(tmp_path: Path) -> None:
     proc = _flm(tmp_path, str(tmp_path / "flm"), env={"HAL0_ANSWERS_TEST_ROOT_UID": "abc"})
     assert proc.returncode == 2 if os.getuid() != 0 else proc.returncode == 0
+
+
+# ── a second name for a system tree: compared by device and inode ───────────
+#
+# os.path.realpath cannot see a bind mount or a second mount of one filesystem.
+# The reader therefore also compares (st_dev, st_ino) of every existing ancestor
+# of the path with each denied tree that exists on the box. A real second name
+# needs a mount (root only; a hard link to a directory is impossible), so the
+# test reaches the reader in-process: the real stat is exercised on real
+# directories, and a fake identity function stands in for the second name.
+
+
+def _reader_module():
+    import importlib.util  # noqa: PLC0415
+
+    spec = importlib.util.spec_from_file_location("answers_reader_under_test", READER)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_an_ancestor_that_is_a_denied_tree_by_inode_is_found(tmp_path: Path) -> None:
+    reader = _reader_module()
+    (tmp_path / "denied" / "inner").mkdir(parents=True)
+    (tmp_path / "other").mkdir()
+    trees = (str(tmp_path / "denied"), str(tmp_path / "absent"))
+    assert reader._denied_by_identity(str(tmp_path / "denied" / "inner" / "x" / "y"), trees)
+    assert reader._denied_by_identity(str(tmp_path / "denied"), trees)
+    assert not reader._denied_by_identity(str(tmp_path / "other" / "x"), trees)
+    assert not reader._denied_by_identity(str(tmp_path / "denied-not" / "x"), trees)
+
+
+def test_a_second_name_for_a_denied_tree_is_refused(tmp_path: Path, monkeypatch) -> None:
+    reader = _reader_module()
+    seen = {"/fake/denied": (7, 99), "/mnt/alias": (7, 99), "/mnt": (7, 1), "/": (7, 0)}
+    monkeypatch.setattr(reader, "DENIED_TREES", ("/fake/denied",))
+    monkeypatch.setattr(reader, "_identity", lambda p: seen.get(p))
+    problems = reader._Problems()
+    assert not reader._safe_location("/mnt/alias/models", "model_store.path", problems)
+    assert len(problems.errors) == 1
+    assert "model_store.path" in problems.errors[0] and "second name" in problems.errors[0]
+    assert "/fake/denied" in problems.errors[0]
+    ok = reader._Problems()
+    assert reader._safe_location("/mnt/else/models", "model_store.path", ok)
+    assert ok.errors == []
+
+
+def test_the_default_store_is_not_caught_by_the_inode_check(tmp_path: Path) -> None:
+    # /var/lib is a denied tree and an ancestor of the default store.
+    reader = _reader_module()
+    problems = reader._Problems()
+    assert reader._safe_location("/var/lib/hal0/models/flm", "model_store.path", problems)
+    assert problems.errors == []
+
+
+@pytest.mark.parametrize("key", _STORE_KEYS)
+def test_a_real_system_tree_is_still_refused_by_name_first(tmp_path: Path, key: str) -> None:
+    proc = run({"version": 1, "model_store": {key: "/etc/x"}}, tmp_path)
+    assert proc.returncode == 2 and "system location" in proc.stderr

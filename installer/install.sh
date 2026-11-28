@@ -218,6 +218,9 @@ MODELS_DIR="${HAL0_MODELS_DIR:-}"
 MODELS_DIR_EXPLICIT=0
 # Set by the --models-dir flag only; the answers document must not override it.
 MODELS_DIR_FLAG_GIVEN=0
+# Set to 1 below when an answers document (not a flag or the environment) chose
+# MODELS_DIR: the folder is then created without following links.
+MODELS_DIR_FROM_DOC=0
 [[ -n "${MODELS_DIR}" ]] && MODELS_DIR_EXPLICIT=1
 # --summary-json=PATH: write a machine-readable install summary (schema
 # hal0.install-summary.v1) at PATH once the install finishes successfully.
@@ -386,6 +389,36 @@ hal0_doc_dir_parent_ok() {
     mode="${info##* }"
     [[ "${owner}" == "$(_hal0_root_uid)" ]] || return 1
     (( (8#${mode} & 8#022) == 0 )) || return 1
+}
+# hal0_mkdir_walk_nofollow PATH: make PATH and any missing parents top-down,
+# each root:root 0755, one `nofollow` call per missing component (a descriptor
+# walk: nothing is created through a link swapped in later). Any symlink
+# component is refused with one warning and nothing more is made. Existing
+# components are never re-moded. Warns once and returns non-zero when it
+# refused or failed.
+hal0_mkdir_walk_nofollow() {
+    local path="${1:-}" walk="" part
+    local -a parts=()
+    [[ "${path}" == /* ]] || return 1
+    IFS=/ read -r -a parts <<<"${path}"
+    for part in "${parts[@]+"${parts[@]}"}"; do
+        [[ -n "${part}" ]] || continue
+        if [[ "${part}" == "." || "${part}" == ".." ]]; then
+            warn "${path} was not created: it has a '.' or '..' part"
+            return 1
+        fi
+        walk="${walk}/${part}"
+        if [[ -L "${walk}" ]]; then
+            warn "${path} was not created: ${walk} is a symbolic link; use the real folder, or create it by hand"
+            return 1
+        fi
+        if [[ ! -e "${walk}" ]]; then
+            if ! nofollow dir --create --owner root:root --mode 0755 --expect root "${walk}"; then
+                warn "${path} was not created: ${walk} could not be made safely; create it by hand"
+                return 1
+            fi
+        fi
+    done
 }
 # doc-path-helpers: end
 if [[ "${DEV_MODE}" -eq 1 ]]; then
@@ -725,6 +758,7 @@ if [[ "${HAL0_ANSWERS_APPLIED:-0}" == "1" ]]; then
             else
                 MODELS_DIR="${HAL0_MODELS_DIR}"
                 MODELS_DIR_EXPLICIT=1
+                MODELS_DIR_FROM_DOC=1
             fi
         fi
     done
@@ -1238,16 +1272,29 @@ fi
 
 ui_step "Filesystem layout" "~2-5s"
 
+# A model store an answers document chose is made top-down through `nofollow`
+# (every component root:root 0755, any symlink refused with one warning): the
+# hal0 account may control part of that path and could swap a component for a
+# link after the reader checked it, which `mkdir -p` would follow. Any other
+# store (default, flag, environment) is made as before. A refusal is not fatal
+# here: the store-usable checks later in the install fail on a missing folder.
+_models_mkdir=("${MODELS_DIR}")
+if [[ "${MODELS_DIR_FROM_DOC}" -eq 1 ]]; then
+    _models_mkdir=()
+    hal0_mkdir_walk_nofollow "${MODELS_DIR}" || true  # it has already said why
+fi
+
 mkdir -p \
     "${PREFIX}" \
     "${ETC_DIR}/slots" \
-    "${MODELS_DIR}" \
+    "${_models_mkdir[@]+"${_models_mkdir[@]}"}" \
     "${VAR_DIR}/registry" \
     "${VAR_DIR}/slots" \
     "${VAR_DIR}/backups" \
     "${VAR_DIR}/openwebui" \
     "${VAR_DIR}/cache" \
     "${UNIT_DIR}"
+unset _models_mkdir
 info "directories under ${PREFIX}, ${ETC_DIR}, ${VAR_DIR} (pulls → ${MODELS_DIR})"
 
 # O13: the runtime state trees (slots/, registry/, models/, backups/) are born root:root
@@ -3807,8 +3854,11 @@ else
                 if [[ "${_flm_from_doc}" -eq 1 ]]; then
                     info "FLM model directory ${HAL0_FLM_MODELS_DIR} already exists; leaving its owner and mode as they are"
                 else
-                    nofollow dir --owner 1000:hal0 --mode 2775 --expect any "${HAL0_FLM_MODELS_DIR}" 2>/dev/null \
-                        || nofollow dir --owner hal0:hal0 --mode 2775 --expect any "${HAL0_FLM_MODELS_DIR}" \
+                    # `adopt`: only a directory hal0 already owns (or an empty
+                    # one root just made). `any` would re-own whatever was
+                    # renamed into this name by an account that owns its parent.
+                    nofollow dir --owner 1000:hal0 --mode 2775 --expect adopt "${HAL0_FLM_MODELS_DIR}" 2>/dev/null \
+                        || nofollow dir --owner hal0:hal0 --mode 2775 --expect adopt "${HAL0_FLM_MODELS_DIR}" \
                         || warn "could not set the owner and mode of ${HAL0_FLM_MODELS_DIR}; 'hal0 doctor perms' reports why"
                 fi
             elif [[ "${_flm_from_doc}" -eq 1 ]] && ! hal0_doc_dir_parent_ok "${HAL0_FLM_MODELS_DIR}"; then

@@ -380,6 +380,42 @@ def _normal(path: str) -> str:
     return "/" + "/".join(part for part in path.split("/") if part not in ("", "."))
 
 
+def _identity(path: str) -> tuple[int, int] | None:
+    """(device, inode) of what `path` names, or None when it cannot be looked at."""
+    try:
+        info = os.stat(path)
+    except (OSError, ValueError):
+        return None
+    return (info.st_dev, info.st_ino)
+
+
+def _denied_by_identity(norm: str, trees: tuple[str, ...] | None = None) -> str | None:
+    """The denied tree that `norm` or one of its existing ancestors IS, or None.
+
+    realpath does not see a bind mount or a second mount of the same filesystem,
+    so a second name for /etc passes the name checks. Comparing (device, inode)
+    of every existing ancestor, from the first folder below / down to the
+    deepest one that exists, with those of the denied trees that exist on this
+    box catches it. The name checks stay as they are.
+    """
+    ids: dict[tuple[int, int], str] = {}
+    for tree in DENIED_TREES if trees is None else trees:
+        ident = _identity(tree)
+        if ident is not None:
+            ids.setdefault(ident, tree)
+    if not ids:
+        return None
+    walk = ""
+    for part in [p for p in norm.split("/") if p]:
+        walk = f"{walk}/{part}"
+        ident = _identity(walk)
+        if ident is None:
+            break
+        if ident in ids:
+            return ids[ident]
+    return None
+
+
 def _root_uid() -> int:
     """The uid that counts as root for the ancestor rule: 0.
 
@@ -448,6 +484,14 @@ def _safe_location(value: str, full: str, problems: _Problems, *,
                 how = "" if candidate == norm else " (through a link)"
                 problems.error(f"{full}: {_q(value)} is inside {tree}{how}, a system location")
                 return False
+    if not (_inside(norm, ALLOWED_UNDER_DENIED) and _inside(real, ALLOWED_UNDER_DENIED)):
+        tree = _denied_by_identity(norm)
+        if tree is not None:
+            problems.error(
+                f"{full}: {_q(value)} is inside {tree} under a second name "
+                "(another mount of the same folder), a system location"
+            )
+            return False
     if len([part for part in norm.split("/") if part]) < 2:
         problems.error(f"{full}: {_q(value)} is too close to the root; use a folder like /mnt/models")
         return False
