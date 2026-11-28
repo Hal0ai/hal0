@@ -1,6 +1,6 @@
 .PHONY: help install dev test test-unit release-test release-test-report \
         harness harness-report harness-clean harness-install \
-        lint fmt typecheck ui-install ui-dev ui-build deploy clean \
+        lint lint-shell fmt typecheck ui-install ui-dev ui-build deploy clean \
         proto-ttft proto-ttft-live
 
 # ── hal0-test LXC connection knobs (release-gate) ───────────────────────────
@@ -25,6 +25,7 @@ help:
 	@echo "    make dev                  Run hal0-api with --reload"
 	@echo "    make test                 Run unit tests (tier α, in parallel, every commit)"
 	@echo "    make lint                 Ruff check"
+	@echo "    make lint-shell           shellcheck the installer scripts against a baseline that can only fall"
 	@echo "    make fmt                  Ruff format"
 	@echo "    make typecheck            Mypy"
 	@echo "    make ui-install           Install UI deps"
@@ -101,6 +102,9 @@ release-test-report:
 
 lint:
 	ruff check src tests
+
+lint-shell:  ## shellcheck ratchet over installer scripts (scripts/shellcheck-baseline.txt)
+	bash scripts/lint-shell.sh
 
 fmt:
 	ruff format src tests

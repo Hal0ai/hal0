@@ -1,0 +1,1026 @@
+#!/usr/bin/env bash
+# Run one install-matrix shape end to end: create a throwaway container on the
+# Proxmox host, install hal0 into it the way a newcomer would, measure the
+# result, write result.json, destroy the container.
+#
+#   run-shape.sh <shape-id> [--source stable|preview|nightly|tree:<dir>]
+#                [--vmid N] [--keep] [--uninstall] [--out DIR]
+#                [--timeout SECONDS] [--dry-run]
+#
+# Exit 0: the install exited 0 and the chat probe answered. 1: anything else
+# after the run began. 2: usage error, a shape that is not runnable here, or a
+# refused precondition (host memory, VMID, template, devices). stdout carries
+# the path of result.json and nothing else; progress goes to stderr.
+#
+# --dry-run is decided once, below. It defines an `ssh` shell function that
+# shadows the real binary, so no call made through lib/pve.sh can leave the
+# machine; the terminal driver is printed, never started. The function prints
+# each command it would have sent and answers the read-only questions from
+# canned text. Nothing is created on the host or in the output directory.
+#
+# Operating note: the guest takes a DHCP address on the host's bridge
+# (HAL0_MATRIX_BRIDGE), and the product the install starts listens on all of its
+# interfaces, so for the duration of the run the guest's services are reachable
+# from the whole network that bridge is on. Run it on a network where that is
+# acceptable; the container is destroyed at the end of the run.
+#
+# Settings (environment): HAL0_PVE, HAL0_MATRIX_VMID_MIN, HAL0_MATRIX_VMID_MAX,
+# HAL0_MATRIX_BRIDGE, HAL0_MATRIX_STORAGE (see lib/pve.sh), and the optional
+# HAL0_MATRIX_NAMESERVER: one to three IPv4 or IPv6 addresses separated by
+# spaces, passed to `pct create` as --nameserver. Set it when a new container on
+# your host inherits resolver settings that do not answer from the guest; unset,
+# nothing is passed.
+#
+# What the network wait tests (ct_wait_network, before anything is installed):
+# that the guest has a global address on its interface (else the state is
+# no_address: look at the bridge and DHCP on the host) and that it resolves
+# hal0.dev (else no_resolver: set HAL0_MATRIX_NAMESERVER). It does NOT test that
+# the release site answers over HTTPS or that a route to it works. On a failed
+# wait the guest's addresses and /etc/resolv.conf are saved to network.txt in the
+# run folder.
+# shellcheck disable=SC2329  # trap handlers, background jobs and the dry-run ssh shadow
+set -euo pipefail
+umask 077
+# The run's own stdout and stderr, saved now. A trap (the watchdog's abort, a
+# signal, the EXIT cleanup) can fire while a call has redirected fd 1 or 2 for
+# itself (collect.err, /dev/null, post.txt); it restores these first, so that what
+# cleanup says, LEFT BEHIND above all, always reaches the person running this.
+exec 6>&1 7>&2
+
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO="$(cd "${HERE}/../.." && pwd)"
+# shellcheck source-path=SCRIPTDIR source=lib/pve.sh
+source "${HERE}/lib/pve.sh"
+
+# Deadlines (seconds) for guest commands longer than ct_exec's default 120.
+T_SLOW=300      # package install, unpacking a tree, downloading install.sh
+T_PROBE="$(_pve_t PROBE 900)"  # collect.sh probe (a chat, a memory write, a Hermes reply); HAL0_MATRIX_TIMEOUT_PROBE
+T_UNINSTALL=600
+
+INSTALL_URL="https://hal0.dev/install.sh"
+SUMMARY_PATH="/root/hal0-summary.json"
+
+# A message that cannot be written (the terminal or the pipe it goes to is gone)
+# is lost and never an error: under set -e a failed write must not end a
+# handler or the cleanup before the work in it is done.
+log() { printf '[run-shape] %s\n' "$*" >&2 || true; }
+die2() {
+  log "$*"
+  exit 2
+}
+usage() { sed -n '2,12p' "${BASH_SOURCE[0]}" >&2; }
+
+# end_run <reason> <detail> <message>: the run ends before the install (a failed
+# create, start, network wait, precondition or push). The reason key and a
+# one-line detail go into run.txt FIRST, then the message to the terminal, then
+# the exit with status 1; cleanup writes them into result.json (aborted,
+# abort_detail), saves what it can and destroys the container. A line that
+# cannot be written (a full disk, a gone folder) is lost and never an error.
+end_run() {
+  END_REASON="$1"
+  [[ -z "${ART:-}" ]] || printf 'ended=%s\nended_detail=%s\n' "$1" "$2" >>"${ART}/run.txt" 2>/dev/null || true
+  log "$3"
+  exit 1
+}
+
+# ── arguments ────────────────────────────────────────────────────────────────
+SHAPE_ID="" SOURCE="stable" VMID="" KEEP=0 UNINSTALL=0 OUT="" TIMEOUT=5400 DRY_RUN=0
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --source | --vmid | --out | --timeout)
+      [[ $# -ge 2 ]] || die2 "$1 needs a value"
+      case "$1" in
+        --source) SOURCE="$2" ;;
+        --vmid) VMID="$2" ;;
+        --out) OUT="$2" ;;
+        --timeout) TIMEOUT="$2" ;;
+      esac
+      shift 2
+      ;;
+    --keep) KEEP=1; shift ;;
+    --uninstall) UNINSTALL=1; shift ;;
+    --dry-run) DRY_RUN=1; shift ;;
+    -h | --help) usage; exit 0 ;;
+    -*) usage; die2 "unknown option: $1" ;;
+    *)
+      [[ -z "$SHAPE_ID" ]] || die2 "more than one shape id given"
+      SHAPE_ID="$1"
+      shift
+      ;;
+  esac
+done
+[[ -n "$SHAPE_ID" ]] || { usage; die2 "no shape id given"; }
+[[ "$SHAPE_ID" =~ ^[A-Za-z0-9._-]+$ ]] || die2 "bad shape id: ${SHAPE_ID}"
+[[ "$TIMEOUT" =~ ^[1-9][0-9]{0,6}$ ]] || die2 "--timeout must be a number of seconds"
+[[ -z "$VMID" || "$VMID" =~ ^[1-9][0-9]{0,8}$ ]] || die2 "--vmid must be a number"
+
+CHANNEL="" TREE_DIR=""
+case "$SOURCE" in
+  stable) ;;
+  preview | nightly) CHANNEL="$SOURCE" ;;
+  tree:*)
+    TREE_DIR="${SOURCE#tree:}"
+    [[ -n "$TREE_DIR" && -d "$TREE_DIR" ]] || die2 "--source tree: not a directory: ${TREE_DIR}"
+    [[ "$(git -C "$TREE_DIR" rev-parse --is-inside-work-tree 2>/dev/null)" == "true" ]] \
+      || die2 "--source tree: not a git work tree: ${TREE_DIR}"
+    ;;
+  *) die2 "--source must be stable, preview, nightly or tree:<dir> (got ${SOURCE})" ;;
+esac
+
+PVE_ALIAS="${HAL0_PVE:-pve}"
+if [[ "$PVE_ALIAS" == -* || ! "$PVE_ALIAS" =~ ^[^[:space:]]+$ ]]; then
+  die2 "bad HAL0_PVE alias: ${PVE_ALIAS}"
+fi
+
+# ── the shape ────────────────────────────────────────────────────────────────
+SHAPE_ROW="" SHAPE_TEMPLATE="" SHAPE_UNPRIVILEGED="" SHAPE_HARDWARE="" SHAPE_ENTRY=""
+SHAPE_CORES="" SHAPE_MEMORY_MB="" SHAPE_DISK_GB="" SHAPE_RUNNABLE="" SHAPE_ANSWERS=""
+shape_text="$(python3 -I "${HERE}/shape.py" get "$SHAPE_ID")" || die2 "unknown or invalid shape: ${SHAPE_ID}"
+while IFS='=' read -r key value; do
+  case "$key" in
+    SHAPE_ROW) SHAPE_ROW="$value" ;;
+    SHAPE_TEMPLATE) SHAPE_TEMPLATE="$value" ;;
+    SHAPE_UNPRIVILEGED) SHAPE_UNPRIVILEGED="$value" ;;
+    SHAPE_HARDWARE) SHAPE_HARDWARE="$value" ;;
+    SHAPE_ENTRY) SHAPE_ENTRY="$value" ;;
+    SHAPE_CORES) SHAPE_CORES="$value" ;;
+    SHAPE_MEMORY_MB) SHAPE_MEMORY_MB="$value" ;;
+    SHAPE_DISK_GB) SHAPE_DISK_GB="$value" ;;
+    SHAPE_RUNNABLE) SHAPE_RUNNABLE="$value" ;;
+    SHAPE_ANSWERS) SHAPE_ANSWERS="$value" ;;
+    *) ;;
+  esac
+done <<<"$shape_text"
+[[ "$SHAPE_RUNNABLE" == "yes" ]] || die2 "shape ${SHAPE_ID} is not runnable here (${SHAPE_RUNNABLE})"
+case "$SHAPE_ENTRY" in
+  oneliner | oneliner-unattended | terminal | box) ;;
+  *) die2 "shape ${SHAPE_ID}: unsupported entry type ${SHAPE_ENTRY}" ;;
+esac
+[[ -z "$TREE_DIR" || "$SHAPE_ENTRY" != "box" ]] || die2 "--source tree: cannot be combined with the box entry"
+# A privileged, unconfined guest (the GPU shape) is as strong as root on the
+# host: refuse it, before any call to the host, unless the operator says so.
+# A dry run only warns, so the plan can still be read.
+if [[ "$SHAPE_UNPRIVILEGED" == "0" && "${HAL0_MATRIX_ALLOW_PRIVILEGED:-}" != "1" ]]; then
+  privileged_msg="shape ${SHAPE_ID} runs a privileged, unconfined guest: its root is equal to root on the host. It belongs on a host with no production guests. Set HAL0_MATRIX_ALLOW_PRIVILEGED=1 to run it there."
+  if [[ "$DRY_RUN" == "1" ]]; then
+    log "warning: ${privileged_msg}"
+  else
+    die2 "refusing: ${privileged_msg}"
+  fi
+fi
+ANSWERS_FILE="/dev/null"
+if [[ -n "$SHAPE_ANSWERS" ]]; then
+  [[ "$SHAPE_ANSWERS" =~ ^[A-Za-z0-9._-]+\.tsv$ && -f "${HERE}/answers/${SHAPE_ANSWERS}" ]] \
+    || die2 "shape ${SHAPE_ID}: no such answers file: ${SHAPE_ANSWERS}"
+  ANSWERS_FILE="${HERE}/answers/${SHAPE_ANSWERS}"
+fi
+
+# This run's nonce: 16 hex characters from the kernel, written into the
+# guest's description so cleanup destroys only the guest this run created.
+NONCE="$(head -c 8 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+[[ "$NONCE" =~ ^[0-9a-f]{16}$ ]] || die2 "could not generate a run nonce"
+CT_NONCE="$NONCE"
+
+pve_check_range || die2 "refusing: the VMID range is not usable (see above)"
+# The optional nameserver for the guest, checked before any call to the host.
+NAMESERVER="$(pve_nameserver)" || die2 "refusing: HAL0_MATRIX_NAMESERVER is not usable (see above)"
+
+# One run at a time: a local lock for the whole run, taken before any call to
+# the host. A dry run touches no host and creates no files, so it takes none.
+REPORT_ROOT="${HAL0_MATRIX_REPORT_ROOT:-${REPO}/tests/harness/reports/install-matrix}"
+if [[ "$DRY_RUN" != "1" ]]; then
+  mkdir -p "$REPORT_ROOT" || die2 "cannot create ${REPORT_ROOT}"
+  exec 8>"${REPORT_ROOT}/.lock" || die2 "cannot open the lock file in ${REPORT_ROOT}"
+  flock -n 8 || die2 "another install matrix run holds ${REPORT_ROOT}/.lock; only one harness container may exist at a time"
+fi
+
+# The watchdog's two settings, read now so a bad value stops the run before any
+# host call: how often to read the host's memory, and the floor below which the
+# install is stopped (the same variable the start guard uses).
+WATCH_EVERY="${HAL0_MATRIX_WATCH_SECONDS:-30}"
+WATCH_FLOOR="${HAL0_MATRIX_MIN_AVAILABLE_GB:-12}"
+[[ "$WATCH_EVERY" =~ ^[1-9][0-9]{0,5}$ ]] || die2 "HAL0_MATRIX_WATCH_SECONDS must be a whole number of seconds"
+[[ "$WATCH_FLOOR" =~ ^[0-9]{1,9}$ ]] || die2 "HAL0_MATRIX_MIN_AVAILABLE_GB must be a whole number"
+
+# ── dry run: decided once, here ──────────────────────────────────────────────
+if [[ "$DRY_RUN" == "1" ]]; then
+  exec 9>&1
+  ssh() {
+    local cmd="${*: -1}" a feed=1 vm=""
+    for a in "$@"; do
+      [[ "$a" == "--" ]] && break
+      [[ "$a" == "-n" ]] && feed=0
+    done
+    [[ "$feed" == "0" ]] || cat >/dev/null
+    printf '[dry-run] ssh %s\n' "$cmd" >&9
+    case "$cmd" in
+      "free -g"*) printf 'Mem: 125 20 60 1 45 100\n' ;;
+      "pveam list local") printf 'Volume Size\nlocal:vztmpl/%s_amd64.tar.zst 1\n' "$SHAPE_TEMPLATE" ;;
+      "pvesm status"*) printf 'Name Type Status Total Used Available %%\nlocal dir active 1000000000 1 500000000 1.0%%\n' ;;
+      "pvesh get"*) printf '[]\n' ;;
+      "if test -e"*) printf 'absent\n' ;;
+      "bash -s -- gpu"*) printf 'dev /dev/dri/renderD128\nmajor 226\n' ;;
+      *'ip\ -o\ -4\ addr\ show'*) printf '2: eth0    inet 192.0.2.10/24 brd 192.0.2.255 scope global eth0\n' ;;
+      "pct config "*)
+        vm="${cmd#pct config }"
+        printf 'hostname: hal0-mx-%s\ntags: hal0-matrix\ndescription: hal0-matrix run %s%%0A\n' "${vm%% *}" "$NONCE"
+        ;;
+      *) ;;
+    esac
+    return 0
+  }
+fi
+plan() { [[ "$DRY_RUN" != "1" ]] || printf '[dry-run] %s\n' "$*" >&9; }
+
+# ── state the cleanup trap reads ─────────────────────────────────────────────
+ART=""             # artifact directory (the real --out, or scratch on a dry run)
+SCRATCH=""         # dry-run artifact directory, removed on exit
+TREE_TAR=""        # packed local tree, removed on exit
+CT_MAYBE=0         # set once ct_create got as far as running pct create
+CT_CREATED=0       # ct_create returned 0: this run certainly made the guest
+GUEST_UP=0         # ct_start succeeded
+WATCH_PID=""       # the memory watchdog, while a container exists
+WATCH_START=""     # its start time (field 19 of /proc/<pid>/stat), so a reused pid is never signalled
+SENT_PID=""        # the sentinel that watches the watchdog (and the watchdog it)
+SENT_START=""
+WATCH_FILE=""      # where the watchdog leaves its verdict
+ABORT_REASON=""    # host_memory_low, host_unreachable, watchdog_died or sentinel_died, once the watch fired
+ABORT_DETAIL=""
+END_REASON=""      # why the run ended before the install (see end_run), once it did
+INSTALL_RC=""      # the install's exit status, once known
+INTERRUPTED=0      # signal number that stopped the run
+PREREQS=""         # packages the harness installed before the installer ran
+STARTED="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+POST_DONE=0 PULL_DONE=0 RESULT_WRITTEN=0
+CHILD_PID="" CHILD_TREE=0
+CUT_ON_VERDICT=0   # cleanup only: a verdict from the memory watch ends the collection
+CLEANED=0
+declare -a DEVS=() MAJORS=()
+
+# The exact command that destroys this run's container by hand.
+GUEST_LOCKED=0     # the guest's config shows a lock: line
+destroy_hint() {
+  if [[ "$GUEST_LOCKED" == "1" ]]; then
+    printf "ssh %s 'pct unlock %s && pct destroy %s --force --purge'" "$PVE_ALIAS" "$VMID" "$VMID"
+  else
+    printf 'ssh %s pct destroy %s --force --purge' "$PVE_ALIAS" "$VMID"
+  fi
+}
+announce_container() {
+  log "container ${VMID} exists; if this run dies, destroy it with: $(destroy_hint)"
+}
+
+kv_get() { sed -n "s/^${2}=//p" "$1" 2>/dev/null | head -n 1; }
+
+# Single-quote a value for the Proxmox host's shell.
+sq() {
+  local s="$1"
+  s=${s//\'/\'\\\'\'}
+  printf "'%s'" "$s"
+}
+
+kill_tree() {
+  local c
+  for c in $(pgrep -P "$1" 2>/dev/null || true); do kill_tree "$c"; done
+  # KILL, not TERM: cleanup runs with INT/TERM/HUP ignored, and children
+  # started from there inherit that.
+  kill -KILL "$1" 2>/dev/null || true
+}
+
+# Stop the background job (if any) the way its kind needs: the terminal driver
+# gets TERM alone, so it can record the interruption; a function subshell is
+# killed together with the ssh below it.
+stop_child() {
+  local n=0
+  [[ -n "$CHILD_PID" ]] || return 0
+  if kill -0 "$CHILD_PID" 2>/dev/null; then
+    if [[ "$CHILD_TREE" == "1" ]]; then
+      kill_tree "$CHILD_PID"
+    else
+      kill -TERM "$CHILD_PID" 2>/dev/null || true
+      while kill -0 "$CHILD_PID" 2>/dev/null && ((n < 100)); do
+        sleep 0.1
+        n=$((n + 1))
+      done
+      kill_tree "$CHILD_PID"
+    fi
+  fi
+  wait "$CHILD_PID" 2>/dev/null || true
+  CHILD_PID=""
+}
+
+# run_driver <argv...>: a direct child that handles its own timeouts.
+run_driver() {
+  local rc=0
+  "$@" &
+  CHILD_PID=$!
+  CHILD_TREE=0
+  wait "$CHILD_PID" || rc=$?
+  CHILD_PID=""
+  return "$rc"
+}
+
+# run_bounded <seconds> <argv...>: a background job with a deadline; 124 when
+# it ran out. Waiting on a short `sleep` keeps a signal handled promptly.
+run_bounded() {
+  local limit="$1" rc=0 deadline
+  shift
+  "$@" &
+  CHILD_PID=$!
+  CHILD_TREE=1
+  deadline=$((SECONDS + limit))
+  while kill -0 "$CHILD_PID" 2>/dev/null; do
+    if [[ "$CUT_ON_VERDICT" == "1" && -n "$WATCH_FILE" && -s "$WATCH_FILE" ]]; then
+      kill_tree "$CHILD_PID"
+      wait "$CHILD_PID" 2>/dev/null || true
+      CHILD_PID=""
+      return 125
+    fi
+    if ((SECONDS >= deadline)); then
+      kill_tree "$CHILD_PID"
+      wait "$CHILD_PID" 2>/dev/null || true
+      CHILD_PID=""
+      return 124
+    fi
+    sleep 0.2 &
+    wait $! 2>/dev/null || true
+  done
+  wait "$CHILD_PID" 2>/dev/null || rc=$?
+  CHILD_PID=""
+  return "$rc"
+}
+
+# ── result pipeline (idempotent; also run from the cleanup trap) ─────────────
+synth_driver() { # <exit code> <timed_out true|false>
+  printf '{"exit_code": %s, "questions_answered": 0, "timed_out": %s, "idle_timed_out": false, "unanswered_tail": ""}\n' \
+    "$1" "$2" >"${ART}/driver.json"
+}
+
+# record_version: the hal0 version the install really put in the guest, so a
+# result says which version it measured (the stable source installs whatever
+# the release site serves at run time). The fixed command prints one line;
+# what comes back is untrusted: one line of at most 100 characters that looks
+# like `hal0 <version>`, else nothing is recorded.
+record_version() {
+  local out line
+  out="$(_PVE_STREAM=version ct_exec "$VMID" 'hal0 --version 2>/dev/null | head -n 1' 2>/dev/null)" || return 0
+  IFS= read -r line <<<"$out" || true
+  [[ ${#line} -le 100 ]] || return 0
+  if [[ "$line" =~ ^hal0\ ([0-9][0-9A-Za-z.+~_-]{0,63}(\ \(release\ [0-9A-Za-z.+~_-]{1,64}\))?)$ ]]; then
+    printf 'installed_version=%s\n' "${BASH_REMATCH[1]}" >>"${ART}/run.txt"
+  fi
+}
+
+# The collector is copied into the guest only at step 7. A run that ended before
+# that has nothing to run there and nothing to pull: cleanup says so in one line
+# and moves on, and does not count it as a failed collection.
+COLLECTOR_PUSHED=0
+collection_skipped() {
+  [[ "$COLLECTOR_PUSHED" == "0" ]] || return 1
+  POST_DONE=1
+  PULL_DONE=1
+  log "collection skipped: collect.sh was never copied into the guest"
+}
+
+collect_post() {
+  collection_skipped && return 0
+  POST_DONE=1
+  _PVE_STREAM=post ct_exec "$VMID" "bash /root/collect.sh post" >"${ART}/post.txt" 2>>"${ART}/collect.err" \
+    || log "collect post failed"
+  record_version
+}
+
+pull_artifacts() {
+  local path
+  [[ "$COLLECTOR_PUSHED" == "1" ]] || { PULL_DONE=1; return 0; }
+  PULL_DONE=1
+  ct_pull "$VMID" "$SUMMARY_PATH" "${ART}/summary.json" 2>/dev/null || true
+  path="$(kv_get "${ART}/post.txt" install_log)"
+  if [[ "$path" =~ ^/[A-Za-z0-9._/-]+$ ]]; then
+    ct_pull "$VMID" "$path" "${ART}/install.log" 2>/dev/null || log "could not copy the install log"
+  fi
+  path="$(kv_get "${ART}/post.txt" failure_report)"
+  if [[ "$path" =~ ^/[A-Za-z0-9._/-]+$ ]]; then
+    ct_pull "$VMID" "$path" "${ART}/failure-report.txt" 2>/dev/null || log "could not copy the failure report"
+  fi
+}
+
+write_result() {
+  RESULT_WRITTEN=1
+  if [[ -n "$INSTALL_RC" && ! -s "${ART}/driver.json" ]]; then
+    synth_driver "$INSTALL_RC" false
+  fi
+  python3 -I "${HERE}/result.py" assemble \
+    --shape "$SHAPE_ID" --source "$SOURCE" --vmid "$VMID" \
+    --pre "${ART}/pre.txt" --post "${ART}/post.txt" --probe "${ART}/probe.txt" \
+    --driver "${ART}/driver.json" --summary "${ART}/summary.json" --run "${ART}/run.txt" \
+    --prereqs "$PREREQS" --started "$STARTED" --out "${ART}/result.json" \
+    || log "could not write result.json"
+}
+
+finish_result() {
+  [[ "$RESULT_WRITTEN" == "0" ]] || return 0
+  if [[ "$GUEST_UP" == "1" ]]; then
+    [[ "$POST_DONE" == "1" ]] || collect_post
+    [[ "$PULL_DONE" == "1" ]] || pull_artifacts
+  fi
+  write_result
+}
+
+# ── watchdog: while a container exists, keep reading the host's memory ───────
+# A background job reads the available memory every WATCH_EVERY seconds with
+# the one fixed `free -g` call. Below WATCH_FLOOR it records why and sends the
+# main shell USR1, which stops the run through the normal cleanup. A reading
+# that cannot be made is not a reason to stop; three in a row are.
+#
+# Bash runs a trap only after the foreground command returns, so the watchdog
+# also ends whatever the main shell is waiting on (a probe, a pull, a push):
+# it sends USR1 first (the trap is then pending), then kills every process
+# below the main shell except itself. Cleanup runs its own ownership-checked
+# destroy afterwards, and reports LEFT BEHIND if that fails.
+#
+# A second, tiny process (the sentinel) watches the watchdog: the main shell is
+# blocked in a foreground call for most of a run and cannot notice a dead
+# watchdog itself. Every second the sentinel checks that the watchdog is still
+# running; if it is not, and cleanup did not stop it, the run aborts with the
+# reason watchdog_died through the same path (USR1, normal cleanup). The
+# watchdog's own verdict, when it already spoke, stands. The watchdog in turn
+# checks the sentinel every second (its pid and start time are in
+# ${WATCH_FILE}.sent) and aborts with sentinel_died when it is gone.
+#
+# Neither blames the other at a normal shutdown: stop_watchdog first creates
+# ${WATCH_FILE}.stop, and both check it (and the verdict file) before they
+# blame, and again before they signal; only then does it end them, so the first
+# to see the other gone finds the stop marker. A blame writes the verdict file
+# and ends the blamer, so the other one, if still alive, finds a verdict and
+# leaves. Both are started with SIGPIPE ignored: a closed terminal can never
+# end them, and the one line the watchdog prints when its run is gone is
+# allowed to fail.
+#
+# Both stay in force until cleanup has destroyed the container or reported it
+# left behind (stop_watchdog is the last step before the result is written).
+# During cleanup (the marker file ${WATCH_FILE}.cleanup) they only record a
+# verdict: they send no signal and kill nothing, so a destroy in progress is
+# never cut; the collection loop in cleanup reads the verdict itself and ends
+# the collection.
+#
+# The watchdog also ends by itself when the run that started it is gone (kill -9, the
+# kernel's OOM killer): every second it checks that its parent is still that
+# process, and when it is not it ends what the run had started (found by
+# pid and start time, so a reused pid is left alone), says so, and exits. It
+# holds neither the run lock nor the run's stdout.
+
+# stat_field <pid> <n>: field n (0 = state, 1 = ppid, 19 = start time) of /proc/<pid>/stat.
+stat_field() {
+  local s f
+  { read -r s <"/proc/$1/stat"; } 2>/dev/null || return 1
+  s="${s##*) }"
+  read -ra f <<<"$s"
+  [[ -n "${f[$2]:-}" ]] || return 1
+  printf '%s' "${f[$2]}"
+}
+
+# snap_tree <pid> <skip>: pid:starttime of everything below pid except <skip>.
+snap_tree() {
+  local c st
+  for c in $(pgrep -P "$1" 2>/dev/null || true); do
+    [[ "$c" != "$2" ]] || continue
+    st="$(stat_field "$c" 19)" || continue
+    printf '%s:%s\n' "$c" "$st"
+    snap_tree "$c" "$2"
+  done
+}
+
+watchdog() {
+  local parent="$1" me="$BASHPID" n bad=0 reason="" detail="" c i e sp ss
+  local -a seen=()
+  trap '' PIPE
+  exec 6>&- 8>&- >/dev/null
+  while :; do
+    for ((i = 0; i < WATCH_EVERY; i++)); do
+      sleep 1
+      if [[ "$(stat_field "$me" 1)" != "$parent" ]]; then
+        for e in ${seen[@]+"${seen[@]}"}; do
+          [[ "$(stat_field "${e%%:*}" 19)" != "${e#*:}" ]] || kill_tree "${e%%:*}"
+        done
+        log "the run that started this watchdog is gone; container ${VMID} may still exist: $(destroy_hint)" 2>&7
+        exit 0
+      fi
+      mapfile -t seen < <(snap_tree "$parent" "$me")
+      # The sentinel's identity is in a file the run writes right after it starts it.
+      if [[ -s "${WATCH_FILE}.sent" ]] && read -r sp ss <"${WATCH_FILE}.sent" \
+        && [[ "$sp" =~ ^[0-9]{1,9}$ && "$ss" =~ ^[0-9]{1,20}$ ]] \
+        && ! proc_running "$sp" "$ss"; then
+        [[ ! -e "${WATCH_FILE}.stop" && ! -s "$WATCH_FILE" ]] || exit 0
+        reason="sentinel_died"
+        detail="the sentinel that watches the memory watchdog ended while the run was in progress"
+        break 2
+      fi
+    done
+    if n="$(pve_mem_available_gb 2>/dev/null)" && [[ "$n" =~ ^[0-9]{1,9}$ ]]; then
+      bad=0
+      if ((10#$n < 10#$WATCH_FLOOR)); then
+        reason="host_memory_low"
+        detail="host memory fell below ${WATCH_FLOOR} GB (${n} GB available)"
+        break
+      fi
+    else
+      bad=$((bad + 1))
+      if ((bad >= 3)); then
+        reason="host_unreachable"
+        detail="the host's memory could not be read 3 times in a row"
+        break
+      fi
+    fi
+  done
+  printf 'reason=%s\ndetail=%s\n' "$reason" "$detail" >"$WATCH_FILE"
+  [[ "$(stat_field "$me" 1)" == "$parent" ]] || exit 0
+  [[ ! -e "${WATCH_FILE}.cleanup" ]] || exit 0
+  kill -USR1 "$parent" 2>/dev/null || true
+  for c in $(pgrep -P "$parent" 2>/dev/null || true); do
+    [[ ! -e "${WATCH_FILE}.cleanup" ]] || exit 0
+    [[ "$c" == "$me" ]] || kill_tree "$c"
+  done
+}
+
+# proc_running <pid> <start time>: the process is alive, not a zombie, and is
+# the one started at that time (a reused pid does not count).
+proc_running() {
+  local st
+  st="$(stat_field "$1" 0)" || return 1
+  [[ "$st" != "Z" && "$st" != "X" ]] || return 1
+  [[ "$(stat_field "$1" 19)" == "$2" ]]
+}
+
+sentinel() {
+  local parent="$1" wd="$2" wd_start="$3" me="$BASHPID" c
+  trap '' PIPE
+  exec 6>&- 8>&- >/dev/null
+  while :; do
+    sleep 1
+    [[ "$(stat_field "$me" 1)" == "$parent" ]] || exit 0
+    [[ ! -e "${WATCH_FILE}.stop" && ! -s "$WATCH_FILE" ]] || exit 0
+    if ! proc_running "$wd" "$wd_start"; then
+      [[ ! -e "${WATCH_FILE}.stop" && ! -s "$WATCH_FILE" ]] || exit 0
+      printf 'reason=watchdog_died\ndetail=the memory watchdog ended while the run was in progress\n' >"$WATCH_FILE"
+      [[ ! -e "${WATCH_FILE}.cleanup" ]] || exit 0
+      kill -USR1 "$parent" 2>/dev/null || true
+      for c in $(pgrep -P "$parent" 2>/dev/null || true); do
+        [[ ! -e "${WATCH_FILE}.cleanup" ]] || exit 0
+        [[ "$c" == "$me" ]] || kill_tree "$c"
+      done
+      exit 0
+    fi
+  done
+}
+
+start_watchdog() {
+  local wd_start
+  WATCH_FILE="$(mktemp "${ART}/watch.XXXXXX")"
+  watchdog "$$" &
+  WATCH_PID=$!
+  wd_start="$(stat_field "$WATCH_PID" 19)" || wd_start=""
+  printf '%s\n' "$WATCH_PID" >"${ART}/watchdog.pid"
+  WATCH_START="$wd_start"
+  sentinel "$$" "$WATCH_PID" "$wd_start" &
+  SENT_PID=$!
+  SENT_START="$(stat_field "$SENT_PID" 19)" || SENT_START=""
+  # The watchdog finds the sentinel through this file (pid and start time).
+  if [[ -n "$SENT_START" ]]; then
+    printf '%s %s\n' "$SENT_PID" "$SENT_START" >"${WATCH_FILE}.sent"
+    printf '%s\n' "$SENT_PID" >"${ART}/sentinel.pid"
+  fi
+}
+
+# end_watch_proc <pid> <start time>: end that process and what it started, but
+# only while it is still the process this run started. A pid that ended long
+# ago and was reused (start time differs, or the process is gone) is left alone.
+end_watch_proc() {
+  [[ -n "$1" ]] || return 0
+  if proc_running "$1" "$2"; then
+    kill_tree "$1"
+    wait "$1" 2>/dev/null || true
+  fi
+}
+
+# stop_watchdog: the end of the memory watch. Called once, by cleanup, after
+# the container is destroyed or reported left behind (or when there was none).
+stop_watchdog() {
+  [[ -z "$WATCH_FILE" ]] || : >"${WATCH_FILE}.stop"
+  end_watch_proc "$SENT_PID" "$SENT_START"
+  SENT_PID="" SENT_START=""
+  end_watch_proc "$WATCH_PID" "$WATCH_START"
+  WATCH_PID="" WATCH_START=""
+}
+
+# load_verdict: take the watchdog's verdict from its file. The file is local,
+# but its text is still checked before it is kept.
+load_verdict() {
+  local reason detail
+  [[ -n "$WATCH_FILE" && -s "$WATCH_FILE" ]] || return 1
+  reason="$(kv_get "$WATCH_FILE" reason)"
+  detail="$(kv_get "$WATCH_FILE" detail)"
+  case "$reason" in host_memory_low | host_unreachable | watchdog_died | sentinel_died) ;; *) return 1 ;; esac
+  [[ "$detail" =~ ^[A-Za-z0-9\ ().,_-]+$ ]] || detail="the host check failed"
+  ABORT_REASON="$reason"
+  ABORT_DETAIL="$detail"
+}
+
+on_watchdog() {
+  trap '' PIPE USR1
+  exec 1>&6 2>&7
+  load_verdict || { ABORT_REASON="host_memory_low"; ABORT_DETAIL="the host check failed"; }
+  log "aborting: ${ABORT_DETAIL}"
+  exit 1
+}
+
+# note_abort: once, record an abort the memory watch decided on.
+ABORT_NOTED=0
+note_abort() {
+  [[ -n "$ABORT_REASON" && "$ABORT_NOTED" == "0" ]] || return 0
+  ABORT_NOTED=1
+  [[ -n "$INSTALL_RC" ]] || INSTALL_RC=143
+  [[ -z "$ART" ]] || printf 'aborted=%s\nabort_detail=%s\n' "$ABORT_REASON" "$ABORT_DETAIL" >>"${ART}/run.txt"
+}
+
+# ── cleanup: runs once, on EXIT and (via on_signal) on INT, TERM and HUP ─────
+cleanup() {
+  local rc=$? state="absent" foreign=0 unsure=0
+  # First of all, before anything else can run: no further signal and no broken
+  # pipe may end this function. A write to a closed terminal then fails with an
+  # error status (and set +e below makes that harmless) instead of killing the
+  # shell, and the record in run.txt always comes before the message that tells
+  # the terminal.
+  trap '' PIPE INT TERM HUP USR1
+  exec 1>&6 2>&7
+  trap - EXIT
+  set +e +u
+  [[ "$CLEANED" == "0" ]] || exit "$rc"
+  CLEANED=1
+  # From here the memory watch only records: it signals and kills nothing.
+  [[ -z "$WATCH_FILE" ]] || : >"${WATCH_FILE}.cleanup"
+  [[ "$CT_CREATED" != "1" ]] || announce_container
+  # The watchdog may have ended the call in progress before its USR1 was acted on.
+  [[ -n "$ABORT_REASON" ]] || load_verdict || true
+  stop_child
+  note_abort
+  if [[ "$INTERRUPTED" != "0" && -z "$INSTALL_RC" ]]; then
+    INSTALL_RC=$((128 + INTERRUPTED))
+  fi
+  if [[ -n "$VMID" && "$CT_MAYBE" == "1" ]]; then
+    if [[ "$DRY_RUN" == "1" ]]; then
+      state="present"
+    else
+      # An interrupted create may still be running on the host: let it finish
+      # (bounded) before looking, and note a lock it left behind.
+      ct_wait_create_done "$VMID" || log "a pct create for ${VMID} may still be running; checking anyway"
+      state="$(_ct_presence "$VMID")"
+      # This run's create did not return 0, yet a guest may exist. Ownership is
+      # decided only by its description: this run's nonce (proven: the usual
+      # destroy and LEFT BEHIND apply), another run's nonce (foreign: not
+      # named, no destroy command), anything else (unsure: the run started a
+      # create for this VMID, so the guest may be its own, but it cannot be
+      # proven; the person is told to look, with no destroy command).
+      if [[ "$state" != "absent" && "$CT_CREATED" != "1" ]]; then
+        case "$(ct_mark_state "$VMID" "$NONCE")" in
+          mine) ;;
+          other) foreign=1 ;;
+          *) unsure=1 ;;
+        esac
+      fi
+      if [[ "$foreign" != "1" && "$unsure" != "1" ]] && ct_lock_held "$VMID"; then
+        GUEST_LOCKED=1
+        announce_container
+      fi
+    fi
+    if [[ "$state" == "absent" ]]; then
+      log "no container ${VMID} exists; nothing to clean up"
+    elif [[ "$unsure" == "1" ]]; then
+      [[ -z "$ART" ]] || printf 'unsure=%s\n' "$VMID" >>"${ART}/run.txt"
+      printf "UNSURE: guest %s exists and this run started a create for it; it may be this run's. Check it by hand: pct config %s\n" "$VMID" "$VMID" >&2
+      [[ "$rc" -ne 0 ]] || rc=1
+    elif [[ "$foreign" == "1" ]]; then
+      [[ -z "$ART" ]] || printf 'created_nothing=1\n' >>"${ART}/run.txt"
+      log "this run created no container: what exists at the VMID it tried was made by someone else and was left alone"
+    else
+      if [[ -n "$ABORT_REASON" ]]; then
+        # The host is short of memory or gone: the container goes first and
+        # nothing is collected from the guest. The result is written below,
+        # from what is already on this side.
+        POST_DONE=1
+        PULL_DONE=1
+      elif [[ "$DRY_RUN" != "1" && "$RESULT_WRITTEN" == "0" ]]; then
+        log "saving what the run measured before the container goes"
+        # The memory watch is still running: a verdict from it ends the collection.
+        CUT_ON_VERDICT=1
+        run_bounded 240 finish_result
+        CUT_ON_VERDICT=0
+        if [[ -z "$ABORT_REASON" ]] && load_verdict; then
+          log "aborting: ${ABORT_DETAIL}; the collection was cut short"
+          POST_DONE=1
+          PULL_DONE=1
+          note_abort
+        fi
+      fi
+      if [[ "$KEEP" == "1" ]]; then
+        log "--keep: container ${VMID} left in place; destroy it with: $(destroy_hint)"
+      elif ct_destroy "$VMID" "$NONCE"; then
+        [[ -z "$ART" ]] || printf 'destroyed=%s\n' "$VMID" >>"${ART}/run.txt"
+        log "destroyed container ${VMID}"
+      else
+        [[ -z "$ART" ]] || printf 'left_behind=%s\ndestroy_command=%s\n' "$VMID" "$(destroy_hint)" >>"${ART}/run.txt"
+        printf 'LEFT BEHIND: %s (destroy it with: %s)\n' "$VMID" "$(destroy_hint)" >&2
+        [[ "$rc" -ne 0 ]] || rc=1
+      fi
+    fi
+  fi
+  # The end of the memory watch: the container is gone or reported left behind.
+  stop_watchdog
+  # After an abort the result is written last, from local files only.
+  [[ ( -z "$ABORT_REASON" && -z "$END_REASON" ) || -z "$ART" || "$RESULT_WRITTEN" != "0" ]] || write_result
+  [[ -z "$TREE_TAR" ]] || rm -f -- "$TREE_TAR"
+  [[ -z "$WATCH_FILE" ]] || rm -f -- "$WATCH_FILE" "${WATCH_FILE}.cleanup" "${WATCH_FILE}.stop" "${WATCH_FILE}.sent"
+  [[ -z "$ART" ]] || rm -f -- "${ART}/watchdog.pid" "${ART}/sentinel.pid"
+  [[ -z "$SCRATCH" ]] || rm -rf -- "$SCRATCH"
+  exit "$rc"
+}
+
+on_signal() {
+  # A second signal must not cut the cleanup short, and a closed terminal must
+  # not either: ignore both from the first line.
+  trap '' PIPE INT TERM HUP USR1
+  exec 1>&6 2>&7
+  INTERRUPTED="$1"
+  log "interrupted (signal $1); cleaning up"
+  exit $((128 + $1))
+}
+
+# ── step 2: host headroom and the VMID ───────────────────────────────────────
+if [[ "$DRY_RUN" == "1" ]]; then
+  NEED_FIGURES="$(pve_headroom_need "$SHAPE_HARDWARE" "$SHAPE_MEMORY_MB")" || die2 "refusing: bad headroom figures"
+  read -r NEED_GB _ <<<"$NEED_FIGURES"
+  plan "host must show ${NEED_GB} GB available to start: the floor plus the container's ${SHAPE_MEMORY_MB} MB memory limit, rounded up to whole GB"
+  if [[ -n "$NAMESERVER" ]]; then
+    plan "nameserver for the guest: ${NAMESERVER} (HAL0_MATRIX_NAMESERVER), passed to pct create as --nameserver"
+  else
+    plan "nameserver for the guest: none set (HAL0_MATRIX_NAMESERVER); the host's resolver settings apply"
+  fi
+fi
+pve_require_headroom "$SHAPE_HARDWARE" "$SHAPE_MEMORY_MB" || die2 "refusing: the Proxmox host does not have enough free memory"
+picked="$(pve_pick_vmid)" || die2 "refusing: no usable VMID (see above)"
+if [[ -n "$VMID" ]]; then
+  _pve_in_range "$VMID" || die2 "refusing: VMID ${VMID} is outside the harness range"
+  [[ "$(_ct_presence "$VMID")" == "absent" ]] || die2 "refusing: guest ${VMID} exists or cannot be checked"
+else
+  VMID="$picked"
+fi
+pve_storage "$SHAPE_DISK_GB" >/dev/null || die2 "refusing: the storage cannot hold the container's disk (see above)"
+log "shape ${SHAPE_ID} (row ${SHAPE_ROW}), container ${VMID}, source ${SOURCE}"
+
+if [[ "$DRY_RUN" == "1" ]]; then
+  SCRATCH="$(mktemp -d)"
+  ART="$SCRATCH"
+  plan "would write artifacts to ${OUT:-tests/harness/reports/install-matrix/<UTC timestamp>-${SHAPE_ID}}"
+  plan "probe deadline: ${T_PROBE} s (HAL0_MATRIX_TIMEOUT_PROBE)"
+else
+  [[ -n "$OUT" ]] || OUT="${REPORT_ROOT}/$(date -u +%Y%m%dT%H%M%SZ)-${SHAPE_ID}"
+  mkdir -p "$OUT"
+  chmod 700 "$OUT"
+  ART="$OUT"
+fi
+# run.txt is the harness's own note (not part of result.json): the container id,
+# and below the uninstall verdict. fresh-test-ct.sh reads it.
+printf 'vmid=%s\n' "$VMID" >"${ART}/run.txt"
+PVE_NOTE_FILE="${ART}/run.txt"  # a cut stream is noted there as truncated=<name>
+CT_NET_REPORT_FILE="${ART}/network.txt"  # what a guest with no network reports (see ct_wait_network)
+
+# ── step 3: from here on every exit path goes through cleanup ────────────────
+trap cleanup EXIT
+trap 'on_signal 2' INT
+trap 'on_signal 15' TERM
+trap 'on_signal 1' HUP
+trap on_watchdog USR1
+
+# ── step 4: template, devices, packed tree ───────────────────────────────────
+VOLID="$(pve_template_volid "$SHAPE_TEMPLATE")" || die2 "refusing: template ${SHAPE_TEMPLATE} is not available on the host"
+if [[ "$SHAPE_HARDWARE" == "gpu" || "$SHAPE_HARDWARE" == "gpu+npu" ]]; then
+  dev_text="$(_pve_ssh 1 "bash -s -- ${SHAPE_HARDWARE}" <"${HERE}/lib/host-devices.sh")" \
+    || die2 "refusing: could not read the host's device nodes"
+  while read -r kind value; do
+    case "$kind" in
+      dev) DEVS+=("$value") ;;
+      major) MAJORS+=("$value") ;;
+      *) ;;
+    esac
+  done <<<"$dev_text"
+  [[ ${#DEVS[@]} -gt 0 ]] || die2 "refusing: the host shows no GPU device nodes for a ${SHAPE_HARDWARE} shape"
+fi
+if [[ -n "$TREE_DIR" ]]; then
+  # Under the run's own output folder, like the other temporary files: the
+  # default temporary directory can be RAM, and the tree can be large.
+  TREE_TAR="$(mktemp "${ART}/tree.XXXXXX")"
+  # Only what git lists (tracked files, plus untracked ones that .gitignore does
+  # not hide): .env files, local notes and earlier reports never go into the guest.
+  git -C "$TREE_DIR" ls-files -z --cached --others --exclude-standard \
+    | tar -C "$TREE_DIR" --exclude=tests/harness/reports \
+      --exclude=.git --exclude=.venv --exclude=node_modules --exclude=ui/dist \
+      --ignore-failed-read --null -czf "$TREE_TAR" -T - || die2 "could not pack ${TREE_DIR}"
+fi
+
+# ── step 5: create, start, wait for the network ──────────────────────────────
+# INT, TERM and HUP are held while ct_create runs and acted on when it returns:
+# the create runs in a subshell that ignores them (so the ssh under it keeps
+# going and the remote `pct create` is not cut off half-way), and the main
+# shell only records the signal.
+HELD_SIG=""
+trap 'HELD_SIG=2' INT
+trap 'HELD_SIG=15' TERM
+trap 'HELD_SIG=1' HUP
+create_rcfile="$(mktemp "${ART}/create-rc.XXXXXX")"
+(
+  trap '' INT TERM HUP
+  rc=0
+  : >"${ART}/create.log"  # start empty; the appends below keep both streams in order
+  # What pct create prints (unpacking, host key fingerprints on its standard
+  # output; its errors on the standard error) goes to create.log in the run
+  # folder: this script's standard output carries the path of result.json and
+  # nothing else. A refusal's reason is written there too and is shown below.
+  ct_create "$VMID" "$VOLID" "$SHAPE_UNPRIVILEGED" "$SHAPE_CORES" "$SHAPE_MEMORY_MB" "$SHAPE_DISK_GB" \
+    ${DEVS[@]+"${DEVS[@]}"} >>"${ART}/create.log" 2>&1 || rc=$?
+  printf '%s' "$rc" >"$create_rcfile"
+) &
+create_pid=$!
+while kill -0 "$create_pid" 2>/dev/null; do
+  wait "$create_pid" 2>/dev/null || true
+done
+create_rc="$(cat "$create_rcfile" 2>/dev/null || true)"
+rm -f -- "$create_rcfile"
+[[ "$create_rc" =~ ^[0-9]{1,3}$ ]] || create_rc=1
+trap 'on_signal 2' INT
+trap 'on_signal 15' TERM
+trap 'on_signal 1' HUP
+# Only a run that got as far as `pct create` may clean anything up; a refusal
+# (status 90) created nothing, and what is at that VMID is not ours.
+[[ "$create_rc" == "$_CT_REFUSED" ]] || CT_MAYBE=1
+[[ "$create_rc" != "0" ]] || CT_CREATED=1
+[[ -z "$HELD_SIG" ]] || on_signal "$HELD_SIG"
+if [[ "$create_rc" != "0" ]]; then
+  if [[ "$create_rc" == "$_CT_REFUSED" ]]; then
+    create_detail="the create was refused before pct create ran"
+    # pct never ran: the reason is the library's own line(s) in create.log
+    head -c 2000 "${ART}/create.log" 1>&2 || true
+    create_msg="could not create container ${VMID}: refused before pct create ran"
+  else
+    create_detail="pct create failed (exit ${create_rc})"
+    create_msg="could not create container ${VMID}; pct's output is in ${ART}/create.log"
+  fi
+  end_run create_failed "$create_detail" "$create_msg"
+fi
+announce_container
+[[ "$DRY_RUN" == "1" ]] || start_watchdog
+if [[ ${#MAJORS[@]} -gt 0 ]]; then
+  ct_apply_device_rules "$VMID" "$SHAPE_UNPRIVILEGED" "${MAJORS[@]}" \
+    || end_run device_rules_failed "the device rules could not be applied to the container" "could not apply device rules"
+fi
+ct_start "$VMID" || end_run start_failed "the container could not be started" "could not start container ${VMID}"
+GUEST_UP=1
+if ! ct_wait_network "$VMID"; then
+  # CT_NET_STATE is the state the wait found; a refusal leaves it empty.
+  case "$CT_NET_STATE" in
+    no_resolver) net_detail="no_resolver: the guest has an address but hal0.dev did not resolve" ;;
+    no_address) net_detail="no_address: the guest has no global address on its interface" ;;
+    *) net_detail="the network wait could not run" ;;
+  esac
+  end_run no_network "$net_detail" "container ${VMID} has no network"
+fi
+
+# ── step 6: curl and ca-certificates, only if curl is missing ────────────────
+PREREQ_SCRIPT='command -v curl >/dev/null 2>&1 && exit 0
+if command -v apt-get >/dev/null 2>&1; then
+  { apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq curl ca-certificates; } >&2 || exit 1
+elif command -v dnf >/dev/null 2>&1; then
+  dnf install -y curl ca-certificates >&2 || exit 1
+else
+  echo "no supported package manager to install curl" >&2
+  exit 1
+fi
+echo "prereqs=curl ca-certificates"'
+prereq_out="$(CT_EXEC_TIMEOUT=$T_SLOW ct_exec "$VMID" "$PREREQ_SCRIPT")" || end_run prereq_failed "curl could not be installed in the guest" "could not install curl in the guest"
+PREREQS="$(printf '%s\n' "$prereq_out" | sed -n 's/^prereqs=//p' | head -n 1)"
+[[ "$PREREQS" == "curl ca-certificates" ]] || PREREQS=""
+
+# ── step 7: baseline measurements ────────────────────────────────────────────
+ct_push "$VMID" "${HERE}/collect.sh" /root/collect.sh \
+  || end_run push_failed "collect.sh could not be copied into the guest" "could not copy collect.sh"
+COLLECTOR_PUSHED=1
+_PVE_STREAM=pre ct_exec "$VMID" "bash /root/collect.sh pre" >"${ART}/pre.txt" 2>>"${ART}/collect.err" || log "collect pre failed"
+
+# ── step 8: the install ──────────────────────────────────────────────────────
+ARGS="--summary-json=${SUMMARY_PATH}"
+[[ "$SHAPE_ENTRY" != "box" ]] || ARGS="--box ${ARGS}"
+CHAN_ENV="" UNATT_ENV=""
+[[ -z "$CHANNEL" ]] || CHAN_ENV="HAL0_CHANNEL=${CHANNEL} "
+[[ "$SHAPE_ENTRY" != "oneliner-unattended" ]] || UNATT_ENV="HAL0_NONINTERACTIVE=1 HAL0_ALLOW_CPU_ONLY=1 "
+
+if [[ -n "$TREE_DIR" ]]; then
+  ct_push "$VMID" "$TREE_TAR" /root/hal0-src.tgz \
+    || end_run tree_push_failed "the packed tree could not be copied into the guest" "could not copy the tree"
+  CT_EXEC_TIMEOUT=$T_SLOW ct_exec "$VMID" "mkdir -p /root/hal0-src && tar -xzf /root/hal0-src.tgz -C /root/hal0-src" \
+    || end_run tree_unpack_failed "the packed tree could not be unpacked in the guest" "could not unpack the tree"
+  # SKIP_VERIFY is the one thing a tree install must set: there is no signed
+  # release to check. Stable, preview and nightly never set it.
+  INSTALL_SCRIPT="cd /root/hal0-src && ${UNATT_ENV}HAL0_INSTALL_SKIP_VERIFY=1 bash installer/install.sh ${ARGS}"
+  [[ "$SHAPE_ENTRY" == "terminal" ]] || INSTALL_SCRIPT+=" < /dev/null"
+elif [[ "$SHAPE_ENTRY" == "terminal" ]]; then
+  CT_EXEC_TIMEOUT=$T_SLOW ct_exec "$VMID" "curl -fsSL ${INSTALL_URL} -o /root/install.sh" \
+    || end_run download_failed "install.sh could not be downloaded in the guest" "could not download install.sh"
+  INSTALL_SCRIPT="${CHAN_ENV}bash /root/install.sh ${ARGS}"
+else
+  INSTALL_SCRIPT="set -o pipefail; curl -fsSL ${INSTALL_URL} | ${UNATT_ENV}${CHAN_ENV}bash -s -- ${ARGS}"
+fi
+
+install_in_terminal() {
+  local remote tty_argv drv rc=0
+  ct_owned "$VMID" "$NONCE" \
+    || end_run not_owned "the container could not be proven to belong to this run" "refusing: container ${VMID} is not harness-owned"
+  remote="$(ct_guard "$VMID" "$NONCE")pct exec ${VMID} -- ${_PVE_GUEST_ENV} bash -c $(sq "$INSTALL_SCRIPT")"
+  # -e none: no escape character, so nothing the guest prints or a reply types can be taken for one.
+  # env LC_ALL=C LANG=C: the operator's locale is not sent to the host (see _pve_ssh).
+  tty_argv=(env LC_ALL=C LANG=C ssh -tt -e none -o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=15 -o ServerAliveCountMax=4
+    -- "$PVE_ALIAS" "$remote")
+  drv=(python3 -I "${HERE}/tty_drive.py" --answers "$ANSWERS_FILE" --transcript "${ART}/transcript.txt"
+    --result "${ART}/driver.json" --timeout "$TIMEOUT" -- "${tty_argv[@]}")
+  if [[ "$DRY_RUN" == "1" ]]; then
+    plan "tty: ${drv[*]}"
+    synth_driver 0 false
+    return 0
+  fi
+  run_driver "${drv[@]}" || rc=$?
+  return "$rc"
+}
+
+install_unattended() {
+  local rc=0
+  run_bounded "$TIMEOUT" ct_exec_to_transcript || rc=$?
+  if [[ "$rc" == "124" ]]; then
+    synth_driver 124 true
+  else
+    synth_driver "$rc" false
+  fi
+  return "$rc"
+}
+# The install keeps its own --timeout (run_bounded); the ssh under it gets a
+# little longer so the install's deadline is the one that fires.
+# What the guest prints is cut on this side: ct_exec caps each of its streams,
+# and the merged transcript is capped once more here.
+ct_exec_to_transcript() {
+  CT_EXEC_TIMEOUT=$((TIMEOUT + 60)) _PVE_STREAM=transcript ct_exec "$VMID" "$INSTALL_SCRIPT" 2>&1 \
+    | _pve_cap_stream transcript "$(_pve_cap)" >"${ART}/transcript.txt"
+}
+
+log "installing (${SHAPE_ENTRY}, ${SOURCE})"
+rc=0
+if [[ "$SHAPE_ENTRY" == "oneliner-unattended" ]]; then
+  install_unattended || rc=$?
+else
+  install_in_terminal || rc=$?
+fi
+INSTALL_RC="$rc"
+log "install exited ${INSTALL_RC}"
+
+# ── step 9: what the install left behind ─────────────────────────────────────
+collect_post
+if [[ "$INSTALL_RC" == "0" ]]; then
+  CT_EXEC_TIMEOUT=$T_PROBE _PVE_STREAM=probe ct_exec "$VMID" "bash /root/collect.sh probe" >"${ART}/probe.txt" 2>>"${ART}/collect.err" || log "collect probe failed"
+fi
+
+# ── step 10: optional uninstall and residue check ────────────────────────────
+if [[ "$UNINSTALL" == "1" ]]; then
+  log "uninstalling"
+  UNINSTALL_OK=0
+  CT_EXEC_TIMEOUT=$T_UNINSTALL _PVE_STREAM=transcript-uninstall ct_exec "$VMID" 'hal0 uninstall --purge --force || bash /usr/lib/hal0/current/installer/uninstall.sh --purge --force || bash /opt/hal0/installer/uninstall.sh --purge --force' 2>&1 \
+    | _pve_cap_stream transcript-uninstall "$(_pve_cap)" >>"${ART}/transcript-uninstall.txt" && UNINSTALL_OK=1
+  # shellcheck disable=SC2016  # the guest shell expands these, not this one
+  RESIDUE_SCRIPT='r=""; for p in /opt/hal0 /usr/lib/hal0/current /etc/hal0 /var/lib/hal0 /usr/local/bin/hal0 /usr/local/bin/hal0-agent; do [ -e "$p" ] && r="$r path:$p"; done; for u in hal0-api hal0-openwebui hal0-agent@; do systemctl list-unit-files 2>/dev/null | grep -q "^$u" && r="$r unit:$u"; done; getent group hal0 >/dev/null && r="$r group:hal0"; echo "$r"'
+  if residue="$(_PVE_STREAM=residue ct_exec "$VMID" "$RESIDUE_SCRIPT" 2>/dev/null)"; then
+    residue="$(printf '%s' "$residue" | tr -cd 'A-Za-z0-9 :/@._-' | tr -s ' ' | sed -e 's/^ *//' -e 's/ *$//')"
+    if [[ -z "$residue" ]]; then residue="clean"; else UNINSTALL_OK=0; fi
+  else
+    residue="unknown"
+    UNINSTALL_OK=0
+  fi
+  printf 'uninstall_ok=%s\nresidue=%s\n' "$UNINSTALL_OK" "$residue" >>"${ART}/run.txt"
+fi
+
+# ── steps 11 and 12: copy out, assemble, report ──────────────────────────────
+finish_result
+if [[ "$DRY_RUN" == "1" ]]; then
+  plan "would print the path of ${OUT:-<out>}/result.json"
+  exit 0
+fi
+printf '%s\n' "${ART}/result.json"
+
+if [[ "$INSTALL_RC" == "0" ]] && grep -qx 'chat_ok=1' "${ART}/probe.txt" 2>/dev/null; then
+  exit 0
+fi
+exit 1

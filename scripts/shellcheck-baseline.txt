@@ -1,0 +1,13 @@
+# shellcheck 0.11.0
+# Findings per file and SC code; regenerate with: scripts/lint-shell.sh --update-baseline
+# The count may fall but never rise. scripts/install-matrix/ never appears here.
+installer/agents/hermes-prereqs.sh:SC1091:1
+installer/agents/pi.sh:SC2015:1
+installer/box/box.sh:SC2015:2
+installer/install.sh:SC1091:6
+installer/install.sh:SC2034:1
+installer/lib/preflight.sh:SC1091:2
+installer/lib/preflight.sh:SC2069:1
+installer/lib/preflight.sh:SC2119:1
+installer/lib/preflight.sh:SC2120:1
+installer/lib/ui.sh:SC2034:3

@@ -1,0 +1,792 @@
+# shellcheck shell=bash
+# Proxmox host library for the install matrix. SOURCED by run-shape.sh.
+#
+# Every call to the Proxmox host goes through pve_run (one ssh, one command
+# string). The library never sets shell options or traps and never exits the
+# caller's shell: functions return non-zero instead.
+#
+# Ownership guard: ct_destroy, ct_apply_device_rules, ct_start, ct_exec,
+# ct_push and ct_pull act on a guest only after ct_owned passes (VMID inside
+# the harness range, tag hal0-matrix, hostname hal0-mx-*, and the description
+# `hal0-matrix run <nonce>` carrying THIS run's 16-hex nonce), and the same
+# test (ct_guard) is the first part of the remote command that acts, so the
+# check and the action are one ssh call. Without a well-formed nonce every
+# guard, and ct_create, refuses and sends nothing. Nothing else here runs pct
+# against a guest.
+#
+# Injection rule: pve_run hands ONE string to the remote shell. Every value
+# placed in that string is either checked against a strict pattern or passed
+# through printf %q first.
+
+# The four features scripts/proxmox-ve/ct/hal0.sh declares (var_fuse, var_keyctl,
+# var_mknod, and nesting from the README); a test pins the equality.
+_PVE_FEATURES="nesting=1,keyctl=1,fuse=1,mknod=1"
+# Every command run in a guest starts with this, in the fixed command text:
+# C.UTF-8 ships with every supported guest and needs no locale files, so no
+# setlocale warning can be mistaken for the error of a failed step, and the
+# installer's boxes line up as they do for a person (it counts bytes in plain C).
+# (The operator's own locale is not sent either; see _pve_ssh.)
+_PVE_GUEST_ENV="env LC_ALL=C.UTF-8 LANG=C.UTF-8"
+_PVE_TAG="hal0-matrix"
+_PVE_HOST_PREFIX="hal0-mx-"
+# ct_create returns this when it refused before running `pct create`: nothing
+# was created, so the caller must not clean anything up. A failed `pct create`
+# returns pct's own status instead.
+_CT_REFUSED=90
+# A run's nonce (16 hex characters), set by the caller before any call here.
+# ct_create writes it into the guest's description, and every guard acts only on
+# a guest that carries it. Unset or malformed: ct_create and every guard refuse.
+CT_NONCE=""
+
+# Quote one value for the remote shell. Plain words stay as they are so the
+# recorded command reads naturally; anything else goes through printf %q.
+_pve_q() {
+  if [[ "$1" =~ ^[A-Za-z0-9_@%+=:,./-]+$ ]]; then
+    printf '%s' "$1"
+  else
+    printf '%q' "$1"
+  fi
+}
+
+# A message that cannot be written is lost, never an error (a closed terminal
+# must not turn a refusal or a cleanup step into a different outcome).
+_pve_err() { printf '%s\n' "$*" >&2 || true; }
+
+# _pve_nonce_ok <nonce>: 0 for 16 lowercase hex characters; otherwise says so on
+# one line and returns 1, so the caller sends nothing to the host.
+_pve_nonce_ok() {
+  [[ "${1:-}" =~ ^[0-9a-f]{16}$ ]] && return 0
+  _pve_err "refusing: the run nonce is missing or malformed (16 hex characters needed)"
+  return 1
+}
+
+# pve_nameserver: the optional HAL0_MATRIX_NAMESERVER, checked. Unset or empty:
+# prints nothing, returns 0 (nothing is passed to `pct create`). Otherwise one
+# to three IPv4 or IPv6 addresses separated by spaces and nothing else: the
+# characters are checked first (hex digits, `:`, `.` and spaces), then each item
+# must parse as an IP address. Prints the addresses joined by single spaces.
+# On a bad value it says so on one line and returns 1. No address is ever
+# written down in this repository; the operator's setting is the only source.
+pve_nameserver() {
+  local raw="${HAL0_MATRIX_NAMESERVER-}" charset='^[0-9A-Fa-f:. ]+$' item
+  local -a items=()
+  local IFS=$' \t\n'
+  [[ -n "$raw" ]] || return 0
+  if [[ "$raw" =~ $charset ]]; then
+    read -ra items <<<"$raw"
+  fi
+  if [[ ${#items[@]} -ge 1 && ${#items[@]} -le 3 ]]; then
+    for item in "${items[@]}"; do
+      [[ ${#item} -le 45 ]] || { items=(); break; }
+    done
+  fi
+  if [[ ${#items[@]} -ge 1 && ${#items[@]} -le 3 ]] \
+    && python3 -I -c 'import ipaddress, sys
+for a in sys.argv[1:]:
+    ipaddress.ip_address(a)' "${items[@]}" 2>/dev/null; then
+    printf '%s\n' "${items[*]}"
+    return 0
+  fi
+  _pve_err "bad HAL0_MATRIX_NAMESERVER: one to three IPv4 or IPv6 addresses separated by spaces, nothing else"
+  return 1
+}
+
+_pve_vmid_min() { printf '%s' "${HAL0_MATRIX_VMID_MIN:-170}"; }
+_pve_vmid_max() { printf '%s' "${HAL0_MATRIX_VMID_MAX:-189}"; }
+
+# A VMID is digits only, no leading zero, at most 9 digits.
+_pve_vmid_ok() { [[ "${1:-}" =~ ^[1-9][0-9]{0,8}$ ]]; }
+_pve_uint_ok() { [[ "${1:-}" =~ ^[0-9]{1,9}$ ]]; }
+
+# The VMID range must be two plain numbers with 100 <= min <= max and at most
+# 64 VMIDs (max - min <= 63): a wide range would leave the tag and hostname as
+# the only protection for every guest on the host.
+_pve_range_ok() {
+  local lo hi
+  lo="$(_pve_vmid_min)"
+  hi="$(_pve_vmid_max)"
+  [[ "$lo" =~ ^[1-9][0-9]{2,8}$ && "$hi" =~ ^[1-9][0-9]{2,8}$ ]] || return 1
+  ((10#$lo <= 10#$hi && 10#$hi - 10#$lo <= 63))
+}
+
+# pve_check_range: prints why and returns 1 when the range is not usable.
+pve_check_range() {
+  _pve_range_ok && return 0
+  _pve_err "bad VMID range $(_pve_vmid_min)-$(_pve_vmid_max): both must be plain numbers, 100 <= min <= max, and max - min <= 63"
+  return 1
+}
+
+_pve_in_range() {
+  local lo hi
+  _pve_range_ok || return 1
+  lo="$(_pve_vmid_min)"
+  hi="$(_pve_vmid_max)"
+  _pve_vmid_ok "$1" || return 1
+  ((10#$1 >= 10#$lo && 10#$1 <= 10#$hi))
+}
+
+# Deadlines, in seconds, one per kind of call. Each can be set through
+# HAL0_MATRIX_TIMEOUT_<NAME>; a value that is not a plain number is ignored.
+# _pve_t <NAME> <default> [override]
+_pve_t() {
+  local var="HAL0_MATRIX_TIMEOUT_${1}" v="${3:-}"
+  [[ "$v" =~ ^[1-9][0-9]{0,6}$ ]] || v="${!var:-}"
+  [[ "$v" =~ ^[1-9][0-9]{0,6}$ ]] || v="$2"
+  printf '%s' "$v"
+}
+
+# Everything a guest prints comes back through ssh, so the cap on how many
+# bytes may land here is applied on THIS side of the pipe. The default is
+# 64 MiB per stream; HAL0_MATRIX_MAX_STREAM_BYTES changes it (digits only,
+# else the default). A stream over the cap is cut, never an error by itself,
+# and the cut is noted as `truncated=<name>` in PVE_NOTE_FILE when it is set.
+PVE_NOTE_FILE=""
+_pve_cap() {
+  local v="${HAL0_MATRIX_MAX_STREAM_BYTES:-}"
+  [[ "$v" =~ ^[1-9][0-9]{0,14}$ ]] || v=67108864
+  printf '%s' "$v"
+}
+
+# _pve_cap_stream <name> <cap>: copy stdin to stdout, at most <cap> bytes. The
+# rest is read and thrown away, so the sender finishes with its own status.
+_pve_cap_stream() {
+  local name="$1" cap="$2" extra=""
+  head -c "$cap" || true
+  extra="$(head -c 1 | od -An -tx1)" || true
+  if [[ -n "${extra//[[:space:]]/}" ]]; then
+    cat >/dev/null || true
+    [[ -z "$PVE_NOTE_FILE" ]] || printf 'truncated=%s\n' "$name" >>"$PVE_NOTE_FILE"
+    # (not for the stderr copy: its output goes to the stream just cut)
+    [[ "$name" == *-stderr ]] || printf 'output cut at %s bytes (%s)\n' "$cap" "$name" >&2
+  fi
+  return 0
+}
+
+# _pve_ssh <stdin: 0|1> <command string>. `--` ends ssh options so the alias
+# can never be read as one; stdin is closed (-n) unless the caller feeds it,
+# so a caller's `while read` loop keeps its input. ServerAlive* drops a dead
+# connection, and every call runs under `timeout` (KILL, because cleanup runs
+# with TERM ignored and a child inherits that): _PVE_DEADLINE seconds, which a
+# ct_* function sets for its own calls, else the READ deadline. A shell
+# function named ssh (the dry run's shadow) cannot run under timeout, so it is
+# called directly.
+_pve_ssh() {
+  local host="${HAL0_PVE:-pve}" nflag=() tmo=() dl rc=0 cap name errfd errpid had_pf=0
+  if [[ "$host" == -* || ! "$host" =~ ^[^[:space:]]+$ ]]; then
+    _pve_err "bad HAL0_PVE alias: ${host}"
+    return 1
+  fi
+  cap="$(_pve_cap)"
+  name="${_PVE_STREAM:-ssh}"
+  [[ "$name" =~ ^[A-Za-z0-9._-]{1,60}$ ]] || name="ssh"
+  [[ "$1" == "1" ]] || nflag=(-n)
+  dl="${_PVE_DEADLINE:-$(_pve_t READ 120)}"
+  if [[ "$(type -t ssh)" != "function" ]]; then
+    tmo=(timeout --foreground -s KILL "$dl")
+  fi
+  # stdout and stderr each pass a local cap before they reach the caller.
+  exec {errfd}> >(_pve_cap_stream "${name}-stderr" "$cap" >&2)
+  errpid=$!
+  # pipefail makes ssh's own failure reach the `||`; the caller's setting is put back.
+  [[ -o pipefail ]] && had_pf=1
+  set -o pipefail
+  # LC_ALL=C: ssh's default SendEnv sends LANG and LC_* to the host, and a locale
+  # the host or guest does not have makes every bash there print a setlocale
+  # warning ahead of the real error. The guest side is set in the command text.
+  LC_ALL=C LANG=C "${tmo[@]}" ssh "${nflag[@]}" -o BatchMode=yes -o ConnectTimeout=10 \
+    -o ServerAliveInterval=15 -o ServerAliveCountMax=4 -- "$host" "$2" 2>&"$errfd" \
+    | _pve_cap_stream "$name" "$cap" || rc="${PIPESTATUS[0]}"
+  [[ "$had_pf" == 1 ]] || set +o pipefail
+  exec {errfd}>&-
+  wait "$errpid" 2>/dev/null || true
+  if [[ "${#tmo[@]}" -gt 0 && ( "$rc" -eq 124 || "$rc" -eq 137 ) ]]; then
+    _pve_err "the call to the host passed its ${dl}s deadline and was stopped"
+  fi
+  return "$rc"
+}
+
+# pve_run <command string>
+pve_run() { _pve_ssh 0 "$1"; }
+
+# _ct_presence <vmid>: prints present, absent or unknown (ssh failed or the
+# host said something else). Decided from the config file, not an exit code.
+_ct_presence() {
+  local out rc _PVE_DEADLINE
+  _PVE_DEADLINE="$(_pve_t READ 60)"
+  out="$(pve_run "if test -e /etc/pve/lxc/${1}.conf; then echo present; else echo absent; fi")" && rc=0 || rc=$?
+  if [[ "$rc" -eq 0 && ( "$out" == "present" || "$out" == "absent" ) ]]; then
+    printf '%s\n' "$out"
+  else
+    printf 'unknown\n'
+  fi
+}
+
+# The one read the headroom guard makes. Fixed text: nothing from a shape or
+# the environment is in it. After free's table it prints one `gpu USED TOTAL`
+# line (bytes) for every card whose GTT counters exist; a host without them
+# prints none, which is not an error.
+# shellcheck disable=SC2016  # the remote shell expands these, not this one
+_PVE_HEADROOM_CMD='free -g; for d in /sys/class/drm/card*/device; do if [ -r "$d/mem_info_gtt_used" ] && [ -r "$d/mem_info_gtt_total" ]; then echo "gpu $(cat "$d/mem_info_gtt_used") $(cat "$d/mem_info_gtt_total")"; fi; done; true'
+
+# pve_mem_available_gb: integer from the "available" column of `free -g`.
+pve_mem_available_gb() {
+  local out n _PVE_DEADLINE
+  _PVE_DEADLINE="$(_pve_t READ 60)"
+  out="$(pve_run 'free -g')" || return 1
+  n="$(awk '/^Mem:/ {print $7}' <<<"$out")"
+  [[ "$n" =~ ^[0-9]+$ ]] || return 1
+  printf '%s\n' "$n"
+}
+
+# pve_headroom_need [devices] [container_memory_mb]: print, as a whole number
+# of GB, what the host must show as available before a container is created:
+# the floor plus the container's whole memory limit rounded up to a whole GB.
+# devices is the shape's hardware value: gpu and gpu+npu use the GPU floor,
+# anything else (none, cpu, absent) the CPU-only one. Both arguments are
+# digits-checked; the floor is HAL0_MATRIX_MIN_AVAILABLE_GB[_GPU].
+pve_headroom_need() {
+  local devices="${1:-none}" mem_mb="${2:-0}" floor floor_name
+  case "$devices" in
+    gpu | gpu+npu)
+      floor_name="HAL0_MATRIX_MIN_AVAILABLE_GB_GPU"
+      floor="${HAL0_MATRIX_MIN_AVAILABLE_GB_GPU:-22}" ;;
+    *)
+      floor_name="HAL0_MATRIX_MIN_AVAILABLE_GB"
+      floor="${HAL0_MATRIX_MIN_AVAILABLE_GB:-12}" ;;
+  esac
+  _pve_uint_ok "$floor" || { _pve_err "bad headroom floor: ${floor_name}"; return 1; }
+  _pve_uint_ok "$mem_mb" || { _pve_err "bad container memory: ${mem_mb}"; return 1; }
+  printf '%s %s %s\n' "$((10#$floor + (10#$mem_mb + 1023) / 1024))" "$floor" "$(((10#$mem_mb + 1023) / 1024))"
+}
+
+# pve_require_headroom [devices] [container_memory_mb]
+# The host must show at least the floor plus the container's whole memory limit
+# (rounded up to a whole GB) as available; all the numbers are printed. The
+# host's reply is untrusted text: only lines that are exactly `Mem: ...` or
+# `gpu <digits> <digits>` are used, every number is digits-checked before
+# arithmetic, and nothing read is ever evaluated or put into a later command.
+pve_require_headroom() {
+  local devices="${1:-none}" mem_mb="${2:-0}" floor out tag a b c f figures
+  local have="" gpu_used=0 gpu_total=0 gpu_seen=0 gpu_text limit_gb=0 need
+  figures="$(pve_headroom_need "$devices" "$mem_mb")" || return 1
+  read -r need floor limit_gb <<<"$figures"
+  out="$(_pve_ssh 0 "$_PVE_HEADROOM_CMD")" || { _pve_err "cannot read host memory"; return 1; }
+  while read -r tag a b c _ _ f; do
+    if [[ "$tag" == "Mem:" ]]; then
+      [[ -n "$have" || ! "$f" =~ ^[0-9]{1,9}$ ]] || have="$f"
+    elif [[ "$tag" == "gpu" && "$a" =~ ^[0-9]{1,15}$ && "$b" =~ ^[0-9]{1,15}$ && -z "$c" ]]; then
+      gpu_used=$((gpu_used + 10#$a))
+      gpu_total=$((gpu_total + 10#$b))
+      gpu_seen=1
+    fi
+  done <<<"$out"
+  [[ -n "$have" ]] || { _pve_err "cannot read host memory"; return 1; }
+  if ((gpu_seen)); then
+    gpu_text="gpu memory: $((gpu_used / 1073741824)) GB used of $((gpu_total / 1073741824)) GB"
+  else
+    gpu_text="gpu memory: not reported"
+  fi
+  _pve_err "host memory: ${have} GB available, ${gpu_text}"
+  _pve_err "host needs ${need} GB available: the floor of ${floor} GB plus the container's memory limit of ${limit_gb} GB"
+  if ((10#$have < need)); then
+    _pve_err "host has ${have} GB available now, the floor is ${floor} GB, the container's limit is ${limit_gb} GB, so ${need} GB are needed"
+    return 1
+  fi
+}
+
+# pve_template_volid <pattern>: the single local template whose id contains it.
+pve_template_volid() {
+  local pat="${1:-}" out all matches count
+  [[ "$pat" =~ ^[A-Za-z0-9._+-]+$ ]] || { _pve_err "bad template pattern: $pat"; return 1; }
+  out="$(pve_run 'pveam list local')" || { _pve_err "cannot list templates"; return 1; }
+  all="$(printf '%s\n' "$out" | awk 'NR > 1 && $1 != "" {print $1}')"
+  matches="$(printf '%s\n' "$all" | grep -F -- "$pat" || true)"
+  count="$(printf '%s' "$matches" | grep -c . || true)"
+  if [[ "$count" == "1" ]]; then
+    printf '%s\n' "$matches"
+    return 0
+  fi
+  if [[ "$count" == "0" ]]; then
+    _pve_err "no template matches '${pat}'; available:"
+  else
+    _pve_err "${count} templates match '${pat}':"
+    all="$matches"
+  fi
+  printf '%s\n' "$all" | sed 's/^/  /' >&2
+  return 1
+}
+
+# pve_storage [disk_gb]: HAL0_MATRIX_STORAGE, else the first active rootdir
+# storage. With disk_gb the chosen storage must be listed, active, and have at
+# least disk_gb + 10 GB available (`pvesm status` reports KiB); the storage and
+# its free space are printed. Without disk_gb only the name is returned.
+pve_storage() {
+  local want="${1:-}" name="" out avail status gb need
+  if [[ -n "$want" ]]; then
+    _pve_uint_ok "$want" || { _pve_err "bad disk size: ${want}"; return 1; }
+  fi
+  if [[ -n "${HAL0_MATRIX_STORAGE:-}" ]]; then
+    [[ "$HAL0_MATRIX_STORAGE" =~ ^[A-Za-z0-9._-]+$ ]] || { _pve_err "bad HAL0_MATRIX_STORAGE"; return 1; }
+    name="$HAL0_MATRIX_STORAGE"
+    if [[ -z "$want" ]]; then
+      printf '%s\n' "$name"
+      return 0
+    fi
+  fi
+  out="$(pve_run 'pvesm status --content rootdir')" || { _pve_err "cannot list storage"; return 1; }
+  if [[ -z "$name" ]]; then
+    name="$(awk 'NR > 1 && $3 == "active" {print $1; exit}' <<<"$out")"
+    [[ "$name" =~ ^[A-Za-z0-9._-]+$ ]] || { _pve_err "no active storage accepts container disks"; return 1; }
+  fi
+  if [[ -z "$want" ]]; then
+    printf '%s\n' "$name"
+    return 0
+  fi
+  status="$(awk -v n="$name" 'NR > 1 && $1 == n {print $3; exit}' <<<"$out")"
+  [[ "$status" == "active" ]] || { _pve_err "storage ${name} is not listed as an active place for container disks"; return 1; }
+  avail="$(awk -v n="$name" 'NR > 1 && $1 == n {print $6; exit}' <<<"$out")"
+  [[ "$avail" =~ ^[0-9]{1,15}$ ]] || { _pve_err "cannot read the free space of storage ${name}"; return 1; }
+  gb=$((10#$avail / 1048576))
+  need=$((10#$want + 10))
+  _pve_err "storage ${name}: ${gb} GB free, need ${need} (disk ${want} GB + 10)"
+  ((gb >= need)) || { _pve_err "refusing: storage ${name} has too little free space"; return 1; }
+  printf '%s\n' "$name"
+}
+
+# pve_pick_vmid: first free VMID in range. Refuses when ANY guest exists inside
+# the range, tagged or not (a run's container has no tag until pct create has
+# written its config), and when a tagged guest exists anywhere.
+pve_pick_vmid() {
+  local lo hi out
+  lo="$(_pve_vmid_min)"
+  hi="$(_pve_vmid_max)"
+  pve_check_range || return 1
+  out="$(pve_run 'pvesh get /cluster/resources --type vm --output-format json')" \
+    || { _pve_err "cannot list guests"; return 1; }
+  printf '%s' "$out" | python3 -I -c '
+import json, re, sys
+lo, hi, tag = int(sys.argv[1]), int(sys.argv[2]), sys.argv[3]
+try:
+    rows = json.load(sys.stdin)
+    if not isinstance(rows, list):
+        raise ValueError("not a list")
+    [int(r["vmid"]) for r in rows if "vmid" in r]
+except (ValueError, TypeError, AttributeError, KeyError):
+    print("cannot parse the guest list from the host", file=sys.stderr)
+    sys.exit(1)
+for r in rows:
+    if tag in re.split(r"[;,]", r.get("tags") or ""):
+        print("another matrix container is present: %s" % r.get("vmid"), file=sys.stderr)
+        sys.exit(3)
+for r in rows:
+    if "vmid" in r and lo <= int(r["vmid"]) <= hi:
+        print("a guest already exists inside the harness range %d-%d: %s" % (lo, hi, int(r["vmid"])), file=sys.stderr)
+        sys.exit(3)
+print(lo)
+' "$lo" "$hi" "$_PVE_TAG" || return 1
+}
+
+# The description is the proof that a guest is THIS run's. Proxmox VE (9.2)
+# prints it with literal spaces and a trailing `%0A` (an encoded newline), and
+# may show a space as `%20`, so the one accepted form is
+#   hal0-matrix run <16 hex>   spaces literal or %20, then an optional %0A
+# and nothing else before or after. Two places read it and both use this form:
+# _pve_desc_nonce (the local read) and _pve_desc_pattern (the remote grep).
+
+# _pve_desc_nonce <text after "description:">: prints the 16-hex nonce when the
+# text is exactly the accepted form, nothing and status 1 otherwise. The text
+# is untrusted and is only compared, never evaluated.
+_pve_desc_nonce() {
+  local d="${1:-}"
+  d="${d# }"
+  d="${d%\%0A}"
+  d="${d//%20/ }"
+  if [[ "$d" =~ ^hal0-matrix\ run\ ([0-9a-f]{16})$ ]]; then
+    printf '%s' "${BASH_REMATCH[1]}"
+    return 0
+  fi
+  return 1
+}
+
+# _pve_desc_pattern <nonce>: the extended regular expression (for grep -E, on
+# the host) that matches a whole `pct config` description line for exactly this
+# nonce. The caller has already checked the nonce as 16 hex characters.
+_pve_desc_pattern() {
+  printf '^description: %s(%%20| )run(%%20| )%s(%%0A)?$' "$_PVE_TAG" "$1"
+}
+
+# ct_owned <vmid> <nonce>: 0 only for a guest this run created: the guest's
+# description must be `hal0-matrix run <nonce>`, besides the tag and hostname.
+# No nonce, no answer: it refuses.
+ct_owned() {
+  local vmid="${1:-}" nonce="${2:-}" conf line tags="" host="" desc="" t found=1 _PVE_DEADLINE
+  _PVE_DEADLINE="$(_pve_t READ 60)"
+  _pve_in_range "$vmid" || return 1
+  _pve_nonce_ok "$nonce" || return 1
+  conf="$(pve_run "pct config ${vmid}")" || return 1
+  while IFS= read -r line; do
+    case "$line" in
+      tags:*) tags="${line#tags:}" ;;
+      hostname:*) host="${line#hostname:}" ;;
+      description:*) desc="${line#description:}" ;;
+    esac
+  done <<<"$conf"
+  host="${host// /}"
+  tags="${tags// /}"
+  [[ "$host" == "${_PVE_HOST_PREFIX}"* ]] || return 1
+  [[ "$(_pve_desc_nonce "$desc")" == "$nonce" ]] || return 1
+  local IFS=';,'
+  for t in $tags; do
+    [[ "$t" == "$_PVE_TAG" ]] && found=0
+  done
+  return "$found"
+}
+
+# ct_mark_state <vmid> <nonce>: prints mine, other or unknown. mine: the guest's
+# description is `hal0-matrix run <nonce>`; other: the description is
+# `hal0-matrix run <16 hex>` with a different nonce, which is positive evidence
+# that another run made it; unknown: anything else (the config could not be
+# read, a create is still running and has no hostname yet, the description is
+# in a form this harness does not recognise): ownership is not proven either
+# way. Read only. The reply is untrusted text and is only compared, never
+# evaluated.
+ct_mark_state() {
+  local vmid="${1:-}" nonce="${2:-}" conf line desc="" host="" seen="" _PVE_DEADLINE
+  _PVE_DEADLINE="$(_pve_t READ 60)"
+  if ! _pve_in_range "$vmid" || [[ ! "$nonce" =~ ^[0-9a-f]{16}$ ]]; then
+    printf 'unknown\n'
+    return 0
+  fi
+  conf="$(pve_run "pct config ${vmid}")" || { printf 'unknown\n'; return 0; }
+  while IFS= read -r line; do
+    case "$line" in
+      hostname:*) host="${line#hostname:}" ;;
+      description:*) desc="${line#description:}" ;;
+    esac
+  done <<<"$conf"
+  if [[ -z "${host// /}" ]]; then
+    printf 'unknown\n'
+    return 0
+  fi
+  seen="$(_pve_desc_nonce "$desc")" || seen=""
+  if [[ "$seen" == "$nonce" ]]; then
+    printf 'mine\n'
+  elif [[ -n "$seen" ]]; then
+    printf 'other\n'
+  else
+    printf 'unknown\n'
+  fi
+}
+
+# ct_guard <vmid> <nonce>: remote shell text that ends in `&& ` and succeeds
+# only for a guest this run created: hostname hal0-mx-<vmid>, tag hal0-matrix
+# and the description `hal0-matrix run <nonce>`.
+# Every state-changing remote command starts with it, so the check and the
+# action are one ssh call and one remote shell. Fixed text: only the VMID (a
+# checked number) and the nonce (checked hex) are placed in it. Prints nothing
+# and returns 1 for a VMID or nonce that fails its check.
+ct_guard() {
+  local vmid="${1:-}" nonce="${2:-}" g
+  _pve_in_range "$vmid" || return 1
+  _pve_nonce_ok "$nonce" || return 1
+  g="{ pct config ${vmid} | grep -q '^hostname: ${_PVE_HOST_PREFIX}${vmid}\$'"
+  g+=" && pct config ${vmid} | grep -Eq '^tags: ([^;,]*[;,])*${_PVE_TAG}([;,].*)?\$'"
+  g+=" && pct config ${vmid} | grep -Eq '$(_pve_desc_pattern "$nonce")'"
+  printf '%s; } && ' "$g"
+}
+
+_ct_require_owned() {
+  ct_owned "${1:-}" "${2:-}" || { _pve_err "refusing: guest '${1:-}' is not a harness-owned container"; return 1; }
+}
+
+# ct_create <vmid> <volid> <unprivileged 0|1> <cores> <memory_mb> <disk_gb> [device...]
+# Returns _CT_REFUSED (90) when it refused before running `pct create`; any
+# other non-zero status is pct's, and a guest may then exist.
+ct_create() {
+  local vmid="${1:-}" volid="${2:-}" unpriv="${3:-}" cores="${4:-}" mem="${5:-}" disk="${6:-}"
+  shift 6 2>/dev/null || { _pve_err "ct_create: too few arguments"; return "$_CT_REFUSED"; }
+  local bridge="${HAL0_MATRIX_BRIDGE:-vmbr0}" storage dev i=0 cmd st nameserver _PVE_DEADLINE
+  _PVE_DEADLINE="$(_pve_t CREATE 600)"
+  _pve_in_range "$vmid" || { _pve_err "refusing: VMID '${vmid}' is outside the harness range"; return "$_CT_REFUSED"; }
+  [[ "$volid" =~ ^[A-Za-z0-9._+-]+:[A-Za-z0-9._+/-]+$ ]] || { _pve_err "bad template volume id"; return "$_CT_REFUSED"; }
+  [[ "$unpriv" =~ ^[01]$ ]] || { _pve_err "unprivileged must be 0 or 1"; return "$_CT_REFUSED"; }
+  if ! _pve_uint_ok "$cores" || ! _pve_uint_ok "$mem" || ! _pve_uint_ok "$disk"; then
+    _pve_err "cores, memory and disk must be integers"
+    return "$_CT_REFUSED"
+  fi
+  _pve_nonce_ok "$CT_NONCE" || return "$_CT_REFUSED"
+  [[ "$bridge" =~ ^[A-Za-z0-9_.-]+$ ]] || { _pve_err "bad HAL0_MATRIX_BRIDGE"; return "$_CT_REFUSED"; }
+  # Checked before anything is sent; empty when the setting is unset.
+  nameserver="$(pve_nameserver)" || return "$_CT_REFUSED"
+  for dev in "$@"; do
+    [[ "$dev" =~ ^/dev/[A-Za-z0-9_-]+(/[A-Za-z0-9_-]+)*(,gid=[0-9]+)?$ ]] \
+      || { _pve_err "bad device argument: ${dev}"; return "$_CT_REFUSED"; }
+  done
+  # Never create over an existing guest, and not when that cannot be told.
+  case "$(_ct_presence "$vmid")" in
+    absent) ;;
+    present) _pve_err "refusing: guest ${vmid} already exists"; return "$_CT_REFUSED" ;;
+    *) _pve_err "refusing: cannot tell whether guest ${vmid} exists"; return "$_CT_REFUSED" ;;
+  esac
+  storage="$(pve_storage "$disk")" || return "$_CT_REFUSED"
+  cmd="pct create $(_pve_q "$vmid") $(_pve_q "$volid")"
+  cmd+=" --hostname $(_pve_q "${_PVE_HOST_PREFIX}${vmid}")"
+  cmd+=" --tags $(_pve_q "$_PVE_TAG")"
+  cmd+=" --description $(_pve_q "hal0-matrix run ${CT_NONCE}")"
+  cmd+=" --cores ${cores} --memory ${mem} --swap 0"
+  cmd+=" --rootfs $(_pve_q "${storage}:${disk}")"
+  cmd+=" --net0 $(_pve_q "name=eth0,bridge=${bridge},ip=dhcp")"
+  # pct(1) takes --nameserver as a comma-separated list; the checked value is spaced
+  [[ -z "$nameserver" ]] || cmd+=" --nameserver $(_pve_q "${nameserver// /,}")"
+  cmd+=" --unprivileged ${unpriv}"
+  cmd+=" --features $(_pve_q "$_PVE_FEATURES")"
+  cmd+=" --onboot 0"
+  for dev in "$@"; do
+    cmd+=" --dev${i} $(_pve_q "$dev")"
+    i=$((i + 1))
+  done
+  pve_run "$cmd" && st=0 || st=$?
+  if [[ "$st" -ne 0 ]]; then
+    _pve_err "pct create failed for ${vmid} (exit ${st})"
+  fi
+  return "$st"
+}
+
+# ct_wait_create_done <vmid> [seconds]: wait (bounded; HAL0_MATRIX_CREATE_WAIT,
+# default 120) until no `pct create <vmid>` process runs on the host. An
+# interrupted harness leaves its ssh dead but the remote create may carry on.
+# The remote command is fixed text with only the checked VMID in it; the [p]
+# keeps the remote shell's own command line from matching the pattern. A
+# reading that cannot be made does not count as idle.
+ct_wait_create_done() {
+  local vmid="${1:-}" limit="${2:-${HAL0_MATRIX_CREATE_WAIT:-120}}" start now out _PVE_DEADLINE
+  _pve_in_range "$vmid" || { _pve_err "refusing: VMID '${vmid}' is outside the harness range"; return 1; }
+  _pve_uint_ok "$limit" || { _pve_err "bad wait limit"; return 1; }
+  _PVE_DEADLINE="$(_pve_t READ 60)"
+  start="$(date +%s)"
+  while :; do
+    out="$(pve_run "if pgrep -f '[p]ct create ${vmid}( |\$)' >/dev/null 2>&1; then echo busy; else echo idle; fi")" || out=""
+    [[ "$out" != "idle" ]] || return 0
+    now="$(date +%s)"
+    ((now - start < limit)) || break
+    sleep "${HAL0_MATRIX_POLL_SLEEP:-2}"
+  done
+  _pve_err "a pct create for ${vmid} was still running after ${limit}s"
+  return 1
+}
+
+# ct_lock_held <vmid>: 0 when the guest's config shows a lock: line (a create
+# that never finished leaves one). Read only; changes nothing.
+ct_lock_held() {
+  local vmid="${1:-}" conf _PVE_DEADLINE
+  _pve_in_range "$vmid" || return 1
+  _PVE_DEADLINE="$(_pve_t READ 60)"
+  conf="$(pve_run "pct config ${vmid}")" || return 1
+  grep -q '^lock:' <<<"$conf"
+}
+
+# ct_apply_device_rules <vmid> <unprivileged 0|1> <major...>
+# Modelled on the raw config the old scripts/proxmox-ve/hal0.sh wrote, not on
+# the rebuilt helper script, which differs (a test pins each difference).
+# For a guest with GPU devices: one cgroup2 allow rule per major, the memlock limit, and for a
+# privileged guest the unconfined AppArmor profile. Each line is appended only
+# if absent.
+ct_apply_device_rules() {
+  local vmid="${1:-}" unpriv="${2:-}" maj line cmd="" conf seen=" " _PVE_DEADLINE
+  _PVE_DEADLINE="$(_pve_t EXEC 120)"
+  shift 2 2>/dev/null || { _pve_err "ct_apply_device_rules: too few arguments"; return 1; }
+  _ct_require_owned "$vmid" "$CT_NONCE" || return 1
+  [[ "$unpriv" =~ ^[01]$ ]] || { _pve_err "unprivileged must be 0 or 1"; return 1; }
+  [[ $# -gt 0 ]] || { _pve_err "ct_apply_device_rules: no device majors given"; return 1; }
+  for maj in "$@"; do
+    _pve_uint_ok "$maj" || { _pve_err "bad device major: ${maj}"; return 1; }
+  done
+  conf="/etc/pve/lxc/${vmid}.conf"
+  for maj in "$@"; do
+    [[ "$seen" == *" ${maj} "* ]] && continue
+    seen+="${maj} "
+    line="lxc.cgroup2.devices.allow: c ${maj}:* rwm"
+    cmd+="{ grep -qxF -- $(_pve_q "$line") ${conf} || printf '%s\\n' $(_pve_q "$line") >> ${conf}; } && "
+  done
+  line="lxc.prlimit.memlock: unlimited"
+  cmd+="{ grep -qxF -- $(_pve_q "$line") ${conf} || printf '%s\\n' $(_pve_q "$line") >> ${conf}; }"
+  if [[ "$unpriv" != "1" ]]; then
+    line="lxc.apparmor.profile: unconfined"
+    cmd+=" && { grep -qxF -- $(_pve_q "$line") ${conf} || printf '%s\\n' $(_pve_q "$line") >> ${conf}; }"
+  fi
+  pve_run "$(ct_guard "$vmid" "$CT_NONCE")${cmd}"
+}
+
+# ct_start <vmid>
+ct_start() {
+  local _PVE_DEADLINE
+  _PVE_DEADLINE="$(_pve_t START 120)"
+  _ct_require_owned "${1:-}" "$CT_NONCE" || return 1
+  pve_run "$(ct_guard "$1" "$CT_NONCE")pct start $1"
+}
+
+# ct_exec <vmid> <command string>: root, no terminal. 120 s unless the caller
+# sets CT_EXEC_TIMEOUT for this call (the install does).
+ct_exec() {
+  local vmid="${1:-}" _PVE_DEADLINE
+  _PVE_DEADLINE="$(_pve_t EXEC 120 "${CT_EXEC_TIMEOUT:-}")"
+  _ct_require_owned "$vmid" "$CT_NONCE" || return 1
+  [[ $# -ge 2 ]] || { _pve_err "ct_exec: no command given"; return 1; }
+  pve_run "$(ct_guard "$vmid" "$CT_NONCE")pct exec ${vmid} -- ${_PVE_GUEST_ENV} bash -c $(_pve_q "$2")"
+}
+
+# What the network wait found, set by every call to ct_wait_network:
+#   reachable    the guest has a global address and resolves hal0.dev
+#   no_resolver  it has an address, but hal0.dev does not resolve
+#   no_address   it has no global address on its interface
+# CT_NET_REPORT_FILE, when set, is where a failed wait saves what the guest
+# reports (its addresses and /etc/resolv.conf), so the failure can be read after
+# the container is gone.
+CT_NET_STATE=""
+CT_NET_REPORT_FILE=""
+
+# _ct_net_has_address: stdin is the (untrusted) answer of `ip -o addr show scope
+# global`. True when some line is an address line: `inet` or `inet6`, an address
+# of hex digits, `:` and `.` with a prefix length, and `scope global`. The text
+# is only matched, never evaluated.
+_ct_net_has_address() {
+  local line re='[[:space:]]inet6?[[:space:]]+[0-9A-Fa-f:.]{2,45}/[0-9]{1,3}[[:space:]]+(.*[[:space:]])?scope[[:space:]]+global([[:space:]]|$)'
+  while IFS= read -r line; do
+    [[ "$line" =~ $re ]] && return 0
+  done
+  return 1
+}
+
+# _ct_net_has_global <vmid>: does the guest have a global IPv4 or IPv6 address?
+# Two guarded execs with fixed text; each answer is cut to 4096 characters before
+# it is looked at. Returns 0 for yes and 1 for no (a call that fails counts as no
+# address). Returns 2 for unknown: the guest has no `ip` program (exit 127), so
+# the caller goes on to the name lookup, as the old wait did.
+_ct_net_has_global() {
+  local out="" rc=0
+  out="$(ct_exec "$1" 'ip -o -4 addr show scope global' 2>/dev/null)" || rc=$?
+  [[ "$rc" -ne 127 ]] || return 2
+  [[ "$rc" -eq 0 ]] || out=""
+  ! _ct_net_has_address <<<"${out:0:4096}" || return 0
+  rc=0
+  out="$(ct_exec "$1" 'ip -o -6 addr show scope global' 2>/dev/null)" || rc=$?
+  [[ "$rc" -ne 127 ]] || return 2
+  [[ "$rc" -eq 0 ]] || out=""
+  _ct_net_has_address <<<"${out:0:4096}"
+}
+
+# _ct_net_report <vmid>: after a failed wait, one guarded exec reads the guest's
+# addresses and resolver file into CT_NET_REPORT_FILE. The answer is untrusted:
+# it is written to the file and nothing else, never evaluated; only printable
+# ASCII and newlines are kept, and at most 8 KB. The call has its own short
+# deadline (HAL0_MATRIX_TIMEOUT_NETREPORT, 15 s), and whatever goes wrong here
+# is lost and never an error: the destroy must not wait on it or fail because
+# of it.
+_ct_net_report() {
+  local out="" CT_EXEC_TIMEOUT
+  [[ -n "$CT_NET_REPORT_FILE" ]] || return 0
+  CT_EXEC_TIMEOUT="$(_pve_t NETREPORT 15)"
+  out="$(ct_exec "$1" 'ip -o addr show; echo "--- /etc/resolv.conf"; cat /etc/resolv.conf 2>&1' 2>&1)" || true
+  { printf '%s\n' "${out:0:16384}" | LC_ALL=C tr -cd '\11\12\40-\176' | head -c 8192 >"$CT_NET_REPORT_FILE"; } 2>/dev/null || true
+  return 0
+}
+
+# ct_wait_network <vmid> [seconds]: wait until the guest has a global address
+# AND resolves hal0.dev, bounded by the deadline (seconds, else
+# HAL0_MATRIX_TIMEOUT_NETWORK, else 120). It sets CT_NET_STATE to the state it
+# last saw. It tests the guest's address and its resolver, in that order. It does
+# NOT test that the release site answers over HTTPS or that a route to it works:
+# a guest that resolves the name but cannot reach it fails later, in the install.
+# Returns 0 only for reachable. On a failure it records `net_state=<state>` in
+# PVE_NOTE_FILE (when set), says which state it found with advice for it, and
+# saves the guest's own report (see _ct_net_report).
+ct_wait_network() {
+  local vmid="${1:-}" limit="${2:-}" start now err="" state="no_address" has
+  [[ -n "$limit" ]] || limit="$(_pve_t NETWORK 120)"
+  _pve_uint_ok "$limit" || { _pve_err "bad timeout"; return 1; }
+  _ct_require_owned "$vmid" "$CT_NONCE" || return 1
+  CT_NET_STATE=""
+  start="$(date +%s)"
+  while :; do
+    has=0
+    _ct_net_has_global "$vmid" || has=$?
+    # 0: has an address; 2: unknown (no `ip` program), so ask the resolver anyway
+    if [[ "$has" -eq 0 || "$has" -eq 2 ]]; then
+      if err="$(ct_exec "$vmid" 'getent hosts hal0.dev' 2>&1 >/dev/null)"; then
+        CT_NET_STATE="reachable"
+        return 0
+      fi
+      state="no_resolver"
+    else
+      state="no_address"
+    fi
+    now="$(date +%s)"
+    if ((now - start >= limit)); then
+      break
+    fi
+    sleep "${HAL0_MATRIX_POLL_SLEEP:-2}"
+  done
+  # shellcheck disable=SC2034  # read by the caller
+  CT_NET_STATE="$state"
+  [[ -z "$PVE_NOTE_FILE" ]] || printf 'net_state=%s\n' "$state" >>"$PVE_NOTE_FILE" 2>/dev/null || true
+  if [[ "$state" == "no_resolver" ]]; then
+    _pve_err "guest ${vmid} did not resolve hal0.dev within ${limit}s; if the host's resolver does not answer from a new container, set HAL0_MATRIX_NAMESERVER"
+    err="$(printf '%s' "${err:0:300}" | LC_ALL=C tr -cd '\40-\176')" || err=""
+    [[ -z "$err" ]] || _pve_err "last error: ${err}"
+  else
+    _pve_err "guest ${vmid} has no global address on its interface after ${limit}s; check that the bridge (HAL0_MATRIX_BRIDGE) is the right one and that DHCP answers on it"
+  fi
+  _ct_net_report "$vmid"
+  return 1
+}
+
+# ct_push <vmid> <local> <remote>: stream a local file into the guest.
+ct_push() {
+  local vmid="${1:-}" src="${2:-}" dst="${3:-}" _PVE_DEADLINE
+  _PVE_DEADLINE="$(_pve_t PULL 300)"
+  _ct_require_owned "$vmid" "$CT_NONCE" || return 1
+  [[ -f "$src" ]] || { _pve_err "no such local file: ${src}"; return 1; }
+  [[ -n "$dst" ]] || { _pve_err "ct_push: no remote path"; return 1; }
+  _pve_ssh 1 "$(ct_guard "$vmid" "$CT_NONCE")pct exec ${vmid} -- ${_PVE_GUEST_ENV} bash -c $(_pve_q "cat > $(_pve_q "$dst")")" <"$src"
+}
+
+# ct_pull <vmid> <remote> <local>: stream a guest file out.
+ct_pull() {
+  local vmid="${1:-}" src="${2:-}" dst="${3:-}" tmp rc _PVE_DEADLINE
+  _PVE_DEADLINE="$(_pve_t PULL 300)"
+  _ct_require_owned "$vmid" "$CT_NONCE" || return 1
+  [[ -n "$src" && -n "$dst" ]] || { _pve_err "ct_pull: need a remote and a local path"; return 1; }
+  tmp="$(mktemp "${dst}.XXXXXX")" || { _pve_err "cannot create a temporary file beside ${dst}"; return 1; }
+  # The path may come from the guest: only a regular file is read (test -f is
+  # false for a device, a FIFO or a symlink to one), in the same remote command.
+  if _PVE_STREAM="$(basename -- "$dst")" pve_run "$(ct_guard "$vmid" "$CT_NONCE")pct exec ${vmid} -- ${_PVE_GUEST_ENV} bash -c $(_pve_q "test -f $(_pve_q "$src") && cat $(_pve_q "$src")")" >"$tmp"; then
+    mv -f -- "$tmp" "$dst"
+  else
+    rc=$?
+    rm -f -- "$tmp"
+    return "$rc"
+  fi
+}
+
+# ct_destroy <vmid> <nonce>: refuses unless ct_owned (with the nonce),
+# re-checked before each attempt.
+# Sequence from scripts/fresh-test-ct.sh: SIGKILL the lxc-start monitor (a
+# privileged guest holding /dev/kfd hangs `lxc-stop --kill`), clear a stale
+# lock, purge-destroy, retry once. "Gone" means the config file is absent on
+# the host; an ssh failure is "unknown" and never counts as gone. The [l] in
+# the pkill pattern keeps the remote shell's own command line from matching it.
+ct_destroy() {
+  local vmid="${1:-}" nonce="${2:-}" attempt out="" state="" _PVE_DEADLINE
+  _PVE_DEADLINE="$(_pve_t DESTROY 300)"
+  for attempt in 1 2; do
+    _ct_require_owned "$vmid" "$nonce" || return 1
+    out="$(pve_run "$(ct_guard "$vmid" "$nonce"){ pkill -9 -f '[l]xc-start -F -n ${vmid}( |\$)' 2>/dev/null; sleep 2; rm -f /run/lock/lxc/pve-config-${vmid}.lock; pct destroy ${vmid} --force --purge; }" 2>&1)" || true
+    state="$(_ct_presence "$vmid")"
+    [[ "$state" == "absent" ]] && return 0
+    [[ "$attempt" == "1" ]] && sleep "${HAL0_MATRIX_DESTROY_SLEEP:-3}"
+  done
+  _pve_err "guest ${vmid} is still present after destroy (state: ${state}); destroy output:"
+  printf '%s\n' "$out" >&2
+  _pve_err "destroy it by hand: pct destroy ${vmid} --force --purge"
+  return 1
+}

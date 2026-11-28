@@ -1,0 +1,377 @@
+"""The install-matrix report (scripts/install-matrix/report.py)."""
+
+from __future__ import annotations
+
+import json
+import os
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+import pytest
+
+REPO = Path(__file__).resolve().parents[2]
+REPORT = REPO / "scripts" / "install-matrix" / "report.py"
+
+
+def make_result(shape: str, started: str, **over) -> dict:
+    res = {
+        "schema": "hal0.install-matrix.v1",
+        "shape": shape,
+        "row": None,
+        "source": "stable",
+        "hal0_version": "1.8.2",
+        "started_at": started,
+        "install_exit_code": 0,
+        "timed_out": False,
+        "idle_timed_out": False,
+        "questions_asked": 2,
+        "elapsed_seconds": 321,
+        "step_durations_seconds": {"Fetch": 10, "Install runners": 200.5, "Doctor": 3},
+        "last_step": "Doctor",
+        "disk_used_bytes": 12_345_000_000,
+        "bytes_downloaded": 5_000_000_000,
+        "slot_count": 3,
+        "slots": ["agent", "brain", "memory"],
+        "doctor": {"ok": 20, "warn": 2, "critical": 0, "exit": 0},
+        "failed_units": [],
+        "api_health_seconds": 4.5,
+        "chat": {"ok": True, "first_token_seconds": 1.25, "model": "qwen"},
+        "memory": {"write_ok": True, "read_ok": False},
+        "hermes": {"reply_ok": True, "reply_seconds": 7.5},
+    }
+    res.update(over)
+    return res
+
+
+def put(results: Path, name: str, payload: dict | str) -> None:
+    d = results / name
+    d.mkdir(parents=True)
+    body = payload if isinstance(payload, str) else json.dumps(payload)
+    (d / "result.json").write_text(body)
+
+
+def run(
+    results: Path, *extra: str, env: dict[str, str] | None = None
+) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        [sys.executable, "-I", str(REPORT), str(results), *extra],
+        capture_output=True, text=True, check=False, timeout=30,
+        env={**os.environ, **env} if env else None,
+    )  # fmt: skip
+
+
+def table_rows(out: str) -> list[str]:
+    lines = out.split("\n\n")[0].splitlines()
+    return [ln for ln in lines[2:] if ln.startswith("|")]
+
+
+def test_table_has_one_row_per_result(tmp_path):
+    put(
+        tmp_path,
+        "20261128T100000Z-u2604-cpu-terminal",
+        make_result("u2604-cpu-terminal", "2026-11-28T10:00:00Z"),
+    )
+    put(tmp_path, "20261128T110000Z-u2604-gpu", make_result("u2604-gpu", "2026-11-28T11:00:00Z"))
+    proc = run(tmp_path)
+    assert proc.returncode == 0, proc.stderr
+    rows = table_rows(proc.stdout)
+    assert len(rows) == 2
+    gpu = next(r for r in rows if "u2604-gpu" in r)
+    for cell in (
+        "stable 1.8.2",
+        "5:21",
+        "Install runners 200.5s",
+        "12.3",
+        "5.0",
+        "20/2/0",
+        "4.5",
+        "1.25s qwen",
+        "ok/fail",
+        "7.5",
+    ):
+        assert cell in gpu, cell
+
+
+def test_rows_in_shape_order(tmp_path):
+    # Written newest-first and in reverse row order; rows 3, 1, 2 plus an unknown shape.
+    put(tmp_path, "a", make_result("u2604-gpu", "2026-11-28T09:00:00Z"))
+    put(tmp_path, "b", make_result("mystery-shape", "2026-11-28T09:30:00Z"))
+    put(tmp_path, "c", make_result("u2604-cpu-terminal", "2026-11-28T10:00:00Z"))
+    put(tmp_path, "d", make_result("u2604-cpu-unattended", "2026-11-28T11:00:00Z"))
+    proc = run(tmp_path)
+    order = [r.split("|")[1].strip() for r in table_rows(proc.stdout)]
+    assert order == ["u2604-cpu-unattended", "u2604-cpu-terminal", "u2604-gpu", "mystery-shape"]
+
+
+def test_latest_per_shape_keeps_newest(tmp_path):
+    put(
+        tmp_path,
+        "z-old-name",
+        make_result("u2604-gpu", "2026-11-28T12:00:00Z", hal0_version="1.9.0"),
+    )
+    put(
+        tmp_path,
+        "a-new-name",
+        make_result("u2604-gpu", "2026-11-28T08:00:00Z", hal0_version="1.8.0"),
+    )
+    both = run(tmp_path)
+    assert len(table_rows(both.stdout)) == 2
+    latest = run(tmp_path, "--latest-per-shape")
+    rows = table_rows(latest.stdout)
+    assert len(rows) == 1
+    assert "1.9.0" in rows[0] and "1.8.0" not in rows[0]
+
+
+def test_missing_values_print_dash(tmp_path):
+    bare = make_result(
+        "u2604-gpu", "2026-11-28T10:00:00Z", hal0_version=None, install_exit_code=None,
+        elapsed_seconds=None, step_durations_seconds=None, disk_used_bytes=None,
+        bytes_downloaded=None, questions_asked=None, slot_count=None, doctor=None,
+        api_health_seconds=None, chat=None, memory=None, hermes=None,
+    )  # fmt: skip
+    put(tmp_path, "x", bare)
+    put(tmp_path, "bad-json", "{not json")
+    put(tmp_path, "bad-schema", {"schema": "other.v9", "shape": "u2604-gpu"})
+    proc = run(tmp_path)
+    assert proc.returncode == 0
+    rows = table_rows(proc.stdout)
+    assert len(rows) == 1
+    cells = [c.strip() for c in rows[0].strip("|").split("|")]
+    assert cells[0] == "u2604-gpu"
+    assert cells[1:].count("-") >= 12
+    assert proc.stderr.count("\n") == 2  # one line per skipped file
+
+
+def test_failed_run_listed_with_last_step(tmp_path):
+    put(tmp_path, "ok", make_result("u2604-cpu-terminal", "2026-11-28T10:00:00Z"))
+    put(
+        tmp_path, "bad",
+        make_result(
+            "u2604-gpu", "2026-11-28T11:00:00Z", install_exit_code=1, last_step="Install runners",
+            failed_units=["hal0-api.service", "hal0-x.service"],
+        ),
+    )  # fmt: skip
+    proc = run(tmp_path)
+    failures = proc.stdout.split("\n\n", 1)[1]
+    assert "u2604-gpu" in failures
+    assert "Install runners" in failures
+    assert "hal0-api.service" in failures
+    assert "hal0-x.service" not in failures
+    assert "u2604-cpu-terminal" not in failures
+
+
+def test_null_exit_code_listed_as_failed(tmp_path):
+    put(
+        tmp_path, "crashed",
+        make_result(
+            "u2604-gpu", "2026-11-28T11:00:00Z", install_exit_code=None, timed_out=None,
+            idle_timed_out=None, last_step="Install runners", failed_units=["hal0-api.service"],
+        ),
+    )  # fmt: skip
+    failures = run(tmp_path).stdout.split("\n\n", 1)[1]
+    assert "u2604-gpu" in failures
+    assert "no driver result" in failures
+    assert "Install runners" in failures
+    assert "hal0-api.service" in failures
+
+
+def test_exit_zero_with_failed_units_listed(tmp_path):
+    put(
+        tmp_path,
+        "units",
+        make_result("u2604-gpu", "2026-11-28T11:00:00Z", failed_units=["hal0-x.service"]),
+    )
+    put(tmp_path, "clean", make_result("u2604-cpu-terminal", "2026-11-28T10:00:00Z"))
+    failures = run(tmp_path).stdout.split("\n\n", 1)[1]
+    assert "failed units" in failures
+    assert "hal0-x.service" in failures
+    assert "u2604-cpu-terminal" not in failures
+
+
+def test_an_aborted_run_is_failed_and_shows_reason_and_detail(tmp_path):
+    put(
+        tmp_path, "aborted",
+        make_result(
+            "u2604-gpu", "2026-11-28T11:00:00Z", aborted="host_memory_low",
+            abort_detail="host memory fell below 12 GB (5 GB available)",
+        ),
+    )  # fmt: skip
+    put(tmp_path, "clean", make_result("u2604-cpu-terminal", "2026-11-28T10:00:00Z"))
+    failures = run(tmp_path).stdout.split("\n\n", 1)[1]
+    assert "u2604-gpu" in failures
+    assert "aborted: host_memory_low" in failures
+    assert "host memory fell below 12 GB (5 GB available)" in failures
+    assert "u2604-cpu-terminal" not in failures
+
+
+def test_a_run_that_ended_before_the_install_shows_why_not_an_empty_row(tmp_path):
+    put(
+        tmp_path, "early",
+        make_result(
+            "u2604-cpu-unattended", "2026-11-28T11:00:00Z", aborted="no_network",
+            abort_detail="no_resolver: the guest has an address but hal0.dev did not resolve",
+            install_exit_code=None, elapsed_seconds=None, step_durations_seconds=None,
+            disk_used_bytes=None, bytes_downloaded=None, slot_count=None, doctor=None,
+            api_health_seconds=None, chat=None, memory=None, hermes=None, last_step=None,
+        ),
+    )  # fmt: skip
+    out = run(tmp_path).stdout
+    (row,) = table_rows(out)
+    assert row.split(" | ")[2] == "no network"
+    assert "aborted: no_network" in out and "no_resolver" in out
+
+
+def test_a_number_still_shows_as_the_exit_cell_when_the_install_ran(tmp_path):
+    put(
+        tmp_path, "ran",
+        make_result("u2604-gpu", "2026-11-28T11:00:00Z", install_exit_code=1, aborted="start_failed"),
+    )  # fmt: skip
+    (row,) = table_rows(run(tmp_path).stdout)
+    assert row.split(" | ")[2] == "1"
+
+
+def test_a_hostile_reason_is_not_shown_raw_in_the_exit_cell(tmp_path):
+    put(
+        tmp_path, "evil",
+        make_result(
+            "u2604-gpu", "2026-11-28T11:00:00Z", install_exit_code=None,
+            aborted="[x](http://evil.example)\x1b[31m", abort_detail=None,
+        ),
+    )  # fmt: skip
+    out = run(tmp_path).stdout
+    assert "\x1b" not in out and "[x](" not in out
+
+
+def test_a_null_abort_does_not_fail_a_clean_run(tmp_path):
+    put(
+        tmp_path, "ok",
+        make_result("u2604-gpu", "2026-11-28T11:00:00Z", aborted=None, abort_detail=None),
+    )  # fmt: skip
+    assert "None." in run(tmp_path).stdout
+
+
+# --- F4: an input over the cap is never read ---------------------------------
+
+
+def test_a_result_over_the_cap_is_skipped_with_one_line_on_stderr(tmp_path):
+    put(tmp_path, "ok", make_result("u2604-cpu-terminal", "2026-11-28T10:00:00Z"))
+    big = make_result("u2604-gpu", "2026-11-28T11:00:00Z", hal0_version="v" * 5000)
+    put(tmp_path, "big", big)
+    proc = run(tmp_path, env={"HAL0_MATRIX_MAX_INPUT_BYTES": "2000"})
+    assert proc.returncode == 0
+    assert len(table_rows(proc.stdout)) == 1
+    assert proc.stderr.count("\n") == 1 and "big" in proc.stderr
+
+
+# --- F7: what a guest wrote never reaches the terminal or the Markdown raw ---
+
+# OSC 52 (a clipboard write), a bare CR, a CSI introducer (C1), a Markdown link, HTML,
+# emphasis, a code span, a table pipe, a right-to-left override.
+HOSTILE = (
+    "\x1b]52;c;ZXZpbA==\x07hi\rEVIL \x9b31m [click](http://evil.example) <img src=x onerror=1> "
+    "*bold* _it_ `code` a|b ‮txt\x7f"
+)
+
+
+def _is_clean(out: str) -> None:
+    assert not [c for c in out if (ord(c) < 0x20 and c != "\n") or 0x7F <= ord(c) <= 0x9F]
+    assert "‮" not in out
+    assert not re.search(r"(?<!\\)<img", out), "no HTML"
+    assert not re.search(r"(?<!\\)\]\(", out), "no link"
+    assert not re.search(r"(?<!\\)`", out), "no code span"
+    assert not re.search(r"(?<!\\)\*", out), "no emphasis"
+    # every * _ [ ] < > | that the guest sent is escaped, so none stands bare
+    # (the report's own table pipes and separators are the only bare pipes)
+    assert not re.search(r"(?<!\\)<", out)
+    assert not re.search(r"(?<!\\)\[", out)
+
+
+def _out(tmp_path, **over):
+    put(tmp_path, "x", make_result("u2604-gpu", "2026-11-28T11:00:00Z", **over))
+    proc = run(tmp_path)
+    assert proc.returncode == 0, proc.stderr
+    return proc.stdout
+
+
+def test_the_reviewers_probe_p4_is_neutralised(tmp_path):
+    out = _out(tmp_path, hal0_version=HOSTILE)
+    _is_clean(out)
+    assert "ZXZpbA" in out or "hi" in out  # the text itself is kept, only made harmless
+
+
+@pytest.mark.parametrize(
+    "field",
+    ["source", "last_step", "started_at", "install_exit_code", "slot_count", "questions_asked"],
+)
+def test_every_plain_field_is_neutralised(tmp_path, field):
+    out = _out(tmp_path, **{"install_exit_code": 1, field: HOSTILE})
+    _is_clean(out)
+
+
+def test_step_names_failed_units_and_models_are_neutralised(tmp_path):
+    out = _out(
+        tmp_path,
+        install_exit_code=1,
+        step_durations_seconds={HOSTILE: 9, "Doctor": 3},
+        failed_units=[HOSTILE],
+        chat={"ok": True, "first_token_seconds": 1.5, "model": HOSTILE},
+        last_step=HOSTILE,
+    )
+    _is_clean(out)
+
+
+def test_abort_reason_and_detail_are_neutralised(tmp_path):
+    out = _out(tmp_path, aborted=HOSTILE, abort_detail=HOSTILE)
+    _is_clean(out)
+    assert "aborted:" in out
+
+
+def test_values_that_are_not_strings_are_neutralised_too(tmp_path):
+    out = _out(
+        tmp_path, hal0_version={"a": HOSTILE}, source=[HOSTILE], slot_count={"x": "<img src=x>"}
+    )
+    _is_clean(out)
+
+
+def test_a_value_is_cut_to_80_characters(tmp_path):
+    out = _out(tmp_path, hal0_version="a" * 500, source="[" * 500)
+    longest = max(len(m) for m in re.findall(r"a+", out))
+    assert longest <= 80
+    cell = out.split("|")[2]  # source / version
+    assert all(len(part) <= 80 + 1 for part in cell.split(" ") if part)
+
+
+def test_ordinary_values_are_unchanged(tmp_path):
+    out = _out(tmp_path, hal0_version="1.8.2", source="stable")
+    assert "stable 1.8.2" in out
+
+
+def test_a_deeply_nested_result_is_skipped_not_a_crash(tmp_path):
+    put(tmp_path, "ok", make_result("u2604-cpu-terminal", "2026-11-28T10:00:00Z"))
+    put(tmp_path, "deep", "[" * 200000)
+    proc = run(tmp_path)
+    assert proc.returncode == 0, proc.stderr
+    assert len(table_rows(proc.stdout)) == 1
+    assert proc.stderr.count("\n") == 1
+
+
+def test_a_non_finite_number_does_not_crash_the_report(tmp_path):
+    body = json.dumps(make_result("u2604-gpu", "2026-11-28T10:00:00Z"))
+    body = body.replace('"elapsed_seconds": 321', '"elapsed_seconds": Infinity')
+    body = body.replace('"api_health_seconds": 4.5', '"api_health_seconds": NaN')
+    put(tmp_path, "inf", body)
+    proc = run(tmp_path)
+    assert proc.returncode == 0, proc.stderr
+    assert len(table_rows(proc.stdout)) == 1
+
+
+def test_a_result_that_is_a_fifo_is_skipped_not_waited_for(tmp_path):
+    put(tmp_path, "ok", make_result("u2604-cpu-terminal", "2026-11-28T10:00:00Z"))
+    (tmp_path / "pipe").mkdir()
+    os.mkfifo(tmp_path / "pipe" / "result.json")
+    proc = run(tmp_path)
+    assert proc.returncode == 0
+    assert len(table_rows(proc.stdout)) == 1
+    assert proc.stderr.count("\n") == 1

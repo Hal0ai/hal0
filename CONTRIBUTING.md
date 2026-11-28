@@ -265,6 +265,13 @@ and are **not** filtered out by `make test` — e.g.
 pytest tests/ -m "not integration and not podman and not systemd and not network"
 ```
 
+A test must stay harmless when the code under test is wrong, because that
+is what a red run is. It never reads from an endless source (`/dev/zero`,
+`/dev/urandom`, `yes`): a stand-in produces a bounded amount, and a fake
+that stands in for a remote program cuts its own output. Every subprocess a
+test starts has a timeout. A test that can write a lot keeps its temporary
+files off a memory-backed `/tmp` (set `TMPDIR` to a directory on disk).
+
 (`integration` is registered by `tests/slots/conftest.py` and
 `tests/openwebui/conftest.py`; today only
 `tests/openwebui/test_prewire_smoke.py` uses it, and it skips itself
