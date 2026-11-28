@@ -833,3 +833,52 @@ def test_a_storage_folder_fixed_by_a_flag_or_variable_never_enters_chosen(
     s = run(custom(catalog, usable_facts, over=over), "ENTER", "ENTER", "SPACE", *"/srv/m", "ENTER")
     s = run(s, "ENTER", "ENTER", "ENTER", "ENTER")
     assert catalog.questions["model_store"].answer_key not in chosen(s)
+
+
+_NPU_ERROR = "the NPU folder must be inside the model folder (/srv/pool/models)"
+
+
+def _npu_storage(catalog: Catalog, npu_facts: Facts) -> State:
+    s = run(custom(catalog, npu_facts), "ENTER", "ENTER", "SPACE", *"/srv/pool/models", "ENTER")
+    return open_field(s, "flm_store")
+
+
+def test_an_npu_folder_inside_the_store_is_accepted(catalog: Catalog, npu_facts: Facts) -> None:
+    s = run(_npu_storage(catalog, npu_facts), *"/srv/pool/models/npu", "ENTER")
+    assert view(s).error is None
+    assert chosen(s)["model_store.flm_path"] == "/srv/pool/models/npu"
+
+
+@pytest.mark.parametrize("typed", ["/srv/other/npu", "/srv/pool/models", "/srv/pool/models2/npu"])
+def test_an_npu_folder_not_strictly_inside_the_store_is_refused(
+    catalog: Catalog, npu_facts: Facts, typed: str
+) -> None:
+    s = run(_npu_storage(catalog, npu_facts), *typed, "ENTER")
+    assert view(s).error == _NPU_ERROR
+    assert "model_store.flm_path" not in chosen(s)
+
+
+def test_an_npu_folder_the_folder_rules_refuse_is_refused_for_that_reason(
+    catalog: Catalog, npu_facts: Facts
+) -> None:
+    s = run(_npu_storage(catalog, npu_facts), *"/srv/pool/models/a(b", "ENTER")
+    assert "may only contain" in str(view(s).error)
+
+
+def test_changing_the_store_drops_an_npu_folder_no_longer_inside_it(
+    catalog: Catalog, npu_facts: Facts
+) -> None:
+    s = run(_npu_storage(catalog, npu_facts), *"/srv/pool/models/npu", "ENTER")
+    s = open_field(s, "model_store")
+    s = run(s, *"/srv/new/models", "ENTER", "ENTER")
+    assert "model_store.flm_path" not in chosen(s)
+    assert chosen(s)["model_store.path"] == "/srv/new/models"
+
+
+def test_changing_the_store_keeps_an_npu_folder_still_inside_it(
+    catalog: Catalog, npu_facts: Facts
+) -> None:
+    s = run(_npu_storage(catalog, npu_facts), *"/srv/pool/models/npu", "ENTER")
+    s = open_field(s, "model_store")
+    s = run(s, *"/srv/pool", "ENTER", "ENTER")
+    assert chosen(s)["model_store.flm_path"] == "/srv/pool/models/npu"

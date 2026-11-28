@@ -63,6 +63,17 @@ def _inside(path: str, tree: str) -> bool:
     return PurePosixPath(tree) in (PurePosixPath(path), *PurePosixPath(path).parents)
 
 
+def strictly_inside(path: object, store: object) -> bool:
+    """Whether path is a proper sub-path of store, compared on normalised paths by component."""
+    if not isinstance(path, str) or not isinstance(store, str):
+        return False
+    if not (path.startswith("/") and store.startswith("/")):
+        return False
+    return (
+        PurePosixPath(posixpath.normpath(store)) in PurePosixPath(posixpath.normpath(path)).parents
+    )
+
+
 def check_store_text(text: str) -> tuple[str, str | None]:
     """The model folder's text rules, without looking at the disk."""
     path, error = _clean_path(text, "the folder", percent=True)

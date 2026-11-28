@@ -37,7 +37,7 @@ from .flow_model import (
     record_answer,
     set_by,
 )
-from .paths import validate_folder
+from .paths import strictly_inside, validate_folder
 
 _IMAGE_JOB = "images"
 _ASSISTANT_JOB = "hermes"
@@ -103,6 +103,12 @@ def _prune(s: State) -> State:
         q = _question(s, qid)
         if q is not None and _job_off(s, job):
             keep.pop(q.answer_key, None)
+    pruned = replace(s, answers=keep)
+    npu, store = _question(s, "flm_store"), _question(s, "model_store")
+    if npu is not None and store is not None and npu.answer_key in keep:
+        inside = strictly_inside(keep[npu.answer_key], get(effective_doc(pruned), store.answer_key))
+        if not inside:
+            del keep[npu.answer_key]
     return replace(s, answers=keep)
 
 
@@ -374,17 +380,27 @@ def _check_origins(text: str) -> tuple[object, str | None]:
 
 _VALIDATORS: dict[str, Callable[[str], tuple[object, str | None]]] = {
     "model_store": validate_folder,
-    "flm_store": validate_folder,
     "hostname": _check_hostname,
     "port": _check_port,
     "allowed_origins": _check_origins,
 }
 
 
+def _check_npu_folder(s: State, text: str) -> tuple[object, str | None]:
+    """The NPU folder must pass the folder rules and lie strictly inside the model folder."""
+    path, error = validate_folder(text)
+    if error is not None:
+        return path, error
+    store = get(effective_doc(s), key_of(s, "model_store"))
+    if not strictly_inside(path, store):
+        return path, f"the NPU folder must be inside the model folder ({store})"
+    return path, None
+
+
 def commit_field(s: State, text: str) -> State:
     """Check a typed value; keep the field open with the reason when it is bad."""
     qid = s.field.removeprefix(_FIELD)
-    value, error = _VALIDATORS[qid](text)
+    value, error = _check_npu_folder(s, text) if qid == "flm_store" else _VALIDATORS[qid](text)
     if error is not None:
         return replace(s, error=error)
     done = replace(s, editing=None, field="", error=None)

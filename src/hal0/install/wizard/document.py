@@ -15,13 +15,13 @@ from __future__ import annotations
 import copy
 import json
 import os
-import posixpath
 import secrets
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 
 from .catalog import Catalog
+from .paths import strictly_inside
 
 DOCUMENT_VERSION = 1
 TERMINAL_KEY = "apps.hermes.terminal_tool"
@@ -304,17 +304,6 @@ def effective(
     return doc
 
 
-def _strictly_inside(path: object, store: object) -> bool:
-    """Whether path is a proper sub-path of store, compared on normalised paths by component."""
-    if not isinstance(path, str) or not isinstance(store, str):
-        return False
-    if not (path.startswith("/") and store.startswith("/")):
-        return False
-    return (
-        PurePosixPath(posixpath.normpath(store)) in PurePosixPath(posixpath.normpath(path)).parents
-    )
-
-
 def _drop_outside_flm_path(doc: Document, over: Sequence[Override]) -> None:
     """Keep an NPU folder from the variable out of the document unless it is inside the store.
 
@@ -325,7 +314,7 @@ def _drop_outside_flm_path(doc: Document, over: Sequence[Override]) -> None:
     named = [o for o in over if o.key == FLM_KEY]
     if not named or named[-1].source != FLM_VARIABLE:
         return
-    if _strictly_inside(named[-1].value, get(doc, STORE_KEY)):
+    if strictly_inside(named[-1].value, get(doc, STORE_KEY)):
         return
     store = doc.get("model_store")
     if isinstance(store, dict):
