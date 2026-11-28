@@ -40,7 +40,7 @@ from .flow_model import (
     set_by,
     short_on_space,
 )
-from .paths import check_copy, validate_folder
+from .paths import check_copy, check_store_text, validate_folder
 
 _DOWNLOAD_MBIT = 100
 _NPU_JOB = "npu"
@@ -204,11 +204,11 @@ def folder_rows(s: State) -> tuple[Row, ...]:
         home = disk_of(default, s.facts.disks)
         rows.append(_disk_row("preset", default, home, total, None))
         shown.append(home)
-    others = sorted(
-        (d for d in s.facts.disks if d not in shown), key=lambda d: d.free_gb, reverse=True
-    )
-    for d in others[:_OTHER_DISKS]:
-        rows.append(_disk_row(d.mount, posixpath.join(d.mount, "hal0/models"), d, total, None))
+    offered = [(d, posixpath.join(d.mount, "hal0/models")) for d in s.facts.disks if d not in shown]
+    offered = [(d, p) for d, p in offered if check_store_text(p)[1] is None]
+    offered.sort(key=lambda dp: dp[0].free_gb, reverse=True)
+    for d, p in offered[:_OTHER_DISKS]:
+        rows.append(_disk_row(d.mount, p, d, total, None))
     rows.append(make_row("other", "Type another folder...", "", "text", None))
     return tuple(rows)
 

@@ -10,8 +10,38 @@ import json
 import os
 import posixpath
 import stat
+import string
+from pathlib import PurePosixPath
 
 _COPY_MAX_BYTES = 2**20  # an answers document is far smaller than this
+
+# The installer's reader refuses these model folders as text; the wizard says so on the screen.
+STORE_PATH_MAX = 4096
+STORE_MIN_COMPONENTS = 2
+STORE_PATH_PUNCTUATION = "_.+@,:~= /-"  # allowed besides ASCII letters and digits
+STORE_ALLOWED_TREE = "/var/lib/hal0/models"  # allowed although it is inside /var/lib
+STORE_REFUSED_TREES = (
+    "/etc",
+    "/usr",
+    "/bin",
+    "/sbin",
+    "/lib",
+    "/lib32",
+    "/lib64",
+    "/libx32",
+    "/boot",
+    "/root",
+    "/proc",
+    "/sys",
+    "/dev",
+    "/run",
+    "/var/run",
+    "/var/log",
+    "/var/lib",
+)
+_ALLOWED_CHARS = frozenset(string.ascii_letters + string.digits + STORE_PATH_PUNCTUATION)
+_BAD_CHARS = "the folder may only contain letters, digits, spaces and _ . + @ , : ~ = / -"
+_TOO_SHALLOW = "the folder must be at least two levels deep, for example /data/models"
 
 
 def _clean_path(text: str, what: str, *, percent: bool = False) -> tuple[str, str | None]:
@@ -28,9 +58,35 @@ def _clean_path(text: str, what: str, *, percent: bool = False) -> tuple[str, st
     return posixpath.normpath(path), None
 
 
+def _inside(path: str, tree: str) -> bool:
+    """Whether path is the tree or lies under it, compared by component."""
+    return PurePosixPath(tree) in (PurePosixPath(path), *PurePosixPath(path).parents)
+
+
+def check_store_text(text: str) -> tuple[str, str | None]:
+    """The model folder's text rules, without looking at the disk."""
+    path, error = _clean_path(text, "the folder", percent=True)
+    if error is not None:
+        return path, error
+    typed = text.strip()
+    if any(c not in _ALLOWED_CHARS for c in typed):
+        return path, _BAD_CHARS
+    if ".." in typed.split("/"):
+        return path, "the folder must not contain .."
+    if len(typed) > STORE_PATH_MAX:
+        return path, "the folder is too long"
+    if len(PurePosixPath(path).parts) - 1 < STORE_MIN_COMPONENTS:
+        return path, _TOO_SHALLOW
+    if not _inside(path, STORE_ALLOWED_TREE):
+        tree = next((t for t in STORE_REFUSED_TREES if _inside(path, t)), None)
+        if tree is not None:
+            return path, f"the folder cannot be inside {tree}"
+    return path, None
+
+
 def validate_folder(text: str) -> tuple[str, str | None]:
     """The cleaned folder path and the reason it cannot be used, or None."""
-    path, error = _clean_path(text, "the folder", percent=True)
+    path, error = check_store_text(text)
     if error is not None:
         return path, error
     ancestor = path

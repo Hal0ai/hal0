@@ -670,3 +670,21 @@ def test_passing_the_folder_screen_puts_the_folder_in_chosen(
 ) -> None:
     s = run(start(catalog, usable_facts), "ENTER", "ENTER")
     assert chosen(s)[catalog.questions["model_store"].answer_key] == "/var/lib/hal0/models"
+
+
+def test_a_disk_whose_folder_the_installer_would_refuse_is_not_offered(
+    catalog: Catalog, usable_facts: Facts
+) -> None:
+    facts = replace(
+        usable_facts,
+        disks=(
+            Disk("/", 100.0, 500.0),
+            Disk("/media/u/My Disk (1)", 900.0, 1000.0),
+            Disk("/var/lib/pool", 800.0, 1000.0),
+            Disk("/srv/pool", 700.0, 1000.0),
+        ),
+    )
+    v = view(run(start(catalog, facts), "ENTER"))
+    values = [r.value for r in v.rows]
+    assert "/srv/pool/hal0/models" in values
+    assert not any("My Disk" in str(x) or "/var/lib/pool" in str(x) for x in values)
