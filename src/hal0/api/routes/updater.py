@@ -43,8 +43,8 @@ from typing import Any, get_args
 import structlog
 from fastapi import APIRouter, Request
 
-from hal0 import __version__
 from hal0.api.middleware.error_codes import BadRequest, Hal0Error
+from hal0.build_info import serving_release
 from hal0.config import paths
 from hal0.config.loader import hal0_config_txn, load_hal0_config
 from hal0.config.schema import Hal0Config
@@ -1009,18 +1009,22 @@ async def rollback_update(request: Request) -> dict[str, Any]:
     #     it is a data-hazard warning on an emergency path, and it was being
     #     discarded before any operator could see it.
     # Plus the restart contract (#2027/#2145): this process IS the not-yet-
-    # restarted daemon, so its own ``__version__`` is authoritative for what
-    # is still serving. ``restart_required`` is False only when the tree we
-    # just swapped to is the very version already running (a double-rollback
-    # bounced back, or a dev tree without versioned dirs is indeterminate →
-    # True, the safe answer).
+    # restarted daemon, so the release it started from is authoritative for
+    # what is still serving. That is the full release string, not
+    # ``__version__``: a nightly and the stable release of the same number
+    # share a ``__version__``, and a rollback between the two reported "no
+    # restart needed" while the old tree kept serving (#3969).
+    # ``restart_required`` is False only when the tree we just swapped to is
+    # the very release already running (a double-rollback bounced back, or a
+    # dev tree without versioned dirs is indeterminate → True, the safe answer).
     rolled_back_to = str(result.get("rolled_back_to") or "")
     reverted_version = Path(rolled_back_to).name.removeprefix("hal0-") if rolled_back_to else ""
+    running = serving_release()
     return {
         "rolled_back": True,
         "channel": channel,
-        "running_version": __version__,
-        "restart_required": reverted_version != __version__,
+        "running_version": running,
+        "restart_required": reverted_version != running,
         **result,
     }
 

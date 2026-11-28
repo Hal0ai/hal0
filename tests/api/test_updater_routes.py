@@ -529,6 +529,62 @@ def test_rollback_restart_not_required_when_bounced_back_to_running_version(
     assert body["running_version"] == __version__
 
 
+def test_rollback_from_nightly_to_same_numbered_stable_requires_restart(
+    isolated_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#3969: a nightly and the stable release of one number share
+    ``__version__``. The daemon started from the nightly, so rolling back to
+    the stable tree must still say a restart is required, and name the nightly
+    as what is serving."""
+    from hal0 import __version__
+
+    nightly = f"{__version__}-nightly.20260101000000"
+    monkeypatch.setattr("hal0.api.routes.updater.serving_release", lambda: nightly)
+    _StubRollbackUpdater.result = {
+        "rolled_back_to": f"/usr/lib/hal0/hal0-{__version__}",
+        "previous_now": f"/usr/lib/hal0/hal0-{nightly}",
+        "schema_warning": None,
+    }
+    monkeypatch.setattr("hal0.api.routes.updater.Updater", _StubRollbackUpdater)
+    r = isolated_client.post("/api/updates/rollback")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["running_version"] == nightly
+    assert body["restart_required"] is True
+
+
+def test_rollback_from_stable_to_same_numbered_nightly_requires_restart(
+    isolated_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from hal0 import __version__
+
+    nightly = f"{__version__}-nightly.20260101000000"
+    monkeypatch.setattr("hal0.api.routes.updater.serving_release", lambda: __version__)
+    _StubRollbackUpdater.result = {
+        "rolled_back_to": f"/usr/lib/hal0/hal0-{nightly}",
+        "previous_now": f"/usr/lib/hal0/hal0-{__version__}",
+        "schema_warning": None,
+    }
+    monkeypatch.setattr("hal0.api.routes.updater.Updater", _StubRollbackUpdater)
+    body = isolated_client.post("/api/updates/rollback").json()
+    assert body["running_version"] == __version__
+    assert body["restart_required"] is True
+
+
+def test_health_reports_the_serving_release(
+    isolated_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from hal0 import __version__
+
+    nightly = f"{__version__}-nightly.20260101000000"
+    monkeypatch.setattr("hal0.api.routes.health.serving_release", lambda: nightly)
+    body = isolated_client.get("/api/health").json()
+    assert body["version"] == __version__
+    assert body["release"] == nightly
+
+
 def test_channel_get_returns_stable_default(isolated_client: TestClient) -> None:
     """GET /api/updates/channel returns the default stable channel."""
     r = isolated_client.get("/api/updates/channel")
