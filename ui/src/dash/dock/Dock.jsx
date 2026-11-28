@@ -135,7 +135,11 @@ export function Dock({ expanded = false, onToggle }) {
   const runtimeTone = degraded ? 'warn' : L.status === 'up' ? 'up' : L.status === 'down' ? 'err' : 'warn';
   const runtimeTitle = degraded
     ? `degraded — ${failing.length ? failing.join("; ") : "see /api/health/system"}`
-    : `${L.ready}/${L.total} slot container${L.total === 1 ? "" : "s"} ready`;
+    : L.status === "connecting"
+      ? "waiting for the slot list"
+      : L.status === "down"
+        ? "the slot list could not be read"
+        : `${L.ready}/${L.total} slot container${L.total === 1 ? "" : "s"} ready`;
   // The `services` group is driven by whatever /api/services/health actually
   // reports (#1899) — NOT a hardcoded id list. The three-member array here
   // used to omit `comfyui` (and would silently omit any future service too),
@@ -300,9 +304,16 @@ export function Dock({ expanded = false, onToggle }) {
           </span>
           <span className="lbl">
             <span className="k">slots</span>
-            <span className={"v" + (L.ready < L.total ? " warn" : "")}>
-              <b>{L.ready} / {L.total}</b> ready
-            </span>
+            {/* #4124: no figures until the slot list has arrived; "0 / 0" would read as a count. */}
+            {L.status !== "up" ? (
+              // connecting: not answered yet. down: the slot list request failed. Either way
+              // there is no count to show; the runtime chip's colour and title say which.
+              <span className="v" data-testid="dock-slots-pending"><b>—</b> ready</span>
+            ) : (
+              <span className={"v" + (L.ready < L.total ? " warn" : "")}>
+                <b>{L.ready} / {L.total}</b> ready
+              </span>
+            )}
           </span>
         </div>
 
