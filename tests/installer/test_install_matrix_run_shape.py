@@ -124,6 +124,7 @@ case "$cmd" in
     if [[ "$n" -le "${FAKE_PGREP_BUSY_READS:-0}" ]]; then echo busy; else echo idle; fi
     exit 0 ;;
   "pct start "*)
+    [[ -z "${FAKE_START_FAILS:-}" ]] || exit 1
     [[ -z "${FAKE_START_HANGS:-}" ]] || exec sleep 10
     exit 0 ;;
   *"pct destroy "*)
@@ -147,10 +148,13 @@ case "$plain" in
     # FAKE_NO_RESOLVER=1: the guest has an address, and no name resolves.
     [[ -z "${FAKE_NO_RESOLVER:-}" ]] || exit 2
     exit 0 ;;
-  *"command -v curl"*) exit 0 ;;
-  *"cat > "*) exit 0 ;;
-  *"mkdir -p /root/hal0-src"*) exit 0 ;;
-  *"-o /root/install.sh"*) exit 0 ;;
+  *"command -v curl"*) [[ -z "${FAKE_PREREQ_FAILS:-}" ]] || exit 1; exit 0 ;;
+  # FAKE_PUSH_FAILS=<file name>: copying that file into the guest fails.
+  *"cat > "*)
+    [[ -z "${FAKE_PUSH_FAILS:-}" || "$plain" != *"cat > /root/${FAKE_PUSH_FAILS}"* ]] || exit 1
+    exit 0 ;;
+  *"mkdir -p /root/hal0-src"*) [[ -z "${FAKE_UNPACK_FAILS:-}" ]] || exit 1; exit 0 ;;
+  *"-o /root/install.sh"*) [[ -z "${FAKE_DOWNLOAD_FAILS:-}" ]] || exit 1; exit 0 ;;
   *"collect.sh pre"*)
     [[ -z "${FAKE_BIG_PRE:-}" ]] || head -c "$FAKE_BIG_PRE" /dev/zero | tr '\0' x
     printf 'disk_used_bytes=1000\nnet_rx_bytes=100\n'; exit 0 ;;
@@ -412,6 +416,83 @@ def test_a_guest_with_no_address_says_so_with_advice_about_the_bridge(host):
     assert "HAL0_MATRIX_NAMESERVER" not in r.stderr
     assert "net_state=no_address" in (host.out / "run.txt").read_text().splitlines()
     assert not (host.state / "present").exists()
+
+
+NO_NET = {"HAL0_MATRIX_TIMEOUT_NETWORK": "1", "HAL0_MATRIX_POLL_SLEEP": "0.2"}
+EARLY_ENDS = [
+    pytest.param("create_failed", "u2604-cpu-unattended", {"FAKE_CREATE_FAILS": "1"}, id="create"),
+    pytest.param("start_failed", "u2604-cpu-unattended", {"FAKE_START_FAILS": "1"}, id="start"),
+    pytest.param(
+        "no_network", "u2604-cpu-unattended", {"FAKE_NO_RESOLVER": "1", **NO_NET}, id="no-resolver"
+    ),
+    pytest.param(
+        "no_network", "u2604-cpu-unattended", {"FAKE_NO_ADDR": "1", **NO_NET}, id="no-address"
+    ),
+    pytest.param("prereq_failed", "u2604-cpu-unattended", {"FAKE_PREREQ_FAILS": "1"}, id="prereqs"),
+    pytest.param(
+        "push_failed", "u2604-cpu-unattended", {"FAKE_PUSH_FAILS": "collect.sh"}, id="push"
+    ),
+    pytest.param(
+        "download_failed", "u2604-cpu-terminal", {"FAKE_DOWNLOAD_FAILS": "1"}, id="download"
+    ),
+]
+
+
+def _assert_early_end(host, r, reason: str, *, destroyed: bool = True):
+    assert r.returncode == 1, r.stderr
+    lines = (host.out / "run.txt").read_text().splitlines()
+    assert f"ended={reason}" in lines, lines
+    at = lines.index(f"ended={reason}")
+    assert lines[at + 1].startswith("ended_detail="), lines
+    detail = lines[at + 1].removeprefix("ended_detail=")
+    assert detail and len(detail) <= 200
+    if destroyed:
+        assert lines.index("destroyed=172") > at, "the reason is recorded before the destroy"
+    result = json.loads((host.out / "result.json").read_text())
+    assert result["aborted"] == reason
+    assert result["abort_detail"] == detail
+    assert result["install_exit_code"] is None
+    assert not (host.state / "present").exists()
+    return detail
+
+
+@pytest.mark.parametrize(("reason", "shape", "env"), EARLY_ENDS)
+def test_every_early_end_records_its_reason_in_run_txt_and_result_json(host, reason, shape, env):
+    r = host.run(shape, "--vmid", "172", "--out", str(host.out), **env)
+    detail = _assert_early_end(host, r, reason, destroyed=reason != "create_failed")
+    if reason == "no_network":
+        assert detail.split(":")[0] in ("no_resolver", "no_address")
+    assert not any("summary-json" in c for c in host.calls()), "the install never started"
+
+
+def test_the_tree_push_and_unpack_failures_record_their_reasons(host, tmp_path):
+    tree = _git_tree(tmp_path)
+    r = host.run(
+        "u2404-cpu", "--vmid", "172", "--out", str(host.out),
+        "--source", f"tree:{tree}", FAKE_PUSH_FAILS="hal0-src.tgz",
+    )  # fmt: skip
+    _assert_early_end(host, r, "tree_push_failed")
+    out2 = tmp_path / "out2"
+    r = host.run(
+        "u2404-cpu", "--vmid", "172", "--out", str(out2),
+        "--source", f"tree:{tree}", FAKE_UNPACK_FAILS="1",
+    )  # fmt: skip
+    host.out = out2
+    _assert_early_end(host, r, "tree_unpack_failed")
+
+
+def test_the_report_row_of_a_run_that_ended_early_is_not_empty(host):
+    host.run(
+        "u2604-cpu-unattended", "--vmid", "172", "--out", str(host.out / "run1"),
+        FAKE_NO_RESOLVER="1", **NO_NET,
+    )  # fmt: skip
+    r = subprocess.run(
+        ["python3", "-I", str(REPO / "scripts" / "install-matrix" / "report.py"), str(host.out)],
+        capture_output=True, text=True, check=False, timeout=30,
+    )  # fmt: skip
+    assert r.returncode == 0, r.stderr
+    assert "no network" in r.stdout
+    assert "aborted: no_network" in r.stdout
 
 
 def test_dry_run_plan_shows_the_probe_deadline_and_its_override(host):

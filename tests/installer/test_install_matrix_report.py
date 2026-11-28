@@ -206,6 +206,44 @@ def test_an_aborted_run_is_failed_and_shows_reason_and_detail(tmp_path):
     assert "u2604-cpu-terminal" not in failures
 
 
+def test_a_run_that_ended_before_the_install_shows_why_not_an_empty_row(tmp_path):
+    put(
+        tmp_path, "early",
+        make_result(
+            "u2604-cpu-unattended", "2026-11-28T11:00:00Z", aborted="no_network",
+            abort_detail="no_resolver: the guest has an address but hal0.dev did not resolve",
+            install_exit_code=None, elapsed_seconds=None, step_durations_seconds=None,
+            disk_used_bytes=None, bytes_downloaded=None, slot_count=None, doctor=None,
+            api_health_seconds=None, chat=None, memory=None, hermes=None, last_step=None,
+        ),
+    )  # fmt: skip
+    out = run(tmp_path).stdout
+    (row,) = table_rows(out)
+    assert row.split(" | ")[2] == "no network"
+    assert "aborted: no_network" in out and "no_resolver" in out
+
+
+def test_a_number_still_shows_as_the_exit_cell_when_the_install_ran(tmp_path):
+    put(
+        tmp_path, "ran",
+        make_result("u2604-gpu", "2026-11-28T11:00:00Z", install_exit_code=1, aborted="start_failed"),
+    )  # fmt: skip
+    (row,) = table_rows(run(tmp_path).stdout)
+    assert row.split(" | ")[2] == "1"
+
+
+def test_a_hostile_reason_is_not_shown_raw_in_the_exit_cell(tmp_path):
+    put(
+        tmp_path, "evil",
+        make_result(
+            "u2604-gpu", "2026-11-28T11:00:00Z", install_exit_code=None,
+            aborted="[x](http://evil.example)\x1b[31m", abort_detail=None,
+        ),
+    )  # fmt: skip
+    out = run(tmp_path).stdout
+    assert "\x1b" not in out and "[x](" not in out
+
+
 def test_a_null_abort_does_not_fail_a_clean_run(tmp_path):
     put(
         tmp_path, "ok",

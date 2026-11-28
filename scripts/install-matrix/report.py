@@ -154,6 +154,16 @@ def okfail(value: object) -> str:
     return "-" if not isinstance(value, bool) else ("ok" if value else "fail")
 
 
+def exit_cell(res: dict) -> str:
+    """The install's exit status; for a run that ended before the install, the
+    reason in words (``no_network`` shows as ``no network``) instead of an empty cell."""
+    code = res.get("install_exit_code")
+    reason = res.get("aborted")
+    if is_num(code) or not isinstance(reason, str) or not reason:
+        return d(code)
+    return d(reason.replace("_", " "))
+
+
 def row(res: dict) -> list[str]:
     doctor, chat = sub(res, "doctor"), sub(res, "chat")
     memory, hermes = sub(res, "memory"), sub(res, "hermes")
@@ -172,7 +182,7 @@ def row(res: dict) -> list[str]:
     return [
         d(res.get("shape")),
         f"{d(res.get('source'))} {d(res.get('hal0_version'))}",
-        d(res.get("install_exit_code")),
+        exit_cell(res),
         mss(res.get("elapsed_seconds")),
         slowest(res.get("step_durations_seconds")),
         gb(res.get("disk_used_bytes")),

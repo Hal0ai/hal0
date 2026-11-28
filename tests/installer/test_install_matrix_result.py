@@ -217,6 +217,54 @@ def test_run_note_without_a_version_shaped_value_gives_null(tmp_path, text):
     assert run_note(tmp_path, text)["installed_version"] is None
 
 
+def test_run_note_gives_an_early_end_as_the_abort_reason_and_detail(tmp_path):
+    res = run_note(
+        tmp_path,
+        "vmid=172\nnet_state=no_resolver\nended=no_network\n"
+        "ended_detail=no_resolver: the guest has an address but hal0.dev did not resolve\n"
+        "destroyed=172\n",
+    )
+    assert res["aborted"] == "no_network"
+    assert (
+        res["abort_detail"] == "no_resolver: the guest has an address but hal0.dev did not resolve"
+    )
+
+
+def test_the_memory_watchs_abort_wins_over_an_early_end(tmp_path):
+    res = run_note(
+        tmp_path,
+        "ended=start_failed\nended_detail=could not start container 172\n"
+        "aborted=host_memory_low\nabort_detail=host memory fell below 12 GB (5 GB available)\n",
+    )
+    assert res["aborted"] == "host_memory_low"
+    assert res["abort_detail"] == "host memory fell below 12 GB (5 GB available)"
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "ended=No Network\nended_detail=x\n",
+        "ended=no-network\nended_detail=x\n",
+        "ended=" + "a" * 41 + "\nended_detail=x\n",
+        "ended=\nended_detail=x\n",
+        "ended_detail=a detail without a reason\n",
+    ],
+)
+def test_an_early_end_that_is_not_reason_shaped_gives_nulls(tmp_path, text):
+    res = run_note(tmp_path, text)
+    assert res["aborted"] is None and res["abort_detail"] is None
+
+
+@pytest.mark.parametrize(
+    "detail",
+    ["x" * 201, "two\x1bescape", "café", ""],
+)
+def test_an_early_end_detail_that_is_not_one_plain_line_is_dropped(tmp_path, detail):
+    res = run_note(tmp_path, f"ended=no_network\nended_detail={detail}\n")
+    assert res["aborted"] == "no_network"
+    assert res["abort_detail"] is None
+
+
 def test_run_note_without_an_abort_gives_nulls(tmp_path):
     res = run_note(tmp_path, "vmid=172\nuninstall_ok=1\n")
     assert res["aborted"] is None and res["abort_detail"] is None

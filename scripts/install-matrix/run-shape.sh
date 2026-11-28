@@ -70,6 +70,19 @@ die2() {
 }
 usage() { sed -n '2,12p' "${BASH_SOURCE[0]}" >&2; }
 
+# end_run <reason> <detail> <message>: the run ends before the install (a failed
+# create, start, network wait, precondition or push). The reason key and a
+# one-line detail go into run.txt FIRST, then the message to the terminal, then
+# the exit with status 1; cleanup writes them into result.json (aborted,
+# abort_detail), saves what it can and destroys the container. A line that
+# cannot be written (a full disk, a gone folder) is lost and never an error.
+end_run() {
+  END_REASON="$1"
+  [[ -z "${ART:-}" ]] || printf 'ended=%s\nended_detail=%s\n' "$1" "$2" >>"${ART}/run.txt" 2>/dev/null || true
+  log "$3"
+  exit 1
+}
+
 # ── arguments ────────────────────────────────────────────────────────────────
 SHAPE_ID="" SOURCE="stable" VMID="" KEEP=0 UNINSTALL=0 OUT="" TIMEOUT=5400 DRY_RUN=0
 while [[ $# -gt 0 ]]; do
@@ -233,6 +246,7 @@ SENT_START=""
 WATCH_FILE=""      # where the watchdog leaves its verdict
 ABORT_REASON=""    # host_memory_low, host_unreachable, watchdog_died or sentinel_died, once the watch fired
 ABORT_DETAIL=""
+END_REASON=""      # why the run ended before the install (see end_run), once it did
 INSTALL_RC=""      # the install's exit status, once known
 INTERRUPTED=0      # signal number that stopped the run
 PREREQS=""         # packages the harness installed before the installer ran
@@ -710,7 +724,7 @@ cleanup() {
   # The end of the memory watch: the container is gone or reported left behind.
   stop_watchdog
   # After an abort the result is written last, from local files only.
-  [[ -z "$ABORT_REASON" || -z "$ART" || "$RESULT_WRITTEN" != "0" ]] || write_result
+  [[ ( -z "$ABORT_REASON" && -z "$END_REASON" ) || -z "$ART" || "$RESULT_WRITTEN" != "0" ]] || write_result
   [[ -z "$TREE_TAR" ]] || rm -f -- "$TREE_TAR"
   [[ -z "$WATCH_FILE" ]] || rm -f -- "$WATCH_FILE" "${WATCH_FILE}.cleanup" "${WATCH_FILE}.stop" "${WATCH_FILE}.sent"
   [[ -z "$ART" ]] || rm -f -- "${ART}/watchdog.pid" "${ART}/sentinel.pid"
@@ -832,15 +846,31 @@ trap 'on_signal 1' HUP
 [[ "$create_rc" == "$_CT_REFUSED" ]] || CT_MAYBE=1
 [[ "$create_rc" != "0" ]] || CT_CREATED=1
 [[ -z "$HELD_SIG" ]] || on_signal "$HELD_SIG"
-[[ "$create_rc" == "0" ]] || { log "could not create container ${VMID}"; exit 1; }
+if [[ "$create_rc" != "0" ]]; then
+  if [[ "$create_rc" == "$_CT_REFUSED" ]]; then
+    create_detail="the create was refused before pct create ran"
+  else
+    create_detail="pct create failed (exit ${create_rc})"
+  fi
+  end_run create_failed "$create_detail" "could not create container ${VMID}"
+fi
 announce_container
 [[ "$DRY_RUN" == "1" ]] || start_watchdog
 if [[ ${#MAJORS[@]} -gt 0 ]]; then
-  ct_apply_device_rules "$VMID" "$SHAPE_UNPRIVILEGED" "${MAJORS[@]}" || { log "could not apply device rules"; exit 1; }
+  ct_apply_device_rules "$VMID" "$SHAPE_UNPRIVILEGED" "${MAJORS[@]}" \
+    || end_run device_rules_failed "the device rules could not be applied to the container" "could not apply device rules"
 fi
-ct_start "$VMID" || { log "could not start container ${VMID}"; exit 1; }
+ct_start "$VMID" || end_run start_failed "the container could not be started" "could not start container ${VMID}"
 GUEST_UP=1
-ct_wait_network "$VMID" || { log "container ${VMID} has no network"; exit 1; }
+if ! ct_wait_network "$VMID"; then
+  # CT_NET_STATE is the state the wait found; a refusal leaves it empty.
+  case "$CT_NET_STATE" in
+    no_resolver) net_detail="no_resolver: the guest has an address but hal0.dev did not resolve" ;;
+    no_address) net_detail="no_address: the guest has no global address on its interface" ;;
+    *) net_detail="the network wait could not run" ;;
+  esac
+  end_run no_network "$net_detail" "container ${VMID} has no network"
+fi
 
 # ── step 6: curl and ca-certificates, only if curl is missing ────────────────
 PREREQ_SCRIPT='command -v curl >/dev/null 2>&1 && exit 0
@@ -853,12 +883,13 @@ else
   exit 1
 fi
 echo "prereqs=curl ca-certificates"'
-prereq_out="$(CT_EXEC_TIMEOUT=$T_SLOW ct_exec "$VMID" "$PREREQ_SCRIPT")" || { log "could not install curl in the guest"; exit 1; }
+prereq_out="$(CT_EXEC_TIMEOUT=$T_SLOW ct_exec "$VMID" "$PREREQ_SCRIPT")" || end_run prereq_failed "curl could not be installed in the guest" "could not install curl in the guest"
 PREREQS="$(printf '%s\n' "$prereq_out" | sed -n 's/^prereqs=//p' | head -n 1)"
 [[ "$PREREQS" == "curl ca-certificates" ]] || PREREQS=""
 
 # ── step 7: baseline measurements ────────────────────────────────────────────
-ct_push "$VMID" "${HERE}/collect.sh" /root/collect.sh || { log "could not copy collect.sh"; exit 1; }
+ct_push "$VMID" "${HERE}/collect.sh" /root/collect.sh \
+  || end_run push_failed "collect.sh could not be copied into the guest" "could not copy collect.sh"
 _PVE_STREAM=pre ct_exec "$VMID" "bash /root/collect.sh pre" >"${ART}/pre.txt" 2>>"${ART}/collect.err" || log "collect pre failed"
 
 # ── step 8: the install ──────────────────────────────────────────────────────
@@ -869,15 +900,17 @@ CHAN_ENV="" UNATT_ENV=""
 [[ "$SHAPE_ENTRY" != "oneliner-unattended" ]] || UNATT_ENV="HAL0_NONINTERACTIVE=1 HAL0_ALLOW_CPU_ONLY=1 "
 
 if [[ -n "$TREE_DIR" ]]; then
-  ct_push "$VMID" "$TREE_TAR" /root/hal0-src.tgz || { log "could not copy the tree"; exit 1; }
+  ct_push "$VMID" "$TREE_TAR" /root/hal0-src.tgz \
+    || end_run tree_push_failed "the packed tree could not be copied into the guest" "could not copy the tree"
   CT_EXEC_TIMEOUT=$T_SLOW ct_exec "$VMID" "mkdir -p /root/hal0-src && tar -xzf /root/hal0-src.tgz -C /root/hal0-src" \
-    || { log "could not unpack the tree"; exit 1; }
+    || end_run tree_unpack_failed "the packed tree could not be unpacked in the guest" "could not unpack the tree"
   # SKIP_VERIFY is the one thing a tree install must set: there is no signed
   # release to check. Stable, preview and nightly never set it.
   INSTALL_SCRIPT="cd /root/hal0-src && ${UNATT_ENV}HAL0_INSTALL_SKIP_VERIFY=1 bash installer/install.sh ${ARGS}"
   [[ "$SHAPE_ENTRY" == "terminal" ]] || INSTALL_SCRIPT+=" < /dev/null"
 elif [[ "$SHAPE_ENTRY" == "terminal" ]]; then
-  CT_EXEC_TIMEOUT=$T_SLOW ct_exec "$VMID" "curl -fsSL ${INSTALL_URL} -o /root/install.sh" || { log "could not download install.sh"; exit 1; }
+  CT_EXEC_TIMEOUT=$T_SLOW ct_exec "$VMID" "curl -fsSL ${INSTALL_URL} -o /root/install.sh" \
+    || end_run download_failed "install.sh could not be downloaded in the guest" "could not download install.sh"
   INSTALL_SCRIPT="${CHAN_ENV}bash /root/install.sh ${ARGS}"
 else
   INSTALL_SCRIPT="set -o pipefail; curl -fsSL ${INSTALL_URL} | ${UNATT_ENV}${CHAN_ENV}bash -s -- ${ARGS}"
@@ -885,7 +918,8 @@ fi
 
 install_in_terminal() {
   local remote tty_argv drv rc=0
-  ct_owned "$VMID" "$NONCE" || { log "refusing: container ${VMID} is not harness-owned"; return 1; }
+  ct_owned "$VMID" "$NONCE" \
+    || end_run not_owned "the container could not be proven to belong to this run" "refusing: container ${VMID} is not harness-owned"
   remote="$(ct_guard "$VMID" "$NONCE")pct exec ${VMID} -- bash -c $(sq "$INSTALL_SCRIPT")"
   # -e none: no escape character, so nothing the guest prints or a reply types can be taken for one.
   tty_argv=(ssh -tt -e none -o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=15 -o ServerAliveCountMax=4

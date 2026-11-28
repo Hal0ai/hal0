@@ -8,7 +8,9 @@
 
 ``--pre``, ``--post`` and ``--probe`` are ``key=value`` files printed by
 collect.sh. ``--run`` is the harness's own ``run.txt`` (also ``key=value``); it
-gives ``aborted`` (why the watchdog stopped the run) and ``abort_detail``, both
+gives ``aborted`` (why the watchdog stopped the run, or, from ``ended``, why the
+run ended before the install: ``no_network``, ``start_failed``, ``push_failed``
+and so on) and ``abort_detail`` (from ``abort_detail`` or ``ended_detail``), both
 null when absent, and ``installed_version`` (the hal0 version read from the
 guest after the install; null when absent or not version-shaped). ``--driver`` is the JSON tty_drive.py
 (or run-shape.sh, for an unattended run) wrote. ``--summary`` is the installer's
@@ -231,6 +233,30 @@ def version_text(note: dict[str, str] | None):
     return None
 
 
+_REASON = re.compile(r"[a-z][a-z0-9_]{0,39}")
+_DETAIL = re.compile(r"[\x20-\x7e]{1,200}")
+
+
+def abort_fields(note: dict[str, str] | None):
+    """(aborted, abort_detail) for result.json, from run.txt.
+
+    The memory watch's ``aborted``/``abort_detail`` come first. A run that ended
+    early on its own account (no network, a failed start or push) wrote
+    ``ended`` and ``ended_detail`` instead; the same two fields carry them. The
+    reason must be a short lowercase key and the detail one plain line of at
+    most 200 printable characters, else the field is null: run.txt was written
+    by the harness, but part of the detail comes from what a guest answered.
+    """
+    reason = text(note, "aborted")
+    if reason:
+        return reason, text(note, "abort_detail") or None
+    ended = text(note, "ended")
+    if not ended or not _REASON.fullmatch(ended):
+        return None, None
+    detail = text(note, "ended_detail") or ""
+    return ended, detail if _DETAIL.fullmatch(detail) else None
+
+
 def assemble(args: argparse.Namespace) -> dict:
     pre, post, probe = read_kv(args.pre), read_kv(args.post), read_kv(args.probe)
     driver, summary = read_json(args.driver), read_json(args.summary)
@@ -238,6 +264,7 @@ def assemble(args: argparse.Namespace) -> dict:
     note = read_kv(args.run)
     durations = _flat_map(summary.get("step_durations_seconds"), numbers_only=True)
     prereqs = [p for p in re.split(r"[,\s]+", args.prereqs or "") if p]
+    aborted, abort_detail = abort_fields(note)
     return {
         "schema": SCHEMA,
         "shape": args.shape,
@@ -289,8 +316,8 @@ def assemble(args: argparse.Namespace) -> dict:
         "warnings": _int(summary.get("warnings")),
         "errors": _int(summary.get("errors")),
         "components": _flat_map(summary.get("components"), numbers_only=False),
-        "aborted": text(note, "aborted") or None,
-        "abort_detail": text(note, "abort_detail") or None,
+        "aborted": aborted,
+        "abort_detail": abort_detail,
         "installed_version": version_text(note),
     }
 
