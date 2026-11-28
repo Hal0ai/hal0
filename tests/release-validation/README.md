@@ -141,6 +141,12 @@ known-issues, or regressions, and add a line to the changelog below. A report re
 
 ### Kit changelog
 
+* **23** (2026-11-28) — Box registry (#4084); no run behind this one. The fresh box id `ct151-cpu-fresh` is now `ct151-fresh`: the box has had a
+  render node since rc.6 and serves the Vulkan lane, so the old id read as proof that a CPU-only fresh install was tested. `ct163-cpu-fresh` and
+  its `fresh-alt` role are removed (the box was destroyed 2026-11-27). `boxes.example.toml`: a FLEET COVERAGE note listing what the fleet cannot
+  test. `rc-validate.js`: an unknown box id stops the run before Preflight (it used to stop at Sweep, one preflight agent per box later), and
+  preflight blocks when the operator's `boxes.toml` has no table for its box. No lane brief, known-issues or regressions entry changed. Reports
+  up to kit 22 name the fresh box `ct151-cpu-fresh`. Lesson: keep hardware out of a box id; this one was wrong from rc.6 (2026-08-15) on.
 * **22** (2026-11-28) — Curation from the v1.8.1-nightly.20261127231904 run (6 verified findings: 1 filed #4051 retain cancel does not stop
   extraction; 3 refuted or by-design; 1 cosmetic not filed under CLAUDE.md rule 3). `regressions.yaml`: new `retain-cancel-does-not-stop-extraction`;
   `throughput-hero-stale-inflated` annotated (lump half refuted, read per_slot not total_tps); `serialize: true` on the identity-card entry (its repro
