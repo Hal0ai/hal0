@@ -544,3 +544,46 @@ def test_only_allow_listed_names_are_printed(tmp_path: Path) -> None:
     ns: dict = {}
     exec(compile(src.split("MAX_BYTES")[0], str(READER), "exec"), ns)  # noqa: S102
     assert names <= set(ns["ALLOWED_NAMES"])
+
+
+def _emit(doc: object, tmp_path: Path, *extra: str) -> subprocess.CompletedProcess[str]:
+    path = tmp_path / "doc.json"
+    path.write_text(doc if isinstance(doc, str) else json.dumps(doc), encoding="utf-8")
+    return subprocess.run(
+        [sys.executable, "-I", str(READER), *extra, "--emit-saved", str(path)],
+        capture_output=True, text=True, check=False,
+    )
+
+
+def test_emit_saved_strips_grant_and_token_keeps_order(tmp_path: Path) -> None:
+    doc = {
+        "version": 1,
+        "huggingface": {"token": "hf_x"},
+        "apps": {"hermes": {"terminal_tool": True}, "pi": {"enabled": True}},
+        "network": {"port": 80},
+    }
+    proc = _emit(doc, tmp_path, "--origin", "wizard")
+    assert proc.returncode == 0, proc.stderr
+    assert "hf_x" not in proc.stdout
+    assert proc.stdout == json.dumps(
+        {"version": 1, "apps": {"hermes": {}, "pi": {"enabled": True}}, "network": {"port": 80}}, indent=2
+    ) + "\n"
+
+
+def test_emit_saved_drops_look_alike_spellings(tmp_path: Path) -> None:
+    doc = {
+        "version": 1,
+        "HuggingFace": {"token": "hf_y"},
+        "apps": {"Hermes": {"Terminal_Tool": True}},
+        "network": {"huggingface": "hf_z"},
+    }
+    proc = _emit(doc, tmp_path)
+    assert proc.returncode == 0, proc.stderr
+    assert "hf_" not in proc.stdout and "erminal" not in proc.stdout
+
+
+def test_emit_saved_rejects_like_a_normal_run(tmp_path: Path) -> None:
+    proc = _emit({"version": 2}, tmp_path)
+    assert proc.returncode == 2 and proc.stdout == "" and "version" in proc.stderr
+    proc = _emit("{not json", tmp_path)
+    assert proc.returncode == 2 and proc.stdout == ""

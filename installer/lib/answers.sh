@@ -5,7 +5,7 @@
 #          hal0_collect_answers once, between the detection half of the
 #          pre-flight step and everything that changes the host.
 # Expects: Sourced by install.sh. Nothing here prompts or changes the host.
-# Provides: hal0_apply_answers, hal0_collect_answers.
+# Provides: hal0_apply_answers, hal0_collect_answers, hal0_save_answers.
 # Env:     HAL0_ANSWERS_FILE  path of an answers document (read here only).
 #          HAL0_FACTS_FILE    where the facts file goes; exported by
 #                             hal0_collect_answers with its default filled in.
@@ -129,5 +129,30 @@ hal0_collect_answers() {
     hal0_apply_answers "${path}" file || return $?
     # shellcheck disable=SC2034 # read by install.sh, which sources this file
     HAL0_ANSWERS_APPLIED=1
+    return 0
+}
+
+# Keep a copy of the applied document at ${ETC_DIR}/install-answers.json so a
+# later run can start from the same choices. The reader writes the copy to
+# standard output without the huggingface section and without
+# apps.hermes.terminal_tool; `nofollow write` creates it root:root 0600
+# (random O_EXCL temp file, fchmod before rename), so it is never wider than
+# 0600. The install has already succeeded: nothing here may fail it.
+hal0_save_answers() {
+    [[ "${HAL0_ANSWERS_APPLIED:-0}" == "1" ]] || return 0
+    local path="${HAL0_ANSWERS_FILE:-}" saved rc=0
+    if [[ -z "${path}" || -z "${PY:-}" || -z "${ETC_DIR:-}" ]]; then
+        warn "could not keep the answers document (nothing to read it from)"
+        return 0
+    fi
+    saved="$("${PY}" -I "${_HAL0_ANSWERS_READER}" --emit-saved "${path}")" || rc=$?
+    if [[ "${rc}" -ne 0 || -z "${saved}" ]]; then
+        warn "could not keep the answers document in ${ETC_DIR}/install-answers.json"
+        return 0
+    fi
+    if ! printf '%s\n' "${saved}" \
+        | nofollow write --owner root:root --mode 0600 --require-trusted-dir "${ETC_DIR}/install-answers.json"; then
+        warn "could not write ${ETC_DIR}/install-answers.json"
+    fi
     return 0
 }

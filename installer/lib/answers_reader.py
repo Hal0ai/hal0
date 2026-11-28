@@ -696,7 +696,70 @@ def _parse_args(argv: list[str]) -> tuple[str, str, str] | None:
     return origin, path, manifest
 
 
+def _strip_saved(node: Any) -> Any:
+    """Copy of NODE without any `huggingface` key (any depth, any letter case)."""
+    if isinstance(node, dict):
+        return {
+            key: _strip_saved(value)
+            for key, value in node.items()
+            if key.strip().casefold() != "huggingface"
+        }
+    if isinstance(node, list):
+        return [_strip_saved(value) for value in node]
+    return node
+
+
+def _saved_document(doc: dict[str, Any]) -> dict[str, Any]:
+    """The document as it is kept after an install: no secret, no terminal grant."""
+    saved = _strip_saved(doc)
+    apps = saved.get("apps")
+    if isinstance(apps, dict):
+        for app_key, entry in apps.items():
+            if app_key.strip().casefold() == "hermes" and isinstance(entry, dict):
+                for key in [k for k in entry if k.strip().casefold() == "terminal_tool"]:
+                    del entry[key]
+    return saved
+
+
+def _emit_saved(argv: list[str]) -> int:
+    """`--emit-saved DOCUMENT`: validate as a file-origin run, print the saved form."""
+    path = None
+    manifest = _MANIFEST
+    args = list(argv)
+    while args:
+        arg = args.pop(0)
+        if arg == "--emit-saved" and args and path is None:
+            path = args.pop(0)
+        elif arg == "--origin" and args:
+            args.pop(0)  # not needed in this mode
+        elif arg == "--models-manifest" and args:
+            manifest = args.pop(0)
+        else:
+            path = None
+            break
+    if not path:
+        sys.stderr.write("usage: answers_reader.py --emit-saved DOCUMENT.json\n")
+        return 2
+    problems = _Problems()
+    doc = _load(path, problems)
+    if doc is not None:
+        _walk_strings(doc, "", problems)
+        _build(doc, "file", problems, manifest)
+    for warning in problems.warnings:
+        sys.stderr.write(f"warning: {warning}\n")
+    if problems.errors or doc is None:
+        for error in problems.errors:
+            sys.stderr.write(f"error: {error}\n")
+        return 2
+    text = json.dumps(_saved_document(doc), indent=2, ensure_ascii=False) + "\n"
+    sys.stdout.buffer.write(text.encode("utf-8"))
+    sys.stdout.buffer.flush()
+    return 0
+
+
 def main(argv: list[str]) -> int:
+    if "--emit-saved" in argv:
+        return _emit_saved(argv)
     parsed = _parse_args(argv)
     if parsed is None:
         sys.stderr.write("usage: answers_reader.py --origin wizard|file [--models-manifest PATH] [--] DOCUMENT.json\n")

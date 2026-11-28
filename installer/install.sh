@@ -4926,6 +4926,8 @@ ui_step_finalize
 rm -f "${INSTALL_MARKER}"
 info "Total install time: $((SECONDS / 60))m $((SECONDS % 60))s"
 [[ -n "${HAL0_INSTALL_LOG:-}" ]] && info "Install log: ${HAL0_INSTALL_LOG}"
+# Keep the applied answers document (no token, no terminal grant); never fails the install.
+hal0_save_answers
 
 # ── --summary-json ───────────────────────────────────────────────────────────
 # Versioned, machine-readable install summary (docs/getting-started/install.mdx).
