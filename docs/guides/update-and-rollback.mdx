@@ -78,6 +78,16 @@ runs a check:
 hal0 update --channel preview
 ```
 
+To change channel without updating, add `--check`:
+
+```sh
+hal0 update --channel preview --check
+```
+
+The channel is saved in both forms, and the output says which channel the box
+was on and which it follows now. `--check` only stops the update from being
+applied; it is not a preview of another channel.
+
 ![The Settings → Updates panel showing current version, available update, and channel selector](/screenshots/settings-page.png)
 *Settings → Updates: current version, available release, and channel selector.*
 
