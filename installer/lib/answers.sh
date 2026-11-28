@@ -27,7 +27,7 @@
 # store counts as the operator's own choice): they are set only by
 # hal0_run_wizard in this process, never taken from the environment.
 unset HAL0_ANSWERS_SAVED HAL0_ANSWERS_APPLIED HAL0_ANSWERS_EXPORTED _HAL0_ANSWERS_PY \
-    HAL0_WIZARD_RAN HAL0_ANSWERS_ORIGIN _HAL0_WIZARD_CALLED _HAL0_WIZARD_HF_TOKEN \
+    HAL0_WIZARD_RAN HAL0_ANSWERS_ORIGIN _HAL0_WIZARD_HF_TOKEN \
     _HAL0_WIZARD_CHOSEN_STORE _HAL0_SAVED_STORE _HAL0_WIZARD_ENTRY_PATH \
     _HAL0_WIZARD_CATALOG_PATH _HAL0_WIZARD_MODELS_PATH _HAL0_WIZARD_INT
 
@@ -685,11 +685,9 @@ _hal0_wizard_take_token() {
 hal0_run_wizard() {
     unset _HAL0_WIZARD_HF_TOKEN _HAL0_WIZARD_CHOSEN_STORE _HAL0_SAVED_STORE
     HAL0_WIZARD_RAN=0
-    _HAL0_WIZARD_CALLED=0
     # Where the entry point and the catalog are (hal0_wizard_present does the
     # same, ahead of everything, in install.sh).
     _hal0_wizard_paths
-    _HAL0_WIZARD_CALLED=1
     local dir="" rc=0
     # An interrupt of the installer itself (Ctrl-C reaches the whole process
     # group, also before the wizard has its own handler, and while the reader

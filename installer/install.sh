@@ -1000,10 +1000,6 @@ _pre_seam_flm="${HAL0_FLM_MODELS_DIR:-}"
 _seam_rc=0
 hal0_collect_answers || _seam_rc=$?
 if (( _seam_rc != 0 )); then
-    # Without the setup screens a refused document stops the install through the
-    # ERR trap, as before.
-    # An interrupt (130) is no refused document; it is handled below.
-    [[ "${_HAL0_WIZARD_CALLED:-0}" == "1" || "${_seam_rc}" == "130" ]] || false
     # The setup screens already said why. Quitting and an interrupt changed
     # nothing, so they leave no failure report; anything else may.
     case "${_seam_rc}" in
