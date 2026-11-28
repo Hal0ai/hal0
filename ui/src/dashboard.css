@@ -3748,6 +3748,116 @@ select.npu-sel {
 .pf-card-unused { font-size: 10px; color: var(--fg-5); }
 .pf-row-dot { width: 5px; height: 5px; border-radius: 50%; background: var(--fg-5); flex-shrink: 0; }
 
+/* ── Gallery layout (matches hal0.dev/profiles) ─────────────────────────────
+ * One grid, a kind label on every card, filter pills, settings as chips and a
+ * read-only detail drawer. Same tokens as the rest of the dashboard; the
+ * spacing is the dashboard's denser scale, not the site's. */
+.pf-filterbar {
+  display: flex; flex-direction: column; gap: 9px;
+  border: 1px solid var(--line); border-radius: var(--rad-lg); background: var(--bg-1);
+  padding: 12px 16px; margin-bottom: 16px;
+}
+.pf-frow { display: flex; align-items: flex-start; gap: 12px; }
+.pf-frow > .pf-gc-label { width: 56px; flex-shrink: 0; padding-top: 6px; }
+.pf-fbar { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.pf-fpill {
+  display: inline-flex; align-items: center; gap: 6px; height: 24px; padding: 0 10px;
+  border-radius: var(--rad-pill); border: 1px solid var(--line); background: var(--bg-1);
+  color: var(--fg-3); font-size: 11px; cursor: pointer;
+  transition: all var(--dur-fast) var(--ease);
+}
+.pf-fpill:hover { border-color: var(--line-strong); color: var(--fg); }
+.pf-fpill.on { background: var(--accent-soft); border-color: var(--accent-line); color: var(--accent); }
+.pf-fpill .n { color: var(--fg-4); font-size: 9.5px; }
+.pf-fpill:focus-visible, .pf-gc-open:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.pf-filter-foot {
+  display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+  border-top: 1px solid var(--line-soft); padding-top: 9px;
+}
+.pf-filter-readout { font-size: 11px; color: var(--fg-3); }
+.pf-catalog-note { display: inline-flex; align-items: center; gap: 10px; flex-wrap: wrap; font-size: 10.5px; color: var(--fg-4); }
+
+.pf-gallery { margin-bottom: 26px; }
+.pf-section-below { margin-top: 4px; }
+.pf-gcard { position: relative; }
+.pf-gcard::after {
+  content: ''; position: absolute; left: 0; right: 0; bottom: 0; height: 2px; pointer-events: none;
+  background: linear-gradient(90deg, transparent, var(--line) 18%,
+    color-mix(in srgb, var(--accent) 65%, var(--line)) 50%, var(--line) 82%, transparent);
+  opacity: 0; transition: opacity var(--dur-fast) var(--ease);
+}
+.pf-gcard:hover::after { opacity: 1; }
+.pf-gcard[data-kind="import"] { border-style: dashed; }
+.pf-gc-top { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 10px 14px 0; min-height: 28px; }
+.pf-gc-top .pf-card-meta { flex-direction: row; align-items: center; gap: 6px; }
+.pf-gc-top + .stk-lib-h { padding-top: 6px; }
+.pf-gc-eyebrow, .pf-gc-label {
+  font-size: 9.5px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--fg-4);
+}
+.pf-gc-eyebrow { display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; }
+.pf-gc-eyebrow svg { width: 10px; height: 10px; }
+.pf-gc-eyebrow.pf-custom, .pf-gc-eyebrow.pf-import { color: var(--accent); }
+.pf-gc-sets {
+  display: flex; flex-direction: column; gap: 7px;
+  border-top: 1px solid var(--line-soft); padding: 10px 14px; margin-top: auto;
+}
+.pf-gc-chips { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.pf-mchip {
+  display: inline-flex; align-items: center; gap: 6px; height: 22px; padding: 0 8px;
+  border: 1px solid var(--line); border-radius: var(--rad-sm); background: var(--bg);
+  font-size: 10.5px; color: var(--fg-2); max-width: 100%;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.pf-mchip .fam { color: var(--accent); opacity: 0.85; }
+.pf-mchip.more { color: var(--fg-4); border-style: dashed; }
+.pf-gc-blocked {
+  display: flex; align-items: flex-start; gap: 8px; margin: 0 14px 10px; padding: 8px 10px;
+  border: 1px solid var(--warn-line); border-radius: var(--rad-sm); background: var(--warn-soft);
+  color: var(--warn); font-size: 10.5px; line-height: 1.45;
+}
+.pf-gc-blocked svg { width: 12px; height: 12px; flex-shrink: 0; margin-top: 1px; }
+.pf-gc-open {
+  appearance: none; background: none; border: 0; margin: 0; padding: 0 0 0 4px; cursor: pointer;
+  font-size: 10.5px; color: var(--fg-3); white-space: nowrap;
+}
+.pf-gc-open:hover:not(:disabled), .pf-gcard:hover .stk-lib-f .pf-gc-open { color: var(--accent); }
+.pf-gc-open:disabled { cursor: default; opacity: 0.6; }
+.pf-gcard .stk-lib-f .pf-btn { padding: 3px 9px; font-size: 10.5px; }
+
+.pf-detail { display: flex; flex-direction: column; gap: 18px; }
+.pf-detail-summary { margin: 0; font-size: 13px; line-height: 1.5; color: var(--fg-2); text-wrap: pretty; }
+.pf-detail-actions {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 10px 12px;
+  border: 1px solid var(--line); border-radius: var(--rad-sm); background: var(--bg);
+}
+.pf-detail-actions .pf-gc-blocked { margin: 0; flex: 1; }
+.pf-detail-note { flex: 1; min-width: 180px; font-size: 11.5px; line-height: 1.45; color: var(--fg-3); }
+.pf-detail-sec { display: flex; flex-direction: column; gap: 7px; }
+.pf-detail-h {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  font-size: 9.5px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--fg-4);
+}
+.pf-detail-h .pf-gc-open { text-transform: none; letter-spacing: 0; }
+.pf-detail-pre {
+  margin: 0; padding: 10px 12px; border: 1px solid var(--line); border-radius: var(--rad-sm);
+  background: var(--bg); color: var(--fg-2); font-size: 11.5px; line-height: 1.55;
+  white-space: pre-wrap; overflow-wrap: anywhere;
+}
+.pf-kv { display: grid; grid-template-columns: 124px 1fr; margin: 0; font-family: var(--jbm); font-size: 11.5px; }
+.pf-kv dt { color: var(--fg-4); padding: 5px 0; border-top: 1px solid var(--line-soft); }
+.pf-kv dd { color: var(--fg-2); padding: 5px 0; margin: 0; border-top: 1px solid var(--line-soft); min-width: 0; }
+.pf-kv dd.trunc { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pf-stat-l { white-space: nowrap; }
+@media (max-width: 640px) {
+  .pf-summary { flex-wrap: wrap; gap: 14px 18px; }
+  .pf-summary .pf-stat-div { display: none; }
+  .pf-frow { flex-direction: column; gap: 6px; }
+  .pf-frow > .pf-gc-label { width: auto; padding-top: 0; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .pf-fpill, .pf-gcard::after { transition: none; }
+}
+
 /* Profile card */
 .pf-card {
   position: relative; overflow: hidden;

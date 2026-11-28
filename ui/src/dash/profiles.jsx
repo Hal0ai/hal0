@@ -3,17 +3,22 @@
 // A profile is the whole TUNE for a slot: llama-server flags, context window,
 // thinking default, vision, speculation and runtime. The model carries file facts
 // only and the slot carries placement, so "what does this slot launch with"
-// is answered by one profile. This view is a structured surface: a summary
-// strip, seed/custom grouping, cards that show the tune (ctx, thinking,
-// vision, speculation, runtime, flags) and the "used by" slot binding, a slide-in form
-// drawer, and a styled delete confirm with an in-use guard.
+// is answered by one profile.
 //
-// Data comes from GET /api/profiles (useProfiles).
+// The page is laid out like the public gallery at hal0.dev/profiles: one grid,
+// every card labelled with its kind (built in, custom, import), filter pills
+// for kind and runtime, cards that show the settings a profile makes as chips,
+// and a detail drawer that prints the flags, the typed settings and the
+// `[profile.<name>]` table. The pure half lives in profile-gallery.js.
+//
+// Data: GET /api/profiles (useProfiles) for the profiles on this box, and
+// GET /api/profile-addons (useProfileAddons) for the ones the catalog offers.
+// Importing a catalog row is the ordinary import with the row's envelope.
 //
 // Seeds are immutable: Edit becomes "Edit a copy" (forks <seed>-custom with
 // cloned_from set); Delete is disabled. Custom profiles get Clone/Edit/Delete.
 
-import { useState } from 'react'
+import { Fragment, useMemo, useState } from 'react'
 import {
   useProfiles,
   useProfileCreate,
@@ -21,7 +26,22 @@ import {
   useProfileDelete,
   useProfileExport,
   useProfileImport,
+  useProfileAddons,
+  useProfileAddonsRefresh,
 } from '@/api/hooks/useProfiles'
+import {
+  KIND_CUSTOM,
+  KIND_IMPORT,
+  KIND_SEED,
+  emptyFactsLabel,
+  facetOptions,
+  galleryCards,
+  matchesFilters,
+  profileToml,
+  toggleFilter,
+  tuneFacts,
+  tuneOf,
+} from './profile-gallery.js'
 import { useSystemInfo } from '@/api/hooks/useRuntimes'
 import { useRunnerImages, useRunnerImagePullJob } from '@/api/hooks/useRunnerImages'
 import { effectiveRuntimeFamily, hostHwFlags, selectedRunnerKey, tierRank } from './hw-cascade.js'
@@ -323,9 +343,9 @@ function RuntimeStateChip({ p, backends }) {
 // Profiles and Stacks grids read as one family. Same data + actions as before,
 // plus the runtime the profile carries: backend chips in the title row,
 // install state where the metric sits, title + blurb under the intent.
-export function ProfileCard({ p, index, onEdit, onClone, onDelete, onExport }) {
+export function ProfileCard({ p, index, onEdit, onClone, onDelete, onExport, onOpen = null }) {
   if (p.quarantined) return <QuarantinedCard p={p} index={index} onDelete={onDelete} />;
-  return <TunedProfileCard p={p} index={index} onEdit={onEdit} onClone={onClone} onDelete={onDelete} onExport={onExport} />;
+  return <TunedProfileCard p={p} index={index} onEdit={onEdit} onClone={onClone} onDelete={onDelete} onExport={onExport} onOpen={onOpen} />;
 }
 
 // A profiles.toml entry that failed validation (#2653): it carries no tune,
@@ -359,7 +379,48 @@ function QuarantinedCard({ p, index, onDelete }) {
   );
 }
 
-function TunedProfileCard({ p, index, onEdit, onClone, onDelete, onExport }) {
+// How many settings chips a card shows before it folds the rest into "+N".
+const CARD_FACTS = 4;
+
+// The settings a profile makes, as chips. A profile that sets no typed field
+// says which kind of nothing that is: flags only, or the engine's defaults.
+function FactChips({ p, backends, testid }) {
+  const facts = tuneFacts(p, (key) => runnerTitleFor(key, backends));
+  return (
+    <div className="pf-gc-sets" data-testid={testid}>
+      <span className="pf-gc-label mono">sets</span>
+      <div className="pf-gc-chips">
+        {facts.slice(0, CARD_FACTS).map(f => (
+          <span key={f.key} className="pf-mchip mono" title={f.key}>
+            <span className="fam">{f.label}</span>{f.value}
+          </span>
+        ))}
+        {facts.length > CARD_FACTS && (
+          <span className="pf-mchip more mono"
+            title={facts.slice(CARD_FACTS).map(f => `${f.label} ${f.value}`).join(' · ')}>
+            +{facts.length - CARD_FACTS}
+          </span>
+        )}
+        {facts.length === 0 && <span className="pf-mchip mono">{emptyFactsLabel(p)}</span>}
+      </div>
+    </div>
+  );
+}
+
+// The line every card opens with: its kind, then the runtime family.
+function KindEyebrow({ kind, family, version }) {
+  const tone = kind === KIND_SEED ? ' pf-seed' : kind === KIND_CUSTOM ? ' pf-custom' : ' pf-import';
+  return (
+    <span className={'pf-gc-eyebrow mono' + tone}
+      title={kind === KIND_SEED ? 'Ships with hal0. Read-only: clone it to change it.'
+        : kind === KIND_CUSTOM ? 'Made on this box.'
+        : 'Not on this box yet. Import it from the catalog.'}>
+      {kind === KIND_SEED && Icons.lock}{kind}{version ? ` · v${version}` : ''}{family ? ` · ${family}` : ''}
+    </span>
+  );
+}
+
+function TunedProfileCard({ p, index, onEdit, onClone, onDelete, onExport, onOpen = null }) {
   const systemInfoQuery = useSystemInfo();
   const backends = systemInfoQuery.data?.backends ?? {};
   const chips = runtimeChips(p, backends);
@@ -370,7 +431,15 @@ function TunedProfileCard({ p, index, onEdit, onClone, onDelete, onExport }) {
     : p.rtf != null ? `${p.rtf.toFixed(2)}× rtf` : null;
 
   return (
-    <div className="stk-lib-card" style={{ animationDelay: (index * 34) + 'ms' }}>
+    <div className="stk-lib-card pf-gcard" style={{ animationDelay: (index * 34) + 'ms' }}
+      data-kind={isSeed ? KIND_SEED : KIND_CUSTOM} data-testid={`pf-card-${p.name}`}>
+      <div className="pf-gc-top">
+        <KindEyebrow kind={isSeed ? KIND_SEED : KIND_CUSTOM} family={p.runtime_family} />
+        <div className="pf-card-meta">
+          <RuntimeStateChip p={p} backends={backends} />
+          {metric && <span className="mono pf-card-metric">{metric}</span>}
+        </div>
+      </div>
       <div className="stk-lib-h">
         <div className="stk-lib-id">
           <div className="pf-title-row">
@@ -389,33 +458,18 @@ function TunedProfileCard({ p, index, onEdit, onClone, onDelete, onExport }) {
             {runtimeLine(p, backends)}
           </div>
         </div>
-        <div className="pf-card-meta">
-          <RuntimeStateChip p={p} backends={backends} />
-          {metric && <span className="mono pf-card-metric">{metric}</span>}
-        </div>
       </div>
 
-      <div className="stk-lib-slotlist" data-testid={`pf-tune-${p.name}`}>
-        <PfRow label="ctx" value={p.ctx_size != null ? ctxLabel(p.ctx_size) : 'model native'} />
-        <PfRow label="thinking" value={thinkingLabel(thinkingToForm(p.enable_thinking))} />
-        <PfRow label="reasoning" value={reasoningLabel(p.reasoning_effort, p.reasoning_budget)} />
-        <PfRow label="vision" value={p.vision === 'off' ? 'off' : 'auto'} />
-        <PfRow label="spec" value={specOf(p.speculation)} />
-        <PfRow label="runner" value={p.runner ? runnerTitleFor(p.runner, backends) : 'auto'} />
-        <PfRow label="flags" value={p.resolved_flags || p.flags || '—'} />
-      </div>
+      <FactChips p={p} backends={backends} testid={`pf-tune-${p.name}`} />
 
       <div className="stk-lib-f">
         {inUse
           ? <span className="stk-tag" title={'used by ' + usedBy.join(', ')}>used by {inUse}</span>
           : <span className="mono pf-card-unused">unused</span>}
-        {isSeed
-          ? <span className="stk-tag pf-seed" title="Seed profiles are read-only">{Icons.lock} seed</span>
-          : <span className="stk-tag shared pf-custom">custom</span>}
         <span className="stk-spacer" />
         {isSeed ? (
           <button className="stk-icon-btn" style={{ width: 26, height: 26 }} onClick={() => onClone(p)}
-            title="Seeds are immutable — fork a custom copy" data-testid={`pf-btn-editcopy-${p.name}`}>
+            title="Built-in profiles are read-only: clone a custom copy" data-testid={`pf-btn-editcopy-${p.name}`}>
             {Icons.copy}
           </button>
         ) : (
@@ -427,12 +481,198 @@ function TunedProfileCard({ p, index, onEdit, onClone, onDelete, onExport }) {
           </>
         )}
         <button className="stk-icon-btn" style={{ width: 26, height: 26 }} onClick={() => onDelete(p)} disabled={isSeed}
-          title={isSeed ? 'Seed profiles cannot be deleted' : inUse ? 'In use — detach slots first' : 'Delete'}
+          title={isSeed ? 'Built-in profiles cannot be deleted' : inUse ? 'In use — detach slots first' : 'Delete'}
           data-testid={`pf-btn-delete-${p.name}`}>{Icons.trash}</button>
         <button className="stk-icon-btn" style={{ width: 26, height: 26 }} onClick={() => onExport(p)}
           title="Export this profile as a .hal0profile.json" data-testid={`pf-btn-export-${p.name}`}>{Icons.download}</button>
+        {onOpen && (
+          <button type="button" className="pf-gc-open mono" onClick={() => onOpen(p)}
+            aria-haspopup="dialog" aria-label={`settings for ${p.name}`}
+            data-testid={`pf-btn-open-${p.name}`}>settings →</button>
+        )}
       </div>
     </div>
+  );
+}
+
+// A catalog row: a profile this box does not have yet. The action is Import,
+// which opens the same dry-run dialog a file import does. A row the server
+// would refuse (bad checksum, a flag a profile may not carry, a newer release
+// needed) is still listed, with the reason where the button would be.
+export function AddonCard({ a, index, onImport, onOpen = null }) {
+  const systemInfoQuery = useSystemInfo();
+  const backends = systemInfoQuery.data?.backends ?? {};
+  const body = a.profile || {};
+  // A runner this box lacks is dropped on import, so the card shows what
+  // will land (Auto), not what the envelope asks for.
+  const shown = a.runner_stripped ? { ...body, runner: null, runtime_family: a.runtime_family } : { ...body, runtime_family: a.runtime_family };
+  const chips = runtimeChips(shown, backends);
+  return (
+    <div className="stk-lib-card pf-gcard" style={{ animationDelay: (index * 34) + 'ms' }}
+      data-kind={KIND_IMPORT} data-testid={`pf-addon-${a.name}`}>
+      <div className="pf-gc-top">
+        <KindEyebrow kind={KIND_IMPORT} family={a.runtime_family} version={a.version} />
+        <div className="pf-card-meta">
+          {a.first_party && <span className="pf-state mono" title="Published by the hal0 project">first-party</span>}
+          {a.installed && <span className="pf-state mono" title={`A profile named ${a.name} is already on this box`}
+            data-testid={`pf-addon-installed-${a.name}`}>name in use</span>}
+        </div>
+      </div>
+      <div className="stk-lib-h">
+        <div className="stk-lib-id">
+          <div className="pf-title-row">
+            <span className="stk-lib-name">{a.name}</span>
+            {a.profile && (
+              <span className="pf-be-row">
+                {chips.map(c => (
+                  <span key={c.key} className="pf-be mono" style={c.hue ? { '--bk': c.hue } : null}>{c.label}</span>
+                ))}
+              </span>
+            )}
+          </div>
+          <div className="stk-lib-intent">{a.title || a.description || prettyProfile(a.name)}</div>
+          {a.summary && <div className="pf-runtime-line">{a.summary}</div>}
+        </div>
+      </div>
+
+      {a.profile && <FactChips p={body} backends={backends} testid={`pf-tune-addon-${a.name}`} />}
+
+      {a.blocked && (
+        <div className="pf-gc-blocked mono" data-testid={`pf-addon-blocked-${a.name}`} title={a.blocked.code}>
+          {Icons.alert}<span>Not offered: {a.blocked.message}</span>
+        </div>
+      )}
+
+      <div className="stk-lib-f">
+        {a.min_hal0_version
+          ? <span className="mono pf-card-unused">hal0 {a.min_hal0_version}+</span>
+          : <span className="mono pf-card-unused">catalog</span>}
+        <span className="stk-spacer" />
+        {!a.blocked && (
+          <button className="pf-btn" onClick={() => onImport(a)} data-testid={`pf-btn-import-${a.name}`}
+            title={a.installed ? 'Import under another name' : 'Import this profile'}>
+            {Icons.download} {a.installed ? 'Import a copy' : 'Import'}
+          </button>
+        )}
+        {onOpen && a.profile && (
+          <button type="button" className="pf-gc-open mono" onClick={() => onOpen(a)}
+            aria-haspopup="dialog" aria-label={`settings for ${a.name}`}
+            data-testid={`pf-btn-open-addon-${a.name}`}>settings →</button>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ── Detail drawer ─────────────────────────────────────────────────────────────
+//
+// Read-only, and in the gallery's order: what the profile is for, what you can
+// do with it, the flag string, the typed settings, then the profile as the
+// table hal0 reads from profiles.toml.
+
+function copyText(text, what) {
+  const done = () => toast(`Copied ${what}`, 'ok');
+  const failed = () => toast('Could not copy', 'err');
+  try {
+    navigator.clipboard.writeText(text).then(done, failed);
+  } catch { failed(); }
+}
+
+export function ProfileDetail({ card, onClose, onEdit, onClone, onExport, onImport }) {
+  const systemInfoQuery = useSystemInfo();
+  const backends = systemInfoQuery.data?.backends ?? {};
+  const p = card.profile;
+  const a = card.addon;
+  const facts = tuneFacts(p, (key) => runnerTitleFor(key, backends));
+  const flags = tuneOf(p).flags || '';
+  const toml = profileToml(card.name, p);
+  const summary = a ? (a.summary || a.description || a.title) : intentOf(p);
+  const usedBy = p.used_by || [];
+
+  return (
+    <Drawer open onClose={onClose} title={card.name} width={520}
+      eyebrow={card.kind + (card.family ? ` · ${card.family}` : '')}>
+      <div className="pf-detail" data-testid="pf-detail">
+        <p className="pf-detail-summary">{summary}</p>
+
+        <div className="pf-detail-actions">
+          {card.kind === KIND_SEED && (
+            <>
+              <span className="pf-detail-note">Already on this box and read-only. Clone it to change it.</span>
+              <button className="pf-btn primary" onClick={() => onClone(p)} data-testid="pf-detail-clone">{Icons.copy} Clone</button>
+            </>
+          )}
+          {card.kind === KIND_CUSTOM && (
+            <>
+              <span className="pf-detail-note">
+                {usedBy.length ? `Used by ${usedBy.join(', ')}.` : 'No slot uses it.'}
+              </span>
+              <button className="pf-btn" onClick={() => onExport(p)}>{Icons.download} Export</button>
+              <button className="pf-btn" onClick={() => onClone(p)}>{Icons.copy} Clone</button>
+              <button className="pf-btn primary" onClick={() => onEdit(p)} data-testid="pf-detail-edit">{Icons.edit} Edit</button>
+            </>
+          )}
+          {card.kind === KIND_IMPORT && (a.blocked ? (
+            <span className="pf-gc-blocked mono">{Icons.alert}<span>Not offered: {a.blocked.message}</span></span>
+          ) : (
+            <>
+              <span className="pf-detail-note">
+                {a.installed
+                  ? `A profile named ${a.name} is already on this box. Import this one under another name.`
+                  : 'Not on this box yet.'}
+                {a.runner_stripped && ` Its runtime (${a.profile?.runner}) is not available here, so it imports with none pinned.`}
+              </span>
+              <button className="pf-btn primary" onClick={() => onImport(a)} data-testid="pf-detail-import">
+                {Icons.download} {a.installed ? 'Import a copy' : 'Import'}
+              </button>
+            </>
+          ))}
+        </div>
+
+        <div className="pf-detail-sec">
+          <div className="pf-detail-h mono">
+            <span>flags</span>
+            {flags && <button className="pf-gc-open mono" onClick={() => copyText(flags, 'flags')}>copy</button>}
+          </div>
+          {flags
+            ? <pre className="pf-detail-pre mono" data-testid="pf-detail-flags">{flags}</pre>
+            : <div className="pf-detail-note">None. The engine's own defaults apply.</div>}
+        </div>
+
+        <div className="pf-detail-sec">
+          <div className="pf-detail-h mono"><span>settings</span></div>
+          {facts.length ? (
+            <dl className="pf-kv" data-testid="pf-detail-facts">
+              {facts.map(f => (
+                <Fragment key={f.key}><dt>{f.label}</dt><dd>{f.value}</dd></Fragment>
+              ))}
+            </dl>
+          ) : (
+            <div className="pf-detail-note">No typed setting: {emptyFactsLabel(p)}.</div>
+          )}
+        </div>
+
+        <div className="pf-detail-sec">
+          <div className="pf-detail-h mono">
+            <span>profiles.toml</span>
+            <button className="pf-gc-open mono" onClick={() => copyText(toml, 'table')}>copy</button>
+          </div>
+          <pre className="pf-detail-pre mono" data-testid="pf-detail-toml">{toml}</pre>
+        </div>
+
+        {a && (
+          <div className="pf-detail-sec">
+            <div className="pf-detail-h mono"><span>catalog entry</span></div>
+            <dl className="pf-kv">
+              {a.version != null && <><dt>version</dt><dd>v{a.version}</dd></>}
+              {a.min_hal0_version && <><dt>needs</dt><dd>hal0 {a.min_hal0_version} or newer</dd></>}
+              {a.author && <><dt>author</dt><dd>{a.author}</dd></>}
+              {a.checksum && <><dt>checksum</dt><dd className="trunc" title={a.checksum}>{a.checksum}</dd></>}
+            </dl>
+          </div>
+        )}
+      </div>
+    </Drawer>
   );
 }
 
@@ -440,7 +680,7 @@ function TunedProfileCard({ p, index, onEdit, onClone, onDelete, onExport }) {
 
 function Section({ title, count, hint, children }) {
   return (
-    <div className="pf-section">
+    <div className="pf-section pf-section-below">
       <div className="sec">
         <h2>{title}<span className="ct num">{count}</span></h2>
         {hint && <span className="pf-sec-hint mono">{hint}</span>}
@@ -1004,7 +1244,7 @@ function DeleteConfirm({ p, onCancel, onConfirmed }) {
 // and the profile-specific preview (identity + integrity + collision — no
 // model resolve/pull). The dialog shell + name input + commit live in
 // primitives.jsx.
-export function ImportModal({ existing, onClose, onImported }) {
+export function ImportModal({ existing, onClose, onImported, envelope = null }) {
   const imp = useProfileImport();
   const systemInfoQuery = useSystemInfo();
   const backends = systemInfoQuery.data?.backends ?? {};
@@ -1061,6 +1301,7 @@ export function ImportModal({ existing, onClose, onImported }) {
     <ImportDialog
       title="Import profile"
       ariaLabel="Import profile"
+      initialEnvelope={envelope}
       fileAccept=".hal0profile.json,.json,application/json"
       fileHint="Choose a .hal0profile.json file"
       fileTestid="pf-import-file"
@@ -1143,20 +1384,113 @@ function ProfilesHeader({ count, onNew, onImport }) {
   );
 }
 
+// Filter pills: one row per facet, AND across rows, OR within a row. Counts
+// are over every card, so a pill always says how many it would show alone.
+function FilterBar({ facets, selected, total, shown, onToggle, onClear, children }) {
+  const active = facets.some(f => (selected[f.key] || []).length > 0);
+  return (
+    <div className="pf-filterbar" data-testid="pf-filters">
+      {facets.map(facet => {
+        const picked = selected[facet.key] || [];
+        return (
+          <div className="pf-frow" key={facet.key}>
+            <span className="pf-gc-label mono">{facet.label}</span>
+            <div className="pf-fbar">
+              <button type="button" className={'pf-fpill mono' + (picked.length === 0 ? ' on' : '')}
+                aria-pressed={picked.length === 0} onClick={() => onClear(facet.key)}
+                data-testid={`pf-filter-${facet.key}-all`}>
+                all<span className="n num">{total}</span>
+              </button>
+              {facet.options.map(value => (
+                <button type="button" key={value} className={'pf-fpill mono' + (picked.includes(value) ? ' on' : '')}
+                  aria-pressed={picked.includes(value)} onClick={() => onToggle(facet.key, value)}
+                  data-testid={`pf-filter-${facet.key}-${value.replace(/\s+/g, '-')}`}>
+                  {value}<span className="n num">{facet.counts.get(value)}</span>
+                </button>
+              ))}
+            </div>
+          </div>
+        );
+      })}
+      <div className="pf-filter-foot">
+        <span className="mono pf-filter-readout" data-testid="pf-filter-readout">{shown} of {total} profiles</span>
+        {active && (
+          <button type="button" className="pf-gc-open mono" onClick={() => onClear(null)} data-testid="pf-filter-clear">clear</button>
+        )}
+        <span className="pf-grow" />
+        {children}
+      </div>
+    </div>
+  );
+}
+
+function hostOf(url) {
+  try { return new URL(url).host; } catch { return url || ''; }
+}
+
+// Where the import rows came from, in a sentence, with the way to re-check.
+// The catalog failing is never the page failing: the profiles on the box are
+// already on screen.
+export function catalogNoteText(query) {
+  if (query.isLoading) return 'Checking the import catalog…';
+  if (query.isError) return `Import catalog unavailable: ${query.error?.message || 'the request failed'}.`;
+  const c = query.data;
+  if (!c || !Array.isArray(c.addons)) return 'Import catalog unavailable.';
+  const n = c.addons.length;
+  const rows = `${n} profile${n === 1 ? '' : 's'} to import`;
+  if (c.source === 'remote') return `${rows}, from ${hostOf(c.url)}.`;
+  if (c.error) return `${rows}, from the set this release ships. ${hostOf(c.url)} could not be read: ${c.error}.`;
+  return `${rows}, from the set this release ships. The online catalog is switched off.`;
+}
+
+function CatalogNote({ query, refresh }) {
+  const canRefresh = !query.isLoading && (query.isError || query.data?.url);
+  return (
+    <span className="pf-catalog-note mono" data-testid="pf-catalog-note">
+      {catalogNoteText(query)}
+      {canRefresh && (
+        <button type="button" className="pf-gc-open mono" disabled={refresh.isPending}
+          onClick={() => (query.isError ? query.refetch() : refresh.mutate(undefined, {
+            onError: (e) => toast(e?.message || 'Could not check the catalog', 'err'),
+          }))}
+          data-testid="pf-catalog-refresh">
+          {refresh.isPending ? 'checking…' : 'check again'}
+        </button>
+      )}
+    </span>
+  );
+}
+
+// Stable identity for "no catalog rows", so the card memo holds.
+const EMPTY = [];
+
 function ProfilesView() {
   const query = useProfiles();
+  const addonsQuery = useProfileAddons();
+  const addonsRefresh = useProfileAddonsRefresh();
   const allProfiles = query.data ?? [];
+  const addons = Array.isArray(addonsQuery.data?.addons) ? addonsQuery.data.addons : EMPTY;
   const exportMut = useProfileExport();
 
   const [drawer, setDrawer] = useState(null);   // {mode, source}
   const [confirm, setConfirm] = useState(null);
-  const [importing, setImporting] = useState(false);
+  const [importing, setImporting] = useState(null);   // {envelope} | null
+  const [selected, setSelected] = useState({});
+  const [detail, setDetail] = useState(null);   // card id
 
   const quarantined = allProfiles.filter(p => p.quarantined);
   const profiles = allProfiles.filter(p => !p.quarantined);
   const seeds = profiles.filter(p => p.seed);
   const custom = profiles.filter(p => !p.seed);
   const inUseCount = profiles.filter(p => (p.used_by || []).length).length;
+
+  const cards = useMemo(() => galleryCards(allProfiles, addons), [allProfiles, addons]);
+  const facets = useMemo(() => facetOptions(cards), [cards]);
+  const shown = cards.filter(c => matchesFilters(c, selected));
+  // Looked up by id on every render so the drawer follows a refetch, and
+  // closes by itself when its profile goes away.
+  const detailCard = detail ? cards.find(c => c.id === detail) : null;
+  const existingNames = profiles.map(p => p.name);
 
   async function onExport(p) {
     const name = p.name;
@@ -1171,6 +1505,13 @@ function ProfilesView() {
       toast(`Exported ${name}`, 'ok');
     } catch (err) { toast(err?.message || 'Export failed', 'err'); }
   }
+
+  // Every action that opens a form closes the detail drawer first: two
+  // drawers on one edge would stack.
+  const act = (fn) => (arg) => { setDetail(null); fn(arg); };
+  const onEdit = act(pp => setDrawer({ mode: 'edit', source: pp }));
+  const onClone = act(pp => setDrawer({ mode: 'clone', source: pp }));
+  const onImportAddon = act(a => setImporting({ envelope: a.envelope }));
 
   if (query.isLoading) {
     return (
@@ -1195,57 +1536,61 @@ function ProfilesView() {
   return (
     <div className="view">
       <div className="pf-engine">
-        <ProfilesHeader count={profiles.length} onNew={() => setDrawer({ mode: 'create' })} onImport={() => setImporting(true)} />
+        <ProfilesHeader count={profiles.length} onNew={() => setDrawer({ mode: 'create' })} onImport={() => setImporting({ envelope: null })} />
         <div className="pf-summary">
-          <Stat value={profiles.length} label="profiles" />
+          <Stat value={profiles.length} label="on this box" />
           <span className="pf-stat-div" />
-          <Stat value={seeds.length} label="seed templates" />
+          <Stat value={seeds.length} label="built in" />
           <Stat value={custom.length} label="custom" accent="var(--accent)" />
           <span className="pf-stat-div" />
           <Stat value={`${inUseCount}/${profiles.length}`} label="bound to slots" accent="var(--ok)" />
+          <span className="pf-stat-div" />
+          <Stat value={Array.isArray(addonsQuery.data?.addons) ? addons.length : '–'} label="to import" />
         </div>
       </div>
 
-      {profiles.length === 0 && quarantined.length === 0 ? (
+      <FilterBar facets={facets} selected={selected} total={cards.length} shown={shown.length}
+        onToggle={(key, value) => setSelected(sel => toggleFilter(sel, key, value))}
+        onClear={(key) => setSelected(sel => (key ? { ...sel, [key]: [] } : {}))}>
+        <CatalogNote query={addonsQuery} refresh={addonsRefresh} />
+      </FilterBar>
+
+      {cards.length === 0 && quarantined.length === 0 ? (
         <div className="empty mono">No profiles configured.</div>
+      ) : shown.length === 0 ? (
+        <div className="empty mono" data-testid="pf-filter-empty">No profile matches these filters.</div>
       ) : (
-        <>
-          <Section title="Seed templates" count={seeds.length} hint="immutable · ship with hal0">
-            {seeds.map((p, i) => (
-              <ProfileCard key={p.name} p={p} index={i}
-                onEdit={pp => setDrawer({ mode: 'edit', source: pp })}
-                onClone={pp => setDrawer({ mode: 'clone', source: pp })}
-                onDelete={pp => setConfirm(pp)}
-                onExport={onExport} />
-            ))}
-          </Section>
-
-          <Section title="Custom profiles" count={custom.length} hint="forked or authored on this box">
-            {custom.map((p, i) => (
-              <ProfileCard key={p.name} p={p} index={i}
-                onEdit={pp => setDrawer({ mode: 'edit', source: pp })}
-                onClone={pp => setDrawer({ mode: 'clone', source: pp })}
-                onDelete={pp => setConfirm(pp)}
-                onExport={onExport} />
-            ))}
-          </Section>
-
-          {quarantined.length > 0 && (
-            <Section title="Needs attention" count={quarantined.length}
-              hint="invalid as stored · delete, or recreate the name to replace">
-              {quarantined.map((p, i) => (
-                <ProfileCard key={p.name} p={p} index={i} onDelete={pp => setConfirm(pp)} />
-              ))}
-            </Section>
-          )}
-        </>
+        <div className="pf-grid pf-gallery" data-testid="pf-gallery">
+          {shown.map((c, i) => (c.addon ? (
+            <AddonCard key={c.id} a={c.addon} index={i} onImport={onImportAddon} onOpen={() => setDetail(c.id)} />
+          ) : (
+            <ProfileCard key={c.id} p={c.profile} index={i}
+              onEdit={onEdit} onClone={onClone}
+              onDelete={pp => setConfirm(pp)}
+              onExport={onExport}
+              onOpen={() => setDetail(c.id)} />
+          )))}
+        </div>
       )}
 
+      {quarantined.length > 0 && (
+        <Section title="Needs attention" count={quarantined.length}
+          hint="invalid as stored · delete, or recreate the name to replace">
+          {quarantined.map((p, i) => (
+            <ProfileCard key={p.name} p={p} index={i} onDelete={pp => setConfirm(pp)} />
+          ))}
+        </Section>
+      )}
+
+      {detailCard && (
+        <ProfileDetail card={detailCard} onClose={() => setDetail(null)}
+          onEdit={onEdit} onClone={onClone} onExport={onExport} onImport={onImportAddon} />
+      )}
       {drawer && (
         <ProfileDrawer
           mode={drawer.mode}
           source={drawer.source}
-          existing={allProfiles.filter(p => !p.quarantined).map(p => p.name)}
+          existing={existingNames}
           onClose={() => setDrawer(null)}
           onSaved={() => setDrawer(null)}
         />
@@ -1255,9 +1600,10 @@ function ProfilesView() {
       )}
       {importing && (
         <ImportModal
-          existing={allProfiles.filter(p => !p.quarantined).map(p => p.name)}
-          onClose={() => setImporting(false)}
-          onImported={() => setImporting(false)}
+          existing={existingNames}
+          envelope={importing.envelope}
+          onClose={() => setImporting(null)}
+          onImported={() => setImporting(null)}
         />
       )}
     </div>
@@ -1265,3 +1611,4 @@ function ProfilesView() {
 }
 
 Object.assign(window, { ProfilesView });
+export { ProfilesView };

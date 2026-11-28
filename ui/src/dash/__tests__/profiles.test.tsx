@@ -25,7 +25,12 @@ const {
   updateCalls,
   importCalls,
   importResult,
+  addonsBox,
+  refreshCalls,
 } = vi.hoisted(() => ({
+  // The mocked GET /api/profile-addons query, whole (data / isLoading / isError).
+  addonsBox: { current: { data: undefined, isLoading: false, isError: false } as Record<string, unknown> },
+  refreshCalls: [] as unknown[],
   profilesBox: { current: [] as Record<string, unknown>[] },
   systemInfoBox: { current: null as Record<string, unknown> | null },
   runnerImagesBox: { current: [] as Record<string, unknown>[] },
@@ -68,6 +73,13 @@ vi.mock('@/api/hooks/useProfiles', () => ({
       return importResult.current
     },
   }),
+  useProfileAddons: () => addonsBox.current,
+  useProfileAddonsRefresh: () => ({
+    isPending: false,
+    mutate: (...args: unknown[]) => {
+      refreshCalls.push(args)
+    },
+  }),
 }))
 
 // useMetaEnums resolves the static device taxonomy over the live payload; the
@@ -99,7 +111,8 @@ vi.mock('@/api/hooks/useRunnerImages', () => ({
 import { HALOGEN_DENIED, HALOGEN_KNOBS } from './fixtures/halogen-knobs'
 
 await import('../primitives.jsx')
-const { ProfileDrawer, ProfileCard, ImportModal } = await import('../profiles.jsx')
+const { ProfileDrawer, ProfileCard, ImportModal, AddonCard, ProfileDetail, ProfilesView, catalogNoteText } =
+  await import('../profiles.jsx')
 
 // system-info `backends` fixture — the Task 2 row shape the Runtime select,
 // the card chips and the import preview all read.
@@ -179,6 +192,8 @@ beforeEach(() => {
   createCalls.length = 0
   updateCalls.length = 0
   importCalls.length = 0
+  refreshCalls.length = 0
+  addonsBox.current = { data: undefined, isLoading: false, isError: false }
   importResult.current = {}
 })
 
@@ -444,8 +459,9 @@ describe('ProfileCard runtime facts (U3)', () => {
     expect(host.querySelector('[data-testid="pf-runtime-line-coding"]')?.textContent).toBe(
       'Standard — llama.cpp for AMD GPUs, on ROCm or Vulkan.',
     )
-    // No layout regression: the existing rows and footer tags stay put.
-    expect(host.textContent).toContain('-fa on')
+    // The footer still says which slots use it. The flag string is not on the
+    // card any more: it is in the detail drawer.
+    expect(host.textContent).not.toContain('-fa on')
     expect(host.textContent).toContain('used by 1')
     act(() => root.unmount())
   })
@@ -827,35 +843,291 @@ describe('ProfileDrawer tune fields (ADR-0029)', () => {
   })
 })
 
-describe('ProfileCard tune rows (ADR-0029)', () => {
-  it('shows ctx, thinking, vision, speculation, runner and flags', () => {
+describe('ProfileCard settings chips', () => {
+  const chipsOf = (host: HTMLElement, name: string) =>
+    Array.from(host.querySelectorAll(`[data-testid="pf-tune-${name}"] .pf-mchip`)).map((c) => c.textContent)
+
+  it('shows the first four settings a profile makes and folds the rest', () => {
     const { host, root } = card({
       name: 'tuned', flags: '-fa on', resolved_flags: '-fa on', ctx_size: 65536,
       enable_thinking: false, vision: 'off', speculation: 'off', runner: 'standard',
     })
-    const rows = (host.querySelector('[data-testid="pf-tune-tuned"]') as HTMLElement).textContent || ''
-    expect(rows).toContain('ctx64K')
-    expect(rows).toContain('thinkingoff')
-    expect(rows).toContain('visionoff')
-    expect(rows).toContain('specoff')
-    expect(rows).toContain('runnerStandard')
-    expect(rows).toContain('-fa on')
+    expect(chipsOf(host, 'tuned')).toEqual(['context64K', 'thinkingoff', 'visionoff', 'speculationoff', '+1'])
+    const more = host.querySelector('[data-testid="pf-tune-tuned"] .pf-mchip.more') as HTMLElement
+    expect(more.getAttribute('title')).toBe('runner Standard')
     act(() => root.unmount())
   })
 
   it('shows effort and budget', () => {
     const { host, root } = card({ name: 'deep', flags: '', reasoning_effort: 'high', reasoning_budget: 2048 })
-    const rows = (host.querySelector('[data-testid="pf-tune-deep"]') as HTMLElement).textContent || ''
-    expect(rows).toContain('effort high · budget 2048')
+    expect(chipsOf(host, 'deep')).toEqual(['efforthigh', 'reasoning budget2048'])
     act(() => root.unmount())
   })
 
-  it('a profile with no ctx_size says it defers to the model, unset thinking reads default (off), other auto fields read auto', () => {
-    const { host, root } = card({ name: 'plain', flags: '', ctx_size: null, enable_thinking: null, vision: 'auto', speculation: 'auto' })
-    const rows = (host.querySelector('[data-testid="pf-tune-plain"]') as HTMLElement).textContent || ''
-    expect(rows).toContain('ctxmodel native')
-    expect(rows).toContain('thinkingdefault (off)')
-    expect(rows).toContain('runnerauto')
+  it('a profile at its defaults says engine defaults; one with only flags says flags only', () => {
+    const plain = card({ name: 'plain', flags: '', ctx_size: null, enable_thinking: null, vision: 'auto', speculation: 'auto' })
+    expect(chipsOf(plain.host, 'plain')).toEqual(['engine defaults'])
+    act(() => plain.root.unmount())
+    const flagged = card({ name: 'flagged', flags: '-fa on', ctx_size: null, vision: 'auto', speculation: 'auto' })
+    expect(chipsOf(flagged.host, 'flagged')).toEqual(['flags only'])
+    act(() => flagged.root.unmount())
+  })
+
+  it('a context that is not a round K is printed whole', () => {
+    const { host, root } = card({ name: 'odd', flags: '', ctx_size: 250000 })
+    expect(chipsOf(host, 'odd')).toEqual(['context250000'])
+    act(() => root.unmount())
+  })
+
+  it('labels every card with its kind and runtime family', () => {
+    const seed = card({ name: 'agent', seed: true, runtime_family: 'llama-server' })
+    expect(seed.host.querySelector('.pf-gc-eyebrow')?.textContent).toBe('built in · llama-server')
+    expect(seed.host.querySelector('.pf-seed')).not.toBeNull()
+    act(() => seed.root.unmount())
+    const custom = card({ name: 'mine', seed: false, runtime_family: 'kokoro' })
+    expect(custom.host.querySelector('.pf-gc-eyebrow')?.textContent).toBe('custom · kokoro')
+    act(() => custom.root.unmount())
+  })
+})
+
+// ── Import catalog ───────────────────────────────────────────────────────────
+
+const DENSE_ENVELOPE = {
+  kind: 'hal0.profile', schema_version: 2, hal0_version: '1.5.0', exported_at: '2026-09-01T00:00:00Z',
+  name: 'dense', checksum: 'sha256:abc',
+  profile: { flags: '-fa auto -b 2048', ctx_size: 131072, vision: 'off', intent: 'Generic dense workload · tuned for 128K ctx' },
+}
+
+function addon(over: Record<string, unknown> = {}) {
+  return {
+    name: 'dense', title: 'Generic dense workload', description: 'Generic dense workload · tuned for 128K ctx',
+    runtime_family: 'llama-server', runner: null, runner_stripped: false, checksum: 'sha256:abc',
+    min_hal0_version: '1.5.0', installed: false, profile: DENSE_ENVELOPE.profile,
+    envelope: DENSE_ENVELOPE, blocked: null, ...over,
+  }
+}
+
+function catalog(addons: unknown[], over: Record<string, unknown> = {}) {
+  return {
+    data: { source: 'remote', url: 'https://hal0.dev/profiles/index.json', fetched_at: '2026-11-28T18:00:00Z', error: null, addons, ...over },
+    isLoading: false, isError: false,
+  }
+}
+
+describe('AddonCard', () => {
+  it('shows the settings the catalog profile makes and offers Import', () => {
+    const imported: unknown[] = []
+    const { host, root } = mount(
+      React.createElement(AddonCard, { a: addon(), index: 0, onImport: (a: unknown) => imported.push(a) }),
+    )
+    expect(host.querySelector('.pf-gc-eyebrow')?.textContent).toBe('import · llama-server')
+    expect(
+      Array.from(host.querySelectorAll('[data-testid="pf-tune-addon-dense"] .pf-mchip')).map((c) => c.textContent),
+    ).toEqual(['context128K', 'visionoff'])
+    const btn = host.querySelector('[data-testid="pf-btn-import-dense"]') as HTMLButtonElement
+    expect(btn.textContent).toContain('Import')
+    act(() => btn.click())
+    expect(imported).toHaveLength(1)
+    act(() => root.unmount())
+  })
+
+  it('a blocked row says why and has no Import button', () => {
+    const { host, root } = mount(
+      React.createElement(AddonCard, {
+        a: addon({
+          envelope: null,
+          blocked: { code: 'addons.needs_newer_hal0', message: 'needs hal0 9.0.0 or newer; this box runs 1.9.0' },
+        }),
+        index: 0, onImport: () => {},
+      }),
+    )
+    expect(host.querySelector('[data-testid="pf-addon-blocked-dense"]')?.textContent).toContain(
+      'needs hal0 9.0.0 or newer',
+    )
+    expect(host.querySelector('[data-testid="pf-btn-import-dense"]')).toBeNull()
+    act(() => root.unmount())
+  })
+
+  it('a row with no readable profile body still renders, without chips', () => {
+    const { host, root } = mount(
+      React.createElement(AddonCard, {
+        a: addon({ profile: null, envelope: null, runtime_family: null, blocked: { code: 'addons.envelope_unavailable', message: 'gone' } }),
+        index: 0, onImport: () => {},
+      }),
+    )
+    expect(host.querySelector('[data-testid="pf-tune-addon-dense"]')).toBeNull()
+    expect(host.textContent).toContain('Not offered: gone')
+    act(() => root.unmount())
+  })
+
+  it('a name already on the box is marked and imports as a copy', () => {
+    const { host, root } = mount(
+      React.createElement(AddonCard, { a: addon({ installed: true }), index: 0, onImport: () => {} }),
+    )
+    expect(host.querySelector('[data-testid="pf-addon-installed-dense"]')?.textContent).toBe('name in use')
+    expect(host.querySelector('[data-testid="pf-btn-import-dense"]')?.textContent).toContain('Import a copy')
+    act(() => root.unmount())
+  })
+})
+
+describe('catalogNoteText', () => {
+  it('names where the import rows came from', () => {
+    expect(catalogNoteText(catalog([addon()]))).toBe('1 profile to import, from hal0.dev.')
+    expect(
+      catalogNoteText(catalog([addon(), addon({ name: 'moe' })], { source: 'bundled', error: 'could not reach it: ConnectError' })),
+    ).toBe('2 profiles to import, from the set this release ships. hal0.dev could not be read: could not reach it: ConnectError.')
+    expect(catalogNoteText(catalog([], { source: 'bundled', url: null }))).toBe(
+      '0 profiles to import, from the set this release ships. The online catalog is switched off.',
+    )
+    expect(catalogNoteText({ isLoading: true })).toBe('Checking the import catalog…')
+    expect(catalogNoteText({ isError: true, error: { message: 'HTTP 500' } })).toBe(
+      'Import catalog unavailable: HTTP 500.',
+    )
+  })
+})
+
+describe('ProfileDetail', () => {
+  const NOOPS = { onClose: () => {}, onEdit: () => {}, onClone: () => {}, onExport: () => {}, onImport: () => {} }
+
+  it('prints flags, typed settings and the profiles.toml table for a built-in profile', () => {
+    const p = {
+      name: 'agent', seed: true, runtime_family: 'llama-server', intent: 'Agent workload · 64K ctx',
+      flags: '-fa auto --parallel 1', ctx_size: 65536, enable_thinking: false, vision: 'off',
+      speculation: 'auto', reasoning_effort: 'default', reasoning_budget: -1, runner: null, used_by: [],
+    }
+    const { root } = mount(
+      React.createElement(ProfileDetail, {
+        card: { id: 'local:agent', kind: 'built in', name: 'agent', family: 'llama-server', profile: p, addon: null },
+        ...NOOPS,
+      }),
+    )
+    const detail = document.querySelector('[data-testid="pf-detail"]') as HTMLElement
+    expect(detail.querySelector('[data-testid="pf-detail-flags"]')?.textContent).toBe('-fa auto --parallel 1')
+    expect(detail.querySelector('[data-testid="pf-detail-facts"]')?.textContent).toBe(
+      'context64Kthinkingoffvisionoff',
+    )
+    expect(detail.querySelector('[data-testid="pf-detail-toml"]')?.textContent).toBe(
+      [
+        '[profile.agent]',
+        'flags = "-fa auto --parallel 1"',
+        'ctx_size = 65536',
+        'enable_thinking = false',
+        'vision = "off"',
+        'intent = "Agent workload · 64K ctx"',
+      ].join('\n'),
+    )
+    expect(detail.querySelector('[data-testid="pf-detail-clone"]')).not.toBeNull()
+    expect(detail.querySelector('[data-testid="pf-detail-edit"]')).toBeNull()
+    act(() => root.unmount())
+  })
+
+  it('offers Import for a catalog row and says when its runtime will be dropped', () => {
+    const imported: unknown[] = []
+    const a = addon({ runner_stripped: true, profile: { ...DENSE_ENVELOPE.profile, runner: 'exotic' } })
+    const { root } = mount(
+      React.createElement(ProfileDetail, {
+        card: { id: 'addon:dense', kind: 'import', name: 'dense', family: 'llama-server', profile: a.profile, addon: a },
+        ...NOOPS, onImport: (x: unknown) => imported.push(x),
+      }),
+    )
+    const detail = document.querySelector('[data-testid="pf-detail"]') as HTMLElement
+    expect(detail.textContent).toContain('Its runtime (exotic) is not available here')
+    act(() => (detail.querySelector('[data-testid="pf-detail-import"]') as HTMLButtonElement).click())
+    expect(imported).toEqual([a])
+    act(() => root.unmount())
+  })
+})
+
+describe('ProfilesView gallery', () => {
+  const LOCAL = [
+    { name: 'agent', seed: true, runtime_family: 'llama-server', flags: '-fa auto', ctx_size: 65536, used_by: ['agent'] },
+    { name: 'kokoro', seed: true, runtime_family: 'kokoro', flags: '' },
+    { name: 'mine', seed: false, runtime_family: 'llama-server', flags: '-fa on', cloned_from: 'agent' },
+    { name: 'broken', quarantined: true, error: 'bad ctx', seed: false, used_by: [] },
+  ]
+  const names = (host: HTMLElement) =>
+    Array.from(host.querySelectorAll('[data-testid="pf-gallery"] .stk-lib-name')).map((n) => n.textContent)
+  const click = (host: HTMLElement, testid: string) =>
+    act(() => (host.querySelector(`[data-testid="${testid}"]`) as HTMLButtonElement).click())
+
+  beforeEach(() => {
+    profilesBox.current = LOCAL
+    addonsBox.current = catalog([addon(), addon({ name: 'kokoro-fast', runtime_family: 'kokoro' })])
+  })
+
+  it('puts built-in, custom and import cards on one grid, quarantined entries below it', () => {
+    const { host, root } = mount(React.createElement(ProfilesView))
+    expect(names(host)).toEqual(['agent', 'kokoro', 'mine', 'dense', 'kokoro-fast'])
+    expect(host.querySelector('[data-testid="pf-filter-readout"]')?.textContent).toBe('5 of 5 profiles')
+    expect(host.querySelector('[data-testid="pf-quarantined-broken"]')).not.toBeNull()
+    expect(host.querySelector('[data-testid="pf-catalog-note"]')?.textContent).toContain(
+      '2 profiles to import, from hal0.dev.',
+    )
+    act(() => root.unmount())
+  })
+
+  it('filters by kind and runtime, and clears', () => {
+    const { host, root } = mount(React.createElement(ProfilesView))
+    click(host, 'pf-filter-kind-import')
+    expect(names(host)).toEqual(['dense', 'kokoro-fast'])
+    click(host, 'pf-filter-runtime-kokoro')
+    expect(names(host)).toEqual(['kokoro-fast'])
+    expect(host.querySelector('[data-testid="pf-filter-readout"]')?.textContent).toBe('1 of 5 profiles')
+    click(host, 'pf-filter-kind-import')
+    click(host, 'pf-filter-kind-custom')
+    expect(host.querySelector('[data-testid="pf-filter-empty"]')).not.toBeNull()
+    click(host, 'pf-filter-clear')
+    expect(names(host)).toHaveLength(5)
+    act(() => root.unmount())
+  })
+
+  it('still lists the profiles on the box while the catalog is unreachable', () => {
+    addonsBox.current = { data: undefined, isLoading: false, isError: true, error: { message: 'HTTP 500' }, refetch: () => {} }
+    const { host, root } = mount(React.createElement(ProfilesView))
+    expect(names(host)).toEqual(['agent', 'kokoro', 'mine'])
+    expect(host.querySelector('[data-testid="pf-catalog-note"]')?.textContent).toContain('Import catalog unavailable')
+    act(() => root.unmount())
+  })
+
+  it('"check again" asks the server to re-read the published index', () => {
+    const { host, root } = mount(React.createElement(ProfilesView))
+    click(host, 'pf-catalog-refresh')
+    expect(refreshCalls).toHaveLength(1)
+    act(() => root.unmount())
+  })
+
+  it('Import on a catalog card opens the import dialog on that envelope, with no file picker', async () => {
+    importResult.current = {
+      dry_run: true, valid: true, checksum_ok: true, name: 'dense', schema_version: 2, collides: false,
+      runner: null, runner_stripped: false, runtime_family: 'llama-server',
+    }
+    const { host, root } = mount(React.createElement(ProfilesView))
+    await act(async () => {
+      ;(host.querySelector('[data-testid="pf-btn-import-dense"]') as HTMLButtonElement).click()
+    })
+    expect(importCalls).toEqual([{ envelope: DENSE_ENVELOPE, dry_run: true }])
+    expect(host.querySelector('[data-testid="pf-import-file"]')).toBeNull()
+    expect((host.querySelector('[data-testid="pf-import-name"]') as HTMLInputElement).value).toBe('dense')
+    await act(async () => {
+      ;(host.querySelector('[data-testid="pf-import-confirm"]') as HTMLButtonElement).click()
+    })
+    expect(importCalls[1]).toEqual({ envelope: DENSE_ENVELOPE, name: 'dense', dry_run: false })
+    act(() => root.unmount())
+  })
+
+  it('the header Import still opens the file picker', () => {
+    const { host, root } = mount(React.createElement(ProfilesView))
+    click(host, 'pf-btn-import')
+    expect(host.querySelector('[data-testid="pf-import-file"]')).not.toBeNull()
+    act(() => root.unmount())
+  })
+
+  it('"settings" opens the detail drawer for that card', () => {
+    const { host, root } = mount(React.createElement(ProfilesView))
+    click(host, 'pf-btn-open-mine')
+    const detail = document.querySelector('[data-testid="pf-detail"]') as HTMLElement
+    expect(detail.querySelector('[data-testid="pf-detail-toml"]')?.textContent).toContain('[profile.mine]')
+    expect(detail.querySelector('[data-testid="pf-detail-edit"]')).not.toBeNull()
     act(() => root.unmount())
   })
 })

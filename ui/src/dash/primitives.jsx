@@ -995,6 +995,9 @@ function ImportDialog({
   commit,
   onClose,
   onImported,
+  //: An envelope the caller already holds (a catalog row). The dialog skips
+  //  the file picker and opens on that envelope's dry-run report.
+  initialEnvelope = null,
 }) {
   const [envelope, setEnvelope] = useStateP(null);
   const [report, setReport] = useStateP(null);
@@ -1002,11 +1005,9 @@ function ImportDialog({
   const [busy, setBusy] = useStateP(false);
   const [err, setErr] = useStateP("");
 
-  async function onFile(file) {
+  async function load(env, file) {
     setErr("");
     try {
-      const text = await file.text();
-      const env = JSON.parse(text);
       setEnvelope(env);
       const r = await dryRun(env);
       setReport(r);
@@ -1017,6 +1018,23 @@ function ImportDialog({
       setReport(null);
     }
   }
+
+  async function onFile(file) {
+    let env;
+    try {
+      env = JSON.parse(await file.text());
+    } catch (e) {
+      setErr(e?.message || invalidCopy);
+      return;
+    }
+    await load(env, file);
+  }
+
+  useEffectP(() => {
+    if (initialEnvelope) load(initialEnvelope, null);
+    // Runs once: the dialog is mounted per import.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const taken = existing.includes(name);
   const nameValid = NAME_RE.test(name) && !taken;
@@ -1046,7 +1064,11 @@ function ImportDialog({
           <button className="stk-dlg-x" onClick={onClose} aria-label="Close" disabled={busy}>{Icons.close}</button>
         </div>
         <div className="stk-dlg-b">
-          {!report ? (
+          {!report && initialEnvelope ? (
+            err
+              ? <div className="stk-dlg-warn">{Icons.alert}{err}</div>
+              : <div className="stk-dlg-hint mono">Checking…</div>
+          ) : !report ? (
             <label className="stk-drop">
               <input type="file" accept={fileAccept} style={{ display: "none" }}
                 onChange={e => e.target.files?.[0] && onFile(e.target.files[0])} data-testid={fileTestid} />

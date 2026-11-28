@@ -177,7 +177,74 @@ export function useProfileImport() {
         { method: 'POST', body: payload as any, raw: true },
       ),
     onSuccess: (_d, vars) => {
-      if (!vars.dry_run) qc.invalidateQueries({ queryKey: ['profiles'] })
+      if (vars.dry_run) return
+      qc.invalidateQueries({ queryKey: ['profiles'] })
+      // The catalog marks which of its names are taken on this box.
+      qc.invalidateQueries({ queryKey: ['profile-addons'] })
     },
+  })
+}
+
+/** Why a catalog row is listed but not offered. */
+export interface ProfileAddonBlock {
+  code: string
+  message: string
+}
+
+/** One row of the import catalog (GET /api/profile-addons). */
+export interface ProfileAddon {
+  name: string
+  title: string
+  description: string
+  runtime_family: string | null
+  runner: string | null
+  /** The envelope's runner is not on this box: it imports with none pinned. */
+  runner_stripped: boolean
+  checksum: string
+  min_hal0_version: string
+  /** A profile of this name already exists here; importing needs another name. */
+  installed: boolean
+  /** The profile body, sparse (absent key = unset). Null when unreadable. */
+  profile: Partial<ProfileBody> | null
+  /** Post to /api/profiles/import. Null when the row is blocked. */
+  envelope: ProfileEnvelope | null
+  blocked: ProfileAddonBlock | null
+  /** Publisher extras, all optional. */
+  category?: string
+  summary?: string
+  author?: string
+  first_party?: boolean
+  version?: number
+  url?: string
+}
+
+export interface ProfileAddonCatalog {
+  /** "remote": the published index. "bundled": the addons this release ships. */
+  source: 'remote' | 'bundled'
+  /** The index URL; null when the outbound fetch is switched off. */
+  url: string | null
+  fetched_at: string
+  /** Why the published index was not used (source is then "bundled"). */
+  error: string | null
+  addons: ProfileAddon[]
+}
+
+export function useProfileAddons() {
+  return useQuery({
+    queryKey: ['profile-addons'],
+    queryFn: () => apiGet<ProfileAddonCatalog>(ENDPOINTS.profileAddons),
+    // The server caches the published index for an hour; asking it more often
+    // only re-reads which names are taken, which an import invalidates anyway.
+    staleTime: 5 * 60_000,
+    retry: false,
+  })
+}
+
+/** Fetch the published index now, past the server's cache. */
+export function useProfileAddonsRefresh() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: () => apiGet<ProfileAddonCatalog>(`${ENDPOINTS.profileAddons}?refresh=true`),
+    onSuccess: (data) => qc.setQueryData(['profile-addons'], data),
   })
 }

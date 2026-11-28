@@ -546,6 +546,9 @@ export const ENDPOINTS = {
   // POST export (envelope) | import (collection-level POST: dry-run, then create).
   profileExport: (name: string) => `/api/profiles/${encodeURIComponent(name)}/export`,
   profileImport: '/api/profiles/import',
+  // Import catalog: the published addon index (hal0.dev), or the addons this
+  // release ships when it cannot be reached. Read-only.
+  profileAddons: '/api/profile-addons',
 
   // ── Stacks (named, portable slot+profile+model bundles) ─────────
   // GET list (+ active + drift) | POST create. Per-stack: GET detail | PUT |

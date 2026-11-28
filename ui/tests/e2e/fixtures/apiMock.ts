@@ -165,6 +165,12 @@ export async function installDefaultMocks(page: Page, state: MockState) {
   // list means no managed remotes, so the local-endpoint row count is unaffected.
   await page.route('**/api/upstreams', (route) => json(route, []))
   await page.route('**/api/profiles', (route) => json(route, MOCK_DATA.profiles ?? []))
+  // GET /api/profile-addons: the Profiles page's import catalog. Empty by
+  // default so the card counts other specs assert are the local profiles
+  // only; profiles-page-v3 routes its own rows.
+  await page.route('**/api/profile-addons*', (route) =>
+    json(route, { source: 'bundled', url: null, fetched_at: '2026-11-28T00:00:00Z', error: null, addons: [] }),
+  )
   // GET /api/memory/graph/status is networkFirst in src/api/mock.ts (#1834:
   // the Settings ▸ Memory graph panel's spec drives the limits echo through
   // page.route), so the default here mirrors the baked builder in
