@@ -204,6 +204,19 @@ def _flag_overrides(flags: Sequence[str]) -> list[Override]:
     return out
 
 
+NO_PROVISION_FLAGS = ("--dev", "--no-start")
+_UNPROVISIONED: tuple[tuple[str, object], ...] = (
+    (TERMINAL_KEY, False),
+    ("gen.mode", "off"),
+    ("gen.models", []),
+)
+
+
+def provision_mode(flags: Sequence[str]) -> str:
+    """The first installer flag that provisions no assistant or image models, else empty."""
+    return next((f for f in flags if f in NO_PROVISION_FLAGS), "")
+
+
 def overrides(flags: Sequence[str], environ: Mapping[str, str]) -> tuple[Override, ...]:
     """Turn installer flags and variables into overrides; flags come last and win."""
     return (*_variable_overrides(environ), *_flag_overrides(flags))
@@ -276,8 +289,14 @@ def effective(
     hal0_version: str,
     now: str,
     install_state: str = "fresh",
+    mode: str = "",
 ) -> Document:
-    """Layer preset, saved, given, chosen and overrides into one answers document."""
+    """Layer preset, saved, given, chosen and overrides into one answers document.
+
+    ``mode`` is a flag (``--dev``, ``--no-start``) under which the installer sets up
+    no assistant or image models: the terminal tool and the image models are then
+    off, unless a flag or variable names them (the installer ignores those too).
+    """
     saved_layer = copy.deepcopy(_require_object("saved", saved)) if saved is not None else {}
     given_layer = _require_object("given", given) if given is not None else {}
     apps = saved_layer.get("apps")
@@ -311,6 +330,9 @@ def effective(
     for layer in (chosen_layer, over_layer):
         _merge_replacing(doc, layer)
     _drop_outside_flm_path(doc, over)
+    for key, value in _UNPROVISIONED if mode else ():
+        if not any(o.key == key for o in over):
+            put(doc, key, copy.deepcopy(value))
     doc["version"] = DOCUMENT_VERSION
     doc["meta"] = {"saved_at": now, "saved_by": hal0_version}
     return doc

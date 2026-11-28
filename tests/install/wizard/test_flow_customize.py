@@ -494,7 +494,8 @@ def test_turning_the_assistant_off_drops_the_terminal_tool_answer(
     off = run(on, "b", "b", "b", "b", "DOWN", "SPACE", *["ENTER"] * 5)
     assert view(off).screen is Screen.REVIEW
     assert "apps.hermes.terminal_tool" not in chosen(off)
-    assert all(r.id != "terminal_tool" for r in view(off).rows)
+    (row,) = [r for r in view(off).rows if r.id == "terminal_tool"]
+    assert row.detail == "off"
 
 
 def test_the_empty_ladder_hint_does_not_offer_a_choice(
@@ -892,3 +893,102 @@ def test_an_npu_folder_typed_with_a_doubled_leading_slash_is_recorded_with_one(
     s = run(_npu_storage(catalog, npu_facts), *"//srv/pool/models/npu", "ENTER")
     assert view(s).error is None
     assert chosen(s)["model_store.flm_path"] == "/srv/pool/models/npu"
+
+
+# ------------------------------------------- --dev and --no-start provision nothing
+
+_MODES = ["--dev", "--no-start"]
+
+
+@pytest.mark.parametrize("mode", _MODES)
+def test_the_images_job_is_unavailable_with_a_mode_that_provisions_nothing(
+    ladder_catalog: Catalog, big_pool_facts: Facts, mode: str
+) -> None:
+    s = custom(ladder_catalog, big_pool_facts, mode=mode)
+    row = next(r for r in view(s).rows if r.id == "images")
+    assert (row.state, row.note) == ("unavailable", f"not set up with {mode}")
+    assert "gen.mode" not in chosen(run(s, "DOWN", "DOWN", "DOWN", "SPACE"))
+
+
+@pytest.mark.parametrize("mode", _MODES)
+def test_no_image_step_and_no_image_models_with_such_a_mode(
+    ladder_catalog: Catalog, big_pool_facts: Facts, mode: str
+) -> None:
+    catalog = _with_image_row(ladder_catalog)
+    s = custom(catalog, big_pool_facts, given=_IMAGES_ON, mode=mode)
+    after = run(s, "ENTER", "ENTER")
+    assert view(after).screen is Screen.STORAGE
+    doc = effective_for(after)
+    assert doc["gen"] == {"mode": "off", "models": []}
+
+
+@pytest.mark.parametrize("mode", _MODES)
+def test_the_terminal_tool_is_unavailable_and_reviews_as_off_with_such_a_mode(
+    catalog: Catalog, usable_facts: Facts, mode: str
+) -> None:
+    s = run(custom(catalog, usable_facts, mode=mode), "ENTER", "ENTER", "ENTER", "ENTER")
+    row = next(r for r in view(s).rows if r.id == "terminal_tool")
+    assert (row.state, row.note) == ("unavailable", f"not set up with {mode}")
+    ticked = press(s, "SPACE")
+    assert "apps.hermes.terminal_tool" not in chosen(ticked)
+    review = run(ticked, "ENTER")
+    (shown,) = [r for r in view(review).rows if r.id == "terminal_tool"]
+    assert shown.detail == "off"
+    assert effective_for(review)["apps"]["hermes"]["terminal_tool"] is False
+
+
+def effective_for(state: State) -> dict[str, dict[str, object]]:
+    from hal0.install.wizard.flow_model import effective_doc
+
+    return effective_doc(state)  # type: ignore[return-value]
+
+
+def test_an_explicit_variable_is_still_an_override_with_such_a_mode(
+    catalog: Catalog, usable_facts: Facts
+) -> None:
+    over = [Override("apps.hermes.terminal_tool", True, "HAL0_HERMES_TERMINAL")]
+    s = custom(catalog, usable_facts, over=over, mode="--dev")
+    assert effective_for(s)["apps"]["hermes"]["terminal_tool"] is True
+
+
+# ------------------------------------------- control characters in typed text
+
+_BAD_TEXT = [
+    "\x1b[31m",
+    "\x07",
+    "\x00",
+    "\t",
+    "\x7f",
+    "\x85",
+    "\x9f",
+    "\x1f",
+]
+_TEXT_FIELDS = [
+    "folder",
+    "q:model_store",
+    "q:flm_store",
+    "q:hostname",
+    "q:port",
+    "q:allowed_origins",
+    "save",
+    "token",
+]
+
+
+@pytest.mark.parametrize("field", _TEXT_FIELDS)
+@pytest.mark.parametrize("bad", _BAD_TEXT)
+@pytest.mark.parametrize("shape", ["{}", "ok{}", "{}ok", "/srv/hal0/x{}y"])
+def test_a_control_character_in_typed_text_is_refused_before_it_is_stored(
+    catalog: Catalog, npu_facts: Facts, field: str, bad: str, shape: str
+) -> None:
+    from hal0.install.wizard.session import plain_keys
+
+    s = replace(custom(catalog, npu_facts), editing="", field=field)
+    keys = plain_keys(shape.format(bad), view(s))[1]  # the plain form: one key per character
+    after = run(s, *keys)
+    assert after.editing == ""  # the field stays open and holds nothing typed
+    assert after.error is not None and "cannot be used here" in after.error
+    assert bad not in after.error and "ok" not in after.error
+    assert chosen(after) == chosen(s)
+    assert secret(after) is None
+    assert after.token is None

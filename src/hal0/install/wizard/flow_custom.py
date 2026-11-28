@@ -34,6 +34,7 @@ from .flow_model import (
     key_of,
     make_row,
     model_requirement,
+    no_provision_reason,
     record_answer,
     set_by,
 )
@@ -64,6 +65,8 @@ def _job_state(s: State, c: Component) -> tuple[str, str]:
     fixed = fixed_override(s, c.answer_key)
     if fixed is not None:
         return "fixed", set_by(fixed)
+    if c.id == _IMAGE_JOB and s.mode:
+        return "unavailable", no_provision_reason(s)
     need = failing_need(s, c)
     if need is not None:
         reason = s.catalog.reasons[need]
@@ -122,7 +125,7 @@ def _role(s: State) -> tuple[str, str]:
 def _image_step(s: State) -> bool:
     on = any(c.id == _IMAGE_JOB for c in jobs_on(s, effective_doc(s)))
     has_rows = any(r.role == "image" for r in s.catalog.model_ladder)
-    return on and has_rows and _question(s, "image_model") is not None
+    return on and not s.mode and has_rows and _question(s, "image_model") is not None
 
 
 def _ladder_row(s: State, row: ModelRow, fixed_note: str | None) -> Row:
@@ -327,6 +330,8 @@ def assistant_rows(s: State) -> tuple[Row, ...]:
     terminal = _row(s, doc, "terminal_tool", "")
     if terminal is not None:
         terminal = replace(terminal, kind="check", value=terminal.value is True)
+        if s.mode:
+            terminal = replace(terminal, state="unavailable", note=no_provision_reason(s))
     return _present(
         [
             _gated(s, terminal, _ASSISTANT_JOB),

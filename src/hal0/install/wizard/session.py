@@ -43,6 +43,7 @@ class Inputs:
     over: tuple[Override, ...]
     hal0_version: str
     facts_known: bool = True
+    mode: str = ""
 
 
 @contextlib.contextmanager
@@ -185,7 +186,9 @@ class Session:
 
     def run(self) -> State:
         inp = self.inp
-        state = flow.start(inp.catalog, inp.facts, saved=inp.saved, given=inp.given, over=inp.over)
+        state = flow.start(
+            inp.catalog, inp.facts, saved=inp.saved, given=inp.given, over=inp.over, mode=inp.mode
+        )
         first, notes = state.screen, _intro_notes(inp)
         while flow.outcome(state) is Outcome.RUNNING:
             shown = self._view(state, first, notes)

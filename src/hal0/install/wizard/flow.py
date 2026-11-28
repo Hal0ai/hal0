@@ -222,10 +222,19 @@ def start(
     saved: dict[str, object] | None = None,
     given: dict[str, object] | None = None,
     over: Sequence[Override] = (),
+    mode: str = "",
 ) -> State:
     """The first screen, with every value prefilled from the layers."""
-    s = State(catalog, facts, saved, given, tuple(over), {}, Screen.TYPE)
+    s = State(catalog, facts, saved, given, tuple(over), {}, Screen.TYPE, mode=mode)
     return _enter(s, _screens(s)[0])
+
+
+_BAD_TEXT = "that text contains a character that cannot be used here"
+
+
+def _has_control(text: str) -> bool:
+    """Whether text holds a character below U+0020, U+007F or one of U+0080 to U+009F."""
+    return any(c < " " or "\x7f" <= c <= "\x9f" for c in text)
 
 
 def _edit(s: State, key: str) -> State:
@@ -233,6 +242,10 @@ def _edit(s: State, key: str) -> State:
     if key == "ENTER":
         if not text and s.field != TOKEN_FIELD:
             return replace(s, editing=None, field="", error=None)
+        if _has_control(text):
+            # One place for every typed field, before any validator can trim the
+            # character away; the text is dropped so it is never shown or kept.
+            return replace(s, editing="", error=_BAD_TEXT)
         return _FIELDS.get(s.field, commit_field)(s, text)
     if key == "BACKSPACE":
         return replace(s, editing=text[:-1], error=None)
