@@ -140,6 +140,8 @@ NONCE="$(head -c 8 /dev/urandom | od -An -tx1 | tr -d ' \n')"
 [[ "$NONCE" =~ ^[0-9a-f]{16}$ ]] || die2 "could not generate a run nonce"
 CT_NONCE="$NONCE"
 
+pve_check_range || die2 "refusing: the VMID range is not usable (see above)"
+
 # One run at a time: a local lock for the whole run, taken before any call to
 # the host. A dry run touches no host and creates no files, so it takes none.
 REPORT_ROOT="${HAL0_MATRIX_REPORT_ROOT:-${REPO}/tests/harness/reports/install-matrix}"

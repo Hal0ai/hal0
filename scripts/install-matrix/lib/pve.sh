@@ -46,11 +46,29 @@ _pve_vmid_max() { printf '%s' "${HAL0_MATRIX_VMID_MAX:-189}"; }
 _pve_vmid_ok() { [[ "${1:-}" =~ ^[1-9][0-9]{0,8}$ ]]; }
 _pve_uint_ok() { [[ "${1:-}" =~ ^[0-9]{1,9}$ ]]; }
 
-_pve_in_range() {
+# The VMID range must be two plain numbers with 100 <= min <= max and at most
+# 64 VMIDs (max - min <= 63): a wide range would leave the tag and hostname as
+# the only protection for every guest on the host.
+_pve_range_ok() {
   local lo hi
   lo="$(_pve_vmid_min)"
   hi="$(_pve_vmid_max)"
-  _pve_uint_ok "$lo" && _pve_uint_ok "$hi" || return 1
+  [[ "$lo" =~ ^[1-9][0-9]{2,8}$ && "$hi" =~ ^[1-9][0-9]{2,8}$ ]] || return 1
+  ((10#$lo <= 10#$hi && 10#$hi - 10#$lo <= 63))
+}
+
+# pve_check_range: prints why and returns 1 when the range is not usable.
+pve_check_range() {
+  _pve_range_ok && return 0
+  _pve_err "bad VMID range $(_pve_vmid_min)-$(_pve_vmid_max): both must be plain numbers, 100 <= min <= max, and max - min <= 63"
+  return 1
+}
+
+_pve_in_range() {
+  local lo hi
+  _pve_range_ok || return 1
+  lo="$(_pve_vmid_min)"
+  hi="$(_pve_vmid_max)"
   _pve_vmid_ok "$1" || return 1
   ((10#$1 >= 10#$lo && 10#$1 <= 10#$hi))
 }
@@ -239,10 +257,7 @@ pve_pick_vmid() {
   local lo hi out
   lo="$(_pve_vmid_min)"
   hi="$(_pve_vmid_max)"
-  if ! _pve_uint_ok "$lo" || ! _pve_uint_ok "$hi"; then
-    _pve_err "bad VMID range ${lo}-${hi}"
-    return 1
-  fi
+  pve_check_range || return 1
   out="$(pve_run 'pvesh get /cluster/resources --type vm --output-format json')" \
     || { _pve_err "cannot list guests"; return 1; }
   printf '%s' "$out" | python3 -I -c '

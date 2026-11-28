@@ -565,6 +565,51 @@ def test_pick_vmid_range_full(fake):
     assert r.returncode == 1 and r.stdout == ""
 
 
+# --- the range is sanity-checked ---------------------------------------------
+
+BAD_RANGES = [
+    ("1", "999999999"),
+    ("99", "120"),
+    ("170", "234"),  # 65 VMIDs
+    ("189", "170"),
+    ("a", "b"),
+    ("0170", "180"),
+    ("170", "18 9"),
+]
+
+
+@pytest.mark.parametrize("lo,hi", BAD_RANGES)
+def test_a_silly_range_refuses_everything_before_any_ssh(fake, lo, hi):
+    env = {"HAL0_MATRIX_VMID_MIN": lo, "HAL0_MATRIX_VMID_MAX": hi}
+    for call in (
+        "ct_destroy 175",
+        "ct_start 175",
+        "ct_exec 175 id",
+        "ct_owned 175",
+        "pve_pick_vmid",
+        "ct_create 175 local:vztmpl/x.tar.zst 1 4 8192 40",
+    ):
+        r = fake.run(call, env=env)
+        assert r.returncode in (1, 90), (call, r.stderr)
+    assert fake.calls() == []
+
+
+def test_pick_vmid_names_the_bad_range(fake):
+    r = fake.run(
+        "pve_pick_vmid",
+        env={"HAL0_MATRIX_VMID_MIN": "1", "HAL0_MATRIX_VMID_MAX": "999999999"},
+    )
+    assert "bad VMID range 1-999999999" in r.stderr
+
+
+@pytest.mark.parametrize("lo,hi", [("100", "163"), ("170", "233"), ("170", "170"), ("200", "250")])
+def test_a_sane_range_is_accepted(fake, lo, hi):
+    env = {"HAL0_MATRIX_VMID_MIN": lo, "HAL0_MATRIX_VMID_MAX": hi}
+    assert fake.run(f"_pve_in_range {lo}", env=env).returncode == 0
+    assert fake.run(f"_pve_in_range {hi}", env=env).returncode == 0
+    assert fake.run("pve_check_range", env=env).returncode == 0
+
+
 # --- ownership guard --------------------------------------------------------
 
 

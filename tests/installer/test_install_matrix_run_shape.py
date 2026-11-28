@@ -358,6 +358,19 @@ def test_refuses_when_the_storage_is_too_small_for_the_disk(host):
     assert "storage local: 70 GB free" in ok.stderr
 
 
+@pytest.mark.parametrize(
+    "lo,hi", [("1", "999999999"), ("99", "150"), ("170", "234"), ("180", "170"), ("x", "y")]
+)
+def test_refuses_a_silly_vmid_range_before_any_host_call(host, lo, hi):
+    r = host.run(
+        "u2404-cpu", "--out", str(host.out),
+        HAL0_MATRIX_VMID_MIN=lo, HAL0_MATRIX_VMID_MAX=hi,
+    )  # fmt: skip
+    assert r.returncode == 2
+    assert "VMID range" in r.stderr
+    assert host.calls() == []
+
+
 def test_refuses_a_vmid_outside_the_range(host):
     r = host.run("u2404-cpu", "--vmid", "100", "--out", str(host.out))
     assert r.returncode == 2
