@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -22,14 +23,22 @@ DOC = {
 }
 
 
-def _bash(script: str, tmp_path: Path, nofollow_rc: int = 0) -> subprocess.CompletedProcess[str]:
-    """Source answers.sh with `nofollow` and `warn` stubbed; the stub logs its argv and body."""
+def _bash(script: str, tmp_path: Path, nofollow_rc: int = 0,
+          dir_rc: int = 0) -> subprocess.CompletedProcess[str]:
+    """Source answers.sh with `nofollow` and `warn` stubbed.
+
+    `nofollow write` logs its argv to nofollow.args and its body to nofollow.body;
+    `nofollow dir` logs its argv to nofollow.dir.args.
+    """
     full = f"""
 set -u
 PY="{sys.executable}"
-ETC_DIR="{tmp_path}/etc/hal0"
+VAR_DIR="{tmp_path}/var/lib/hal0"
 warn() {{ echo "WARN: $*" >&2; }}
-nofollow() {{ printf '%s\\n' "$*" >"{tmp_path}/nofollow.args"; cat >"{tmp_path}/nofollow.body"; return {nofollow_rc}; }}
+nofollow() {{
+    if [[ "$1" == dir ]]; then printf '%s\\n' "$*" >>"{tmp_path}/nofollow.dir.args"; return {dir_rc}; fi
+    printf '%s\\n' "$*" >"{tmp_path}/nofollow.args"; cat >"{tmp_path}/nofollow.body"; return {nofollow_rc}
+}}
 source "{ANSWERS_SH}"
 {script}
 """
@@ -66,7 +75,7 @@ def test_saved_document_mode_and_owner_request(tmp_path: Path) -> None:
     assert args[args.index("--owner") + 1] == "root:root"
     assert args[args.index("--mode") + 1] == "0600"
     assert "--require-trusted-dir" in args
-    assert args[-1] == f"{tmp_path}/etc/hal0/install-answers.json"
+    assert args[-1] == f"{tmp_path}/var/lib/hal0/secrets/install-answers.json"
 
 
 def test_nothing_saved_without_a_document(tmp_path: Path) -> None:
@@ -135,3 +144,74 @@ def test_warnings_are_printed_once(tmp_path: Path) -> None:
     doc = _doc(tmp_path, DOC)
     proc = _bash(f'HAL0_ANSWERS_FILE="{doc}"; hal0_collect_answers; hal0_save_answers', tmp_path)
     assert proc.stderr.count("huggingface settings are not read") == 1, proc.stderr
+
+
+# ── where the saved copy goes: root's own directory, never /etc/hal0 ────────
+
+
+def test_saved_file_path_is_exported_by_collect_answers(tmp_path: Path) -> None:
+    doc = _doc(tmp_path, DOC)
+    for answers in (f'HAL0_ANSWERS_FILE="{doc}"; ', ""):
+        proc = _bash(f'{answers}hal0_collect_answers; echo "[$HAL0_SAVED_ANSWERS_FILE]"; '
+                     'bash -c \'echo "child:$HAL0_SAVED_ANSWERS_FILE"\'', tmp_path)
+        want = f"{tmp_path}/var/lib/hal0/secrets/install-answers.json"
+        assert proc.stdout.splitlines() == [f"[{want}]", f"child:{want}"], proc.stderr
+
+
+def test_saved_file_path_is_not_taken_from_the_environment(tmp_path: Path) -> None:
+    proc = _bash('HAL0_SAVED_ANSWERS_FILE=/etc/passwd; export HAL0_SAVED_ANSWERS_FILE; '
+                 'hal0_collect_answers; echo "$HAL0_SAVED_ANSWERS_FILE"', tmp_path)
+    assert proc.stdout.strip() == f"{tmp_path}/var/lib/hal0/secrets/install-answers.json"
+
+
+def test_the_root_only_directory_is_ensured_before_the_write(tmp_path: Path) -> None:
+    doc = _doc(tmp_path, DOC)
+    _bash(f'HAL0_ANSWERS_FILE="{doc}"; hal0_collect_answers; hal0_save_answers', tmp_path)
+    dir_args = (tmp_path / "nofollow.dir.args").read_text(encoding="utf-8").split()
+    assert dir_args[:1] == ["dir"] and "--create" in dir_args
+    assert dir_args[dir_args.index("--owner") + 1] == "root:root"
+    assert dir_args[dir_args.index("--mode") + 1] == "0700"
+    assert dir_args[dir_args.index("--expect") + 1] == "root"
+    assert dir_args[-1] == f"{tmp_path}/var/lib/hal0/secrets"
+    assert "--require-trusted-dir" in (tmp_path / "nofollow.args").read_text(encoding="utf-8")
+    assert "etc/hal0" not in (tmp_path / "nofollow.args").read_text(encoding="utf-8")
+
+
+def test_a_directory_that_is_not_root_owned_means_no_write_and_one_warning(tmp_path: Path) -> None:
+    doc = _doc(tmp_path, DOC)
+    proc = _bash(f'HAL0_ANSWERS_FILE="{doc}"; hal0_collect_answers; hal0_save_answers; echo rc=$?',
+                 tmp_path, dir_rc=3)
+    assert "rc=0" in proc.stdout and proc.stderr.count("WARN") == 1
+    assert "not a root-owned directory" in proc.stderr
+    assert not (tmp_path / "nofollow.args").exists()
+
+
+def test_the_flag_that_demands_a_trusted_directory_is_kept() -> None:
+    assert "--require-trusted-dir" in ANSWERS_SH.read_text(encoding="utf-8")
+
+
+# ── variables holding document text are never inherited as exported ─────────
+
+
+def test_inherited_exported_variables_do_not_leak_the_document(tmp_path: Path) -> None:
+    doc = _doc(tmp_path, DOC)
+    full = f"""
+set -u
+PY="{sys.executable}"
+VAR_DIR="{tmp_path}/var/lib/hal0"
+warn() {{ echo "WARN: $*" >&2; }}
+source "{ANSWERS_SH}"
+HAL0_ANSWERS_FILE="{doc}"
+hal0_collect_answers
+echo "rc=$?"
+env | grep -c '^HAL0_ANSWERS_SAVED=' || true
+env | grep -c '^HAL0_ANSWERS_APPLIED=' || true
+bash -c 'echo "child:[${{HAL0_ANSWERS_SAVED:-}}]"'
+"""
+    proc = subprocess.run(
+        ["bash", "-c", full], capture_output=True, text=True, check=False, cwd=tmp_path,
+        env={"PATH": os.environ["PATH"], "HAL0_ANSWERS_SAVED": "inherited-secret",
+             "HAL0_ANSWERS_APPLIED": "7"},
+    )
+    assert proc.stdout.splitlines() == ["rc=0", "0", "0", "child:[]"], proc.stderr
+    assert "hf_secret_value" not in proc.stdout

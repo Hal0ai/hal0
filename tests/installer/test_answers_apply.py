@@ -112,8 +112,10 @@ def test_bad_origin_and_missing_python(tmp_path: Path) -> None:
     doc = _doc(tmp_path, {"version": 1})
     proc = _bash(f'hal0_apply_answers "{doc}" bogus; echo "rc=$?"', tmp_path)
     assert proc.stdout.strip() == "rc=1"
-    proc = _bash(f'PY=""; hal0_apply_answers "{doc}" file; echo "rc=$?"', tmp_path)
+    # No usable ${PY} and no python3 on PATH at all: nothing can read the document.
+    proc = _bash(f'PY=""; PATH=/nonexistent; hal0_apply_answers "{doc}" file; echo "rc=$?"', tmp_path)
     assert proc.stdout.strip() == "rc=1"
+    assert "no Python 3.10 or newer" in proc.stderr
 
 
 def test_exported_names_are_recorded_only_on_success(tmp_path: Path) -> None:
@@ -158,3 +160,71 @@ def test_allow_lists_match() -> None:
     assert sh_names == py_names
     assert len(set(sh_names)) == len(sh_names)
     assert "HAL0_BIND_HOST" not in sh_names
+
+
+# ── interpreter choice: ${PY}, else any python3 on PATH that is 3.10+ ───────
+
+
+def _fake_python3(tmp_path: Path, version: str) -> Path:
+    """A `python3` on PATH reporting VERSION; it logs each run and runs the real one."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir(exist_ok=True)
+    stub = bin_dir / "python3"
+    major, minor = version.split(".")
+    stub.write_text(
+        "#!/bin/bash\n"
+        f'echo "$*" >>"{tmp_path}/python3.calls"\n'
+        'if [[ "$2" == "-c" ]]; then\n'
+        f'    [[ "$3" == *"(3, 10)"* ]] && exit $(( {major} > 3 || ({major} == 3 && {minor} >= 10) ? 0 : 1 ))\n'
+        "    exit 0\n"
+        "fi\n"
+        f'exec "{sys.executable}" "$@"\n',
+        encoding="utf-8",
+    )
+    stub.chmod(0o755)
+    return bin_dir
+
+
+def _bash_path(script: str, tmp_path: Path, bin_dir: Path, py: str) -> subprocess.CompletedProcess[str]:
+    full = f"""
+set -u
+PY="{py}"
+PATH="{bin_dir}:$PATH"
+source "{ANSWERS_SH}"
+{script}
+"""
+    return subprocess.run(["bash", "-c", full], capture_output=True, text=True, check=False, cwd=tmp_path)
+
+
+def test_unusable_py_falls_back_to_a_python3_on_path(tmp_path: Path) -> None:
+    doc = _doc(tmp_path, {"version": 1, "network": {"port": 9000}})
+    bin_dir = _fake_python3(tmp_path, "3.11")
+    proc = _bash_path(f'hal0_apply_answers "{doc}" file; echo "rc=$? $HAL0_PORT"', tmp_path, bin_dir,
+                      "/nonexistent/python")
+    assert proc.stdout.strip() == "rc=0 9000", proc.stderr
+    calls = (tmp_path / "python3.calls").read_text(encoding="utf-8")
+    assert "answers_reader.py" in calls  # the reader ran with the stub
+
+
+def test_python3_older_than_3_10_is_not_used(tmp_path: Path) -> None:
+    doc = _doc(tmp_path, {"version": 1})
+    bin_dir = _fake_python3(tmp_path, "3.9")
+    proc = _bash_path(f'hal0_apply_answers "{doc}" file; echo "rc=$?"', tmp_path, bin_dir, "/nonexistent/python")
+    assert proc.stdout.strip() == "rc=1" and "no Python 3.10 or newer" in proc.stderr
+    assert "answers_reader.py" not in (tmp_path / "python3.calls").read_text(encoding="utf-8")
+
+
+def test_a_working_py_is_preferred_over_path(tmp_path: Path) -> None:
+    doc = _doc(tmp_path, {"version": 1})
+    bin_dir = _fake_python3(tmp_path, "3.11")
+    proc = _bash_path(f'hal0_apply_answers "{doc}" file; echo "rc=$?"', tmp_path, bin_dir, sys.executable)
+    assert proc.stdout.strip() == "rc=0"
+    assert not (tmp_path / "python3.calls").exists()
+
+
+def test_hal0_answers_python_prints_the_choice(tmp_path: Path) -> None:
+    bin_dir = _fake_python3(tmp_path, "3.12")
+    proc = _bash_path("hal0_answers_python; echo rc=$?", tmp_path, bin_dir, "/nonexistent/python")
+    assert proc.stdout.splitlines() == [f"{bin_dir}/python3", "rc=0"]
+    proc = _bash_path("PATH=/nonexistent; hal0_answers_python; echo rc=$?", tmp_path, bin_dir, "")
+    assert proc.stdout.strip() == "rc=1"

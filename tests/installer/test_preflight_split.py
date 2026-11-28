@@ -431,3 +431,60 @@ def test_models_dir_block_sits_right_after_the_seam() -> None:
     seam = code.index("\nhal0_collect_answers\n")
     assert code.index("MODELS_DIR_FLAG_GIVEN", seam) < code.index("persist_bootstrap_cosign", seam)
     assert "MODELS_DIR_FLAG_GIVEN=1" in TEXT[: TEXT.index(_SEAM)]
+
+
+# ── a document is checked before Python is installed, when it can be ────────
+
+
+def _file_branch_run(tmp_path, *, py: str, python3_version: str | None, answers_file: bool = True):
+    """Run the file-origin branch with stubs; return (stdout, install-attempted)."""
+    first = _first_half()
+    branch = first[first.index(_FILE_BEGIN) : first.index(_FILE_END)]
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    if python3_version:
+        major, minor = python3_version.split(".")
+        stub = bin_dir / "python3"
+        stub.write_text(
+            "#!/bin/bash\n"
+            f"exit $(( {major} > 3 || ({major} == 3 && {minor} >= 10) ? 0 : 1 ))\n",
+            encoding="utf-8",
+        )
+        stub.chmod(0o755)
+    answers = "HAL0_ANSWERS_FILE=/x/answers.json" if answers_file else ""
+    script = f"""
+set -u
+PATH="{bin_dir}"
+PY="{py}"
+{answers}
+source "{Path(__file__).resolve().parents[2] / 'installer' / 'lib' / 'answers.sh'}"
+info() {{ echo "INFO: $*"; }}
+_hal0_resolve_main_python_or_die() {{ echo "INSTALL_ATTEMPTED $*"; }}
+_main_python_usable=0
+{branch}
+echo "usable=${{_main_python_usable}}"
+"""
+    proc = _run(script)
+    return proc.stdout, "INSTALL_ATTEMPTED" in proc.stdout
+
+
+def test_no_install_when_an_old_enough_python3_exists(tmp_path) -> None:
+    out, attempted = _file_branch_run(tmp_path, py="/nonexistent/python", python3_version="3.11")
+    assert not attempted, out
+    assert "Installing Python" not in out and "usable=0" in out
+
+
+def test_install_is_attempted_when_no_python_of_3_10_exists(tmp_path) -> None:
+    out, attempted = _file_branch_run(tmp_path, py="/nonexistent/python", python3_version="3.9")
+    assert attempted and "INSTALL_ATTEMPTED install-first" in out and "usable=1" in out
+
+
+def test_install_is_attempted_when_there_is_no_python_at_all(tmp_path) -> None:
+    out, attempted = _file_branch_run(tmp_path, py="/nonexistent/python", python3_version=None)
+    assert attempted and "usable=1" in out, out
+
+
+def test_no_install_without_an_answers_file(tmp_path) -> None:
+    out, attempted = _file_branch_run(tmp_path, py="/nonexistent/python", python3_version=None,
+                                      answers_file=False)
+    assert not attempted, out

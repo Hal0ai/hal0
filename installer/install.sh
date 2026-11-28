@@ -647,8 +647,13 @@ fi
 
 # file-origin: begin (the one place the detection half installs anything)
 # A person who passes an answers file has already chosen, and reading it needs
-# a Python. If none is usable yet, install one now, before the seam.
-if [[ "${_main_python_usable}" -eq 0 && -n "${HAL0_ANSWERS_FILE:-}" ]]; then
+# a Python. The reader runs on 3.10 and newer, so a document is checked before
+# anything changes whenever such an interpreter exists (hal0_answers_python:
+# ${PY}, else a python3 on PATH). Only when none exists at all is one installed
+# now, before the seam. A below-floor but 3.10+ interpreter is replaced by the
+# normal resolution after the seam.
+if [[ "${_main_python_usable}" -eq 0 && -n "${HAL0_ANSWERS_FILE:-}" ]] \
+    && ! hal0_answers_python >/dev/null; then
     info "Installing Python, which is needed to read your answers file."
     _hal0_resolve_main_python_or_die install-first
     _main_python_usable=1

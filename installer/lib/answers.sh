@@ -11,6 +11,13 @@
 #                             hal0_collect_answers with its default filled in.
 # Sets:    HAL0_ANSWERS_APPLIED=1 when a document was applied, else 0. The
 #          legacy prompts in install.sh skip themselves when it is 1.
+#          HAL0_SAVED_ANSWERS_FILE: where the applied document is kept, in
+#          root's own directory (exported by hal0_collect_answers).
+#
+# Variables that hold document text are unset here before their first
+# assignment: a name inherited from the environment with the export attribute
+# would otherwise pass the document to every child process.
+unset HAL0_ANSWERS_SAVED HAL0_ANSWERS_APPLIED HAL0_ANSWERS_EXPORTED _HAL0_ANSWERS_PY
 
 # Where the reader lives, and the names it may emit. Assigned unconditionally
 # (never taken from the environment); tests override them after sourcing.
@@ -43,6 +50,23 @@ _HAL0_ANSWER_NAMES=(
     HAL0_NPU_SETUP
 )
 
+# Print the interpreter that reads a document: ${PY} if it runs and is Python
+# 3.10 or newer (the reader's floor), else a python3 on PATH that is. Fails
+# (prints nothing) when there is none. The installer uses this, before anything
+# changes, to know whether a document can be checked without installing Python.
+hal0_answers_python() {
+    local candidate
+    for candidate in "${PY:-}" "$(command -v python3 2>/dev/null || true)"; do
+        [[ -n "${candidate}" ]] || continue
+        if "${candidate}" -I -c 'import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)' \
+            >/dev/null 2>&1; then
+            printf '%s\n' "${candidate}"
+            return 0
+        fi
+    done
+    return 1
+}
+
 # Apply the answers document at PATH; ORIGIN is `file` or `wizard`.
 # Runs the reader (${PY} -I, standard library only), then exports what it
 # printed. All-or-nothing: every line is checked against the allow-list and
@@ -66,13 +90,14 @@ hal0_apply_answers() {
             return 1
             ;;
     esac
-    if [[ -z "${PY:-}" ]]; then
-        echo "error: no Python available to read the answers document" >&2
+    _HAL0_ANSWERS_PY="$(hal0_answers_python)" || _HAL0_ANSWERS_PY=""
+    if [[ -z "${_HAL0_ANSWERS_PY}" ]]; then
+        echo "error: no Python 3.10 or newer available to read the answers document" >&2
         return 1
     fi
 
     local output rc=0
-    output="$("${PY}" -I "${_HAL0_ANSWERS_READER}" --origin "${origin}" -- "${path}")" || rc=$?
+    output="$("${_HAL0_ANSWERS_PY}" -I "${_HAL0_ANSWERS_READER}" --origin "${origin}" -- "${path}")" || rc=$?
     if [[ "${rc}" -ne 0 ]]; then
         echo "Stopped: the answers document was not accepted." >&2
         return "${rc}"
@@ -122,10 +147,20 @@ hal0_apply_answers() {
 }
 
 hal0_collect_answers() {
+    unset HAL0_ANSWERS_APPLIED HAL0_ANSWERS_SAVED HAL0_ANSWERS_EXPORTED
     HAL0_ANSWERS_APPLIED=0
     HAL0_ANSWERS_SAVED=""
     HAL0_ANSWERS_EXPORTED=()
     export HAL0_FACTS_FILE="${HAL0_FACTS_FILE:-/run/hal0-install/facts.json}"
+    # Never taken from the environment: where root keeps the applied document.
+    # The directory is the one the installer already keeps root-only (the
+    # Hugging Face secrets file lives in it); /etc/hal0 cannot be used, the
+    # hal0 account owns it after the permissions step.
+    if [[ -n "${VAR_DIR:-}" ]]; then
+        export HAL0_SAVED_ANSWERS_FILE="${VAR_DIR}/secrets/install-answers.json"
+    else
+        unset HAL0_SAVED_ANSWERS_FILE
+    fi
     local path="${HAL0_ANSWERS_FILE:-}"
     [[ -n "${path}" ]] || return 0
     hal0_apply_answers "${path}" file || return $?
@@ -134,7 +169,8 @@ hal0_collect_answers() {
     return 0
 }
 
-# Keep a copy of the applied document at ${ETC_DIR}/install-answers.json so a
+# Keep a copy of the applied document at ${HAL0_SAVED_ANSWERS_FILE}
+# (${VAR_DIR}/secrets/install-answers.json, SECRETS_DIR in install.sh) so a
 # later run can start from the same choices. The saved form is produced once,
 # at apply time (_hal0_prepare_saved_answers), so the file written at the end
 # is what was applied even if the document changed or went away meanwhile. The
@@ -154,9 +190,14 @@ _hal0_answers_warn() {
 # error (no warnings: apply already printed them), so merging them is safe.
 # On failure: one warning, nothing saved at the end. Always returns 0.
 _hal0_prepare_saved_answers() {
-    local path="${1:-}" out rc=0
+    local path="${1:-}" out rc=0 py="${_HAL0_ANSWERS_PY:-}"
     HAL0_ANSWERS_SAVED=""
-    out="$("${PY}" -I "${_HAL0_ANSWERS_READER}" --emit-saved "${path}" 2>&1)" || rc=$?
+    [[ -n "${py}" ]] || py="$(hal0_answers_python)" || py=""
+    if [[ -z "${py}" ]]; then
+        _hal0_answers_warn "could not prepare a copy of the answers document to keep: no Python 3.10 or newer"
+        return 0
+    fi
+    out="$("${py}" -I "${_HAL0_ANSWERS_READER}" --emit-saved "${path}" 2>&1)" || rc=$?
     if [[ "${rc}" -ne 0 || -z "${out}" ]]; then
         _hal0_answers_warn "could not prepare a copy of the answers document to keep: ${out%%$'\n'*}"
         return 0
@@ -166,16 +207,26 @@ _hal0_prepare_saved_answers() {
 }
 
 # Write the copy prepared at apply time. Does not read the document again.
+# The directory is root-only (0700, root-owned: `nofollow dir --expect root`
+# refuses one the hal0 account owns or swapped in), made here if it does not
+# exist yet (--dev installs create it only for a Hugging Face token). The file
+# is written with --require-trusted-dir, so a directory that is not trusted
+# is refused rather than written into.
 hal0_save_answers() {
     [[ "${HAL0_ANSWERS_APPLIED:-0}" == "1" ]] || return 0
     [[ -n "${HAL0_ANSWERS_SAVED:-}" ]] || return 0
-    if [[ -z "${ETC_DIR:-}" ]]; then
-        _hal0_answers_warn "could not keep the answers document (no configuration directory)"
+    local file="${HAL0_SAVED_ANSWERS_FILE:-}"
+    if [[ -z "${file}" ]]; then
+        _hal0_answers_warn "could not keep the answers document (no state directory)"
+        return 0
+    fi
+    if ! nofollow dir --create --owner root:root --mode 0700 --expect root "${file%/*}"; then
+        _hal0_answers_warn "could not keep the answers document: ${file%/*} is not a root-owned directory"
         return 0
     fi
     if ! printf '%s\n' "${HAL0_ANSWERS_SAVED}" \
-        | nofollow write --owner root:root --mode 0600 --require-trusted-dir "${ETC_DIR}/install-answers.json"; then
-        _hal0_answers_warn "could not write ${ETC_DIR}/install-answers.json; any earlier saved copy was left as it was"
+        | nofollow write --owner root:root --mode 0600 --require-trusted-dir "${file}"; then
+        _hal0_answers_warn "could not write ${file}; any earlier saved copy was left as it was"
     fi
     return 0
 }
