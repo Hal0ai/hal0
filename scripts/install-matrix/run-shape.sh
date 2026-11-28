@@ -203,8 +203,9 @@ CT_MAYBE=0         # set once ct_create got as far as running pct create
 CT_CREATED=0       # ct_create returned 0: this run certainly made the guest
 GUEST_UP=0         # ct_start succeeded
 WATCH_PID=""       # the memory watchdog, while a container exists
+SENT_PID=""        # the sentinel that watches the watchdog
 WATCH_FILE=""      # where the watchdog leaves its verdict
-ABORT_REASON=""    # host_memory_low or host_unreachable, once the watchdog fired
+ABORT_REASON=""    # host_memory_low, host_unreachable or watchdog_died, once the watchdog fired
 ABORT_DETAIL=""
 INSTALL_RC=""      # the install's exit status, once known
 INTERRUPTED=0      # signal number that stopped the run
@@ -212,6 +213,7 @@ PREREQS=""         # packages the harness installed before the installer ran
 STARTED="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 POST_DONE=0 PULL_DONE=0 RESULT_WRITTEN=0
 CHILD_PID="" CHILD_TREE=0
+CUT_ON_VERDICT=0   # cleanup only: a verdict from the memory watch ends the collection
 CLEANED=0
 declare -a DEVS=() MAJORS=()
 
@@ -288,6 +290,12 @@ run_bounded() {
   CHILD_TREE=1
   deadline=$((SECONDS + limit))
   while kill -0 "$CHILD_PID" 2>/dev/null; do
+    if [[ "$CUT_ON_VERDICT" == "1" && -n "$WATCH_FILE" && -s "$WATCH_FILE" ]]; then
+      kill_tree "$CHILD_PID"
+      wait "$CHILD_PID" 2>/dev/null || true
+      CHILD_PID=""
+      return 125
+    fi
     if ((SECONDS >= deadline)); then
       kill_tree "$CHILD_PID"
       wait "$CHILD_PID" 2>/dev/null || true
@@ -362,7 +370,21 @@ finish_result() {
 # below the main shell except itself. Cleanup runs its own ownership-checked
 # destroy afterwards, and reports LEFT BEHIND if that fails.
 #
-# It also ends by itself when the run that started it is gone (kill -9, the
+# A second, tiny process (the sentinel) watches the watchdog: the main shell is
+# blocked in a foreground call for most of a run and cannot notice a dead
+# watchdog itself. Every second the sentinel checks that the watchdog is still
+# running; if it is not, and cleanup did not stop it, the run aborts with the
+# reason watchdog_died through the same path (USR1, normal cleanup). The
+# watchdog's own verdict, when it already spoke, stands.
+#
+# Both stay in force until cleanup has destroyed the container or reported it
+# left behind (stop_watchdog is the last step before the result is written).
+# During cleanup (the marker file ${WATCH_FILE}.cleanup) they only record a
+# verdict: they send no signal and kill nothing, so a destroy in progress is
+# never cut; the collection loop in cleanup reads the verdict itself and ends
+# the collection.
+#
+# The watchdog also ends by itself when the run that started it is gone (kill -9, the
 # kernel's OOM killer): every second it checks that its parent is still that
 # process, and when it is not it ends what the run had started (found by
 # pid and start time, so a reused pid is left alone), says so, and exits. It
@@ -423,19 +445,62 @@ watchdog() {
   done
   printf 'reason=%s\ndetail=%s\n' "$reason" "$detail" >"$WATCH_FILE"
   [[ "$(stat_field "$me" 1)" == "$parent" ]] || exit 0
+  [[ ! -e "${WATCH_FILE}.cleanup" ]] || exit 0
   kill -USR1 "$parent" 2>/dev/null || true
   for c in $(pgrep -P "$parent" 2>/dev/null || true); do
+    [[ ! -e "${WATCH_FILE}.cleanup" ]] || exit 0
     [[ "$c" == "$me" ]] || kill_tree "$c"
   done
 }
 
+# proc_running <pid> <start time>: the process is alive, not a zombie, and is
+# the one started at that time (a reused pid does not count).
+proc_running() {
+  local st
+  st="$(stat_field "$1" 0)" || return 1
+  [[ "$st" != "Z" && "$st" != "X" ]] || return 1
+  [[ "$(stat_field "$1" 19)" == "$2" ]]
+}
+
+sentinel() {
+  local parent="$1" wd="$2" wd_start="$3" me="$BASHPID" c
+  exec 6>&- 8>&- >/dev/null
+  while :; do
+    sleep 1
+    [[ "$(stat_field "$me" 1)" == "$parent" ]] || exit 0
+    [[ ! -e "${WATCH_FILE}.stop" && ! -s "$WATCH_FILE" ]] || exit 0
+    if ! proc_running "$wd" "$wd_start"; then
+      [[ ! -e "${WATCH_FILE}.stop" && ! -s "$WATCH_FILE" ]] || exit 0
+      printf 'reason=watchdog_died\ndetail=the memory watchdog ended while the run was in progress\n' >"$WATCH_FILE"
+      [[ ! -e "${WATCH_FILE}.cleanup" ]] || exit 0
+      kill -USR1 "$parent" 2>/dev/null || true
+      for c in $(pgrep -P "$parent" 2>/dev/null || true); do
+        [[ ! -e "${WATCH_FILE}.cleanup" ]] || exit 0
+        [[ "$c" == "$me" ]] || kill_tree "$c"
+      done
+      exit 0
+    fi
+  done
+}
+
 start_watchdog() {
+  local wd_start
   WATCH_FILE="$(mktemp)"
   watchdog "$$" &
   WATCH_PID=$!
+  wd_start="$(stat_field "$WATCH_PID" 19)" || wd_start=""
+  printf '%s\n' "$WATCH_PID" >"${ART}/watchdog.pid"
+  sentinel "$$" "$WATCH_PID" "$wd_start" &
+  SENT_PID=$!
 }
 
+# stop_watchdog: the end of the memory watch. Called once, by cleanup, after
+# the container is destroyed or reported left behind (or when there was none).
 stop_watchdog() {
+  [[ -z "$WATCH_FILE" ]] || : >"${WATCH_FILE}.stop"
+  [[ -z "$SENT_PID" ]] || kill_tree "$SENT_PID"
+  [[ -z "$SENT_PID" ]] || wait "$SENT_PID" 2>/dev/null || true
+  SENT_PID=""
   [[ -z "$WATCH_PID" ]] || kill_tree "$WATCH_PID"
   [[ -z "$WATCH_PID" ]] || wait "$WATCH_PID" 2>/dev/null || true
   WATCH_PID=""
@@ -448,7 +513,7 @@ load_verdict() {
   [[ -n "$WATCH_FILE" && -s "$WATCH_FILE" ]] || return 1
   reason="$(kv_get "$WATCH_FILE" reason)"
   detail="$(kv_get "$WATCH_FILE" detail)"
-  case "$reason" in host_memory_low | host_unreachable) ;; *) return 1 ;; esac
+  case "$reason" in host_memory_low | host_unreachable | watchdog_died) ;; *) return 1 ;; esac
   [[ "$detail" =~ ^[A-Za-z0-9\ ().,_-]+$ ]] || detail="the host check failed"
   ABORT_REASON="$reason"
   ABORT_DETAIL="$detail"
@@ -462,6 +527,15 @@ on_watchdog() {
   exit 1
 }
 
+# note_abort: once, record an abort the memory watch decided on.
+ABORT_NOTED=0
+note_abort() {
+  [[ -n "$ABORT_REASON" && "$ABORT_NOTED" == "0" ]] || return 0
+  ABORT_NOTED=1
+  [[ -n "$INSTALL_RC" ]] || INSTALL_RC=143
+  [[ -z "$ART" ]] || printf 'aborted=%s\nabort_detail=%s\n' "$ABORT_REASON" "$ABORT_DETAIL" >>"${ART}/run.txt"
+}
+
 # ── cleanup: runs once, on EXIT and (via on_signal) on INT, TERM and HUP ─────
 cleanup() {
   local rc=$? state="absent" foreign=0 unsure=0
@@ -471,15 +545,13 @@ cleanup() {
   set +e +u
   [[ "$CLEANED" == "0" ]] || exit "$rc"
   CLEANED=1
+  # From here the memory watch only records: it signals and kills nothing.
+  [[ -z "$WATCH_FILE" ]] || : >"${WATCH_FILE}.cleanup"
   [[ "$CT_CREATED" != "1" ]] || announce_container
   # The watchdog may have ended the call in progress before its USR1 was acted on.
   [[ -n "$ABORT_REASON" ]] || load_verdict || true
-  stop_watchdog
   stop_child
-  if [[ -n "$ABORT_REASON" ]]; then
-    [[ -n "$INSTALL_RC" ]] || INSTALL_RC=143
-    [[ -z "$ART" ]] || printf 'aborted=%s\nabort_detail=%s\n' "$ABORT_REASON" "$ABORT_DETAIL" >>"${ART}/run.txt"
-  fi
+  note_abort
   if [[ "$INTERRUPTED" != "0" && -z "$INSTALL_RC" ]]; then
     INSTALL_RC=$((128 + INTERRUPTED))
   fi
@@ -527,7 +599,16 @@ cleanup() {
         PULL_DONE=1
       elif [[ "$DRY_RUN" != "1" && "$RESULT_WRITTEN" == "0" ]]; then
         log "saving what the run measured before the container goes"
+        # The memory watch is still running: a verdict from it ends the collection.
+        CUT_ON_VERDICT=1
         run_bounded 240 finish_result
+        CUT_ON_VERDICT=0
+        if [[ -z "$ABORT_REASON" ]] && load_verdict; then
+          log "aborting: ${ABORT_DETAIL}; the collection was cut short"
+          POST_DONE=1
+          PULL_DONE=1
+          note_abort
+        fi
       fi
       if [[ "$KEEP" == "1" ]]; then
         log "--keep: container ${VMID} left in place; destroy it with: $(destroy_hint)"
@@ -540,10 +621,13 @@ cleanup() {
       fi
     fi
   fi
+  # The end of the memory watch: the container is gone or reported left behind.
+  stop_watchdog
   # After an abort the result is written last, from local files only.
   [[ -z "$ABORT_REASON" || -z "$ART" || "$RESULT_WRITTEN" != "0" ]] || write_result
   [[ -z "$TREE_TAR" ]] || rm -f -- "$TREE_TAR"
-  [[ -z "$WATCH_FILE" ]] || rm -f -- "$WATCH_FILE"
+  [[ -z "$WATCH_FILE" ]] || rm -f -- "$WATCH_FILE" "${WATCH_FILE}.cleanup" "${WATCH_FILE}.stop"
+  [[ -z "$ART" ]] || rm -f -- "${ART}/watchdog.pid"
   [[ -z "$SCRATCH" ]] || rm -rf -- "$SCRATCH"
   exit "$rc"
 }

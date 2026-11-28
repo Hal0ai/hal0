@@ -525,6 +525,80 @@ def test_one_unreadable_reading_is_not_a_reason_to_abort(host):
     assert json.loads((host.out / "result.json").read_text())["aborted"] is None
 
 
+def _wait_for(path: Path, proc: subprocess.Popen, seconds: float = 60) -> None:
+    deadline = time.monotonic() + seconds
+    while not path.exists():
+        assert proc.poll() is None and time.monotonic() < deadline, f"{path.name} never appeared"
+        time.sleep(0.05)
+
+
+def test_a_watchdog_that_dies_ends_the_run_as_an_abort_through_cleanup(host):
+    """The watchdog is killed (SIGKILL) while the install runs. The run must not
+    go on unmonitored: within a watch interval and a small margin it aborts with
+    watchdog_died and the usual cleanup destroys the container."""
+    proc = spawn(
+        host, "u2604-cpu-unattended", "--vmid", "172", "--out", str(host.out),
+        **_watch_env(FAKE_INSTALL_SLEEP="25"),
+    )  # fmt: skip
+    try:
+        _wait_for(host.state / "install-started", proc)
+        _wait_for(host.out / "watchdog.pid", proc)
+        pid = int((host.out / "watchdog.pid").read_text().strip())
+        killed_at = time.monotonic()
+        os.kill(pid, signal.SIGKILL)
+        err = proc.communicate(timeout=40)[1]
+        took = time.monotonic() - killed_at
+    finally:
+        kill_group(proc)
+    assert proc.returncode == 1, err
+    assert took < 10, f"the run took {took:.1f}s to notice, the install sleeps 25s"
+    assert "aborting:" in err and "watchdog" in err
+    assert "aborted=watchdog_died" in (host.out / "run.txt").read_text().splitlines()
+    assert json.loads((host.out / "result.json").read_text())["aborted"] == "watchdog_died"
+    assert not (host.state / "present").exists(), "the normal cleanup destroyed it"
+    assert "LEFT BEHIND" not in err
+
+
+def test_a_dead_watchdog_with_a_failing_destroy_reports_left_behind(host):
+    proc = spawn(
+        host, "u2604-cpu-unattended", "--vmid", "172", "--out", str(host.out),
+        **_watch_env(FAKE_INSTALL_SLEEP="25", FAKE_DESTROY_FAILS="1"),
+    )  # fmt: skip
+    try:
+        _wait_for(host.state / "install-started", proc)
+        _wait_for(host.out / "watchdog.pid", proc)
+        os.kill(int((host.out / "watchdog.pid").read_text().strip()), signal.SIGKILL)
+        err = proc.communicate(timeout=60)[1]
+    finally:
+        kill_group(proc)
+    assert proc.returncode == 1, err
+    assert "LEFT BEHIND: 172 (destroy it with: ssh testpve pct destroy 172 --force --purge)" in err
+
+
+def test_the_memory_watch_stays_in_force_while_cleanup_collects(host):
+    """An interrupted run collects from the guest in cleanup. Host memory
+    falling then must cut the collection short and let the destroy go on: the
+    summary pull would hang for 40s, the run must be done well before."""
+    proc = spawn(
+        host, "u2604-cpu-unattended", "--vmid", "172", "--out", str(host.out),
+        **_watch_env(FAKE_INSTALL_SLEEP="25", FAKE_SUM_SLEEP="40"),
+    )  # fmt: skip
+    try:
+        _wait_for(host.state / "install-started", proc)
+        time.sleep(1.5)
+        os.kill(proc.pid, signal.SIGTERM)
+        started = time.monotonic()
+        err = proc.communicate(timeout=60)[1]
+        took = time.monotonic() - started
+    finally:
+        kill_group(proc)
+    assert (host.state / "sum-started").exists(), "the collection reached the summary pull"
+    assert took < 20, f"cleanup took {took:.1f}s: the collection was not cut short"
+    assert not (host.state / "present").exists(), "the destroy went on"
+    assert "LEFT BEHIND" not in err
+    assert "aborted=host_memory_low" in (host.out / "run.txt").read_text().splitlines()
+
+
 def _capped(**extra):
     return {"HAL0_MATRIX_MAX_STREAM_BYTES": "4096", **extra}
 
