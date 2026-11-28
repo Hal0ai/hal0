@@ -17,6 +17,7 @@ import { copyTextToClipboard } from '@/lib/clipboard'
 import { useSlots, useSlotRestart, useSlotLoad, useSlotUnload } from '@/api/hooks/useSlots'
 import { useModels, fmtBytes } from '@/api/hooks/useModels'
 import { useConfigUrls } from '@/api/hooks/useConfigUrls'
+import { cancelModelPull } from './palette-actions'
 
 const { useState: useStateCP, useEffect: useEffectCP, useRef: useRefCP, useMemo: useMemoCP } = React;
 
@@ -331,11 +332,7 @@ function buildCommandItems(slots, models, activePull, owuiUrl = "", memoryEnable
   if (activePull) {
     const m = (models || []).find(x => x.id === activePull);
     action("a-cancel-pull", `Cancel download — ${m ? (m.longName || m.id) : activePull}`, "stops the active model pull",
-      () => {
-        fetch(`/api/models/${encodeURIComponent(activePull)}/pull/cancel`, { method: "POST" })
-          .then(() => window.__hal0Toast && window.__hal0Toast("Download cancelled", "warn"))
-          .catch(() => window.__hal0Toast && window.__hal0Toast("Cancel failed — see logs", "err"));
-      });
+      () => { void cancelModelPull(activePull, window.__hal0Toast); });
   }
 
   // Copy — clipboard utilities for hitting the API directly.
