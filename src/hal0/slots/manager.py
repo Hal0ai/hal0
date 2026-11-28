@@ -290,6 +290,11 @@ _ADOPTED_WARMING_KEY = "adopted_warming"
 # What a caller is told to wait before retrying a load refused for such a slot:
 # one beat of the promotion poll.
 _ADOPTED_WARMING_RETRY_AFTER_S: int = int(_ADOPTED_WARMING_POLL_INTERVAL_S)
+# How long load() may hold the slot lock asking such a slot's /health. The
+# llama probe answers or fails inside 3 s and FLM's and ComfyUI's inside 5 s,
+# but Halogen's liveness read waits up to 35 s; a hung engine must not make
+# every request queue behind that. No answer in time is "not ready yet".
+_ADOPTED_WARMING_PROBE_MAX_S: float = 5.0
 
 
 def _event(name: str, **fields: Any) -> str:
@@ -2342,7 +2347,14 @@ class SlotManager:
                     and (not model_id or model_id == inflight_rec.model_id)
                     and await self._is_active(slot_name)
                 ):
-                    if await self._probe_health(slot_name, strict=True):
+                    try:
+                        answered = await asyncio.wait_for(
+                            self._probe_health(slot_name, strict=True),
+                            timeout=_ADOPTED_WARMING_PROBE_MAX_S,
+                        )
+                    except TimeoutError:
+                        answered = False
+                    if answered:
                         log.info(
                             _event("slot.load_promoted_adopted_warming", slot=slot_name),
                             extra={"slot": slot_name},

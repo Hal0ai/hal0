@@ -288,3 +288,107 @@ async def test_a_stop_hal0_issued_is_never_logged_as_an_outside_exit(
         await asyncio.sleep(0.2)
 
     assert not [r for r in caplog.records if r.getMessage().startswith("slot.unit_exited ")]
+
+
+def _no_exit_lines(caplog: pytest.LogCaptureFixture) -> list[str]:
+    return [
+        r.getMessage() for r in caplog.records if r.getMessage().startswith("slot.unit_exited ")
+    ]
+
+
+def _slow_stop(stub: FakeContainerProvider, seconds: float) -> None:
+    """Make the stub's stop take a while, as a real one does, so the watcher
+    ticks while load() holds the lock with the unit already down."""
+    import time
+
+    real = stub.unload_sync
+
+    def slow(cfg: dict) -> None:
+        stub.active.discard(str(cfg.get("name")))
+        time.sleep(seconds)
+        real(cfg)
+
+    stub.unload_sync = slow  # type: ignore[method-assign]
+
+
+async def test_a_config_drift_reload_from_ready_logs_no_outside_exit(
+    slot_root: Path,
+    container_stub: FakeContainerProvider,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """load() on a READY slot whose config drifted stops the unit itself,
+    with the slot still READY and the watcher armed. That stop is hal0's."""
+    monkeypatch.setattr(wd_mod, "_FAIL_WATCH_INTERVAL_S", 0.02)
+    sm = SlotManager(upstreams_registry=UpstreamRegistry())
+    await sm.load("chat")
+    assert sm._current_state("chat") is SlotState.READY
+    container_stub.expected_argv_by_slot["chat"] = ["-b", "2048"]
+    container_stub.running_argv_by_slot["chat"] = ["-b", "512"]
+    _slow_stop(container_stub, 0.3)
+
+    with caplog.at_level(logging.INFO, logger="hal0.slots"):
+        container_stub.unload_calls.clear()
+        slot = await sm.load("chat")
+        import asyncio
+
+        await asyncio.sleep(0.2)
+
+    assert container_stub.unload_calls, "the drifted unit was stopped by load()"
+    assert slot.state is SlotState.READY
+    assert _no_exit_lines(caplog) == []
+
+
+async def test_a_stale_warming_teardown_logs_no_outside_exit(
+    slot_root: Path,
+    container_stub: FakeContainerProvider,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The #1791 teardown: a WARMING slot left by a timed-out load is stopped
+    by the next load(), watcher armed. Also hal0's stop."""
+    import asyncio
+
+    monkeypatch.setattr(wd_mod, "_FAIL_WATCH_INTERVAL_S", 0.02)
+    sm = SlotManager()
+    _time_out_readiness(container_stub)
+    await sm.load("chat")
+    assert sm._current_state("chat") is SlotState.WARMING
+    container_stub.wait_ready = FakeContainerProvider.wait_ready.__get__(  # type: ignore[method-assign]
+        container_stub, FakeContainerProvider
+    )
+    _slow_stop(container_stub, 0.3)
+
+    with caplog.at_level(logging.INFO, logger="hal0.slots"):
+        container_stub.unload_calls.clear()
+        slot = await sm.load("chat")
+        await asyncio.sleep(0.2)
+
+    assert container_stub.unload_calls
+    assert slot.state is SlotState.READY
+    assert _no_exit_lines(caplog) == []
+
+
+async def test_the_promote_probe_cannot_hold_the_lock_past_its_bound(
+    slot_root: Path, container_stub: FakeContainerProvider, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A provider whose health read waits tens of seconds (Halogen's is 35 s)
+    must not make load() hold the slot lock that long: no answer inside the
+    bound is "not ready yet"."""
+    import asyncio
+    import time
+
+    monkeypatch.setattr(mgr_mod, "_ADOPTED_WARMING_PROBE_MAX_S", 0.1)
+    sm = SlotManager(upstreams_registry=UpstreamRegistry())
+    await _adopt_into_warming(sm, container_stub)
+
+    async def hung(_slot: str, *, strict: bool = False) -> bool:
+        await asyncio.sleep(30)
+        return True
+
+    monkeypatch.setattr(sm, "_probe_health", hung)
+    started = time.monotonic()
+    with pytest.raises(SlotNotReady):
+        await sm.load("chat")
+    assert time.monotonic() - started < 5
+    assert container_stub.unload_calls == []

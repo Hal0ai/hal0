@@ -55,7 +55,7 @@ from hal0.dispatcher.stream_usage import ensure_include_usage, strip_usage_only_
 from hal0.memory.extraction_env import MEMORY_ALIAS
 from hal0.normalize.output_cap import MAX_TOKENS_HEADER, apply_output_cap, parse_output_cap
 from hal0.slots.abandon import ClientGoneProbe, abandon_probe
-from hal0.slots.state import SlotNpuConflict
+from hal0.slots.state import SlotNotReady, SlotNpuConflict
 from hal0.upstreams.catalog import (
     ModelAmbiguous,
     Resolved,
@@ -956,6 +956,10 @@ async def _ensure_backend_for_model(request: Request, body: dict[str, Any]) -> N
     except SlotNpuConflict:
         # Traffic never unloads the NPU holder; the 409 is the answer (#3666).
         raise
+    except SlotNotReady as exc:
+        # #4082: running, left alone, not answering /health yet. Expected at
+        # request cadence; the dispatcher's ready check answers the 503.
+        log.debug("v1.backend_aware_load_not_ready", slot=slot_name, error=str(exc))
     except Exception as exc:
         log.warning(
             "v1.backend_aware_load_failed",
@@ -1113,6 +1117,9 @@ async def _wake_capability_slot(request: Request, body: Mapping[str, Any]) -> No
         # Waking an FLM-backed capability slot never unloads a per-op holder:
         # the 409 is the answer, not a retryable 503 (#3666).
         raise
+    except SlotNotReady as exc:
+        # #4082: as above, expected while an adopted slot warms.
+        log.debug("v1.capability_wake_not_ready", slot=slot_name, error=str(exc))
     except Exception as exc:
         log.warning(
             "v1.capability_wake_failed",
