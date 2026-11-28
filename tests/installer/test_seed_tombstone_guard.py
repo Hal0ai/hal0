@@ -120,9 +120,7 @@ def test_the_seed_loop_checks_tombstones_before_copying() -> None:
     text = INSTALL_SH.read_text(encoding="utf-8")
     assert "slot_seed_tombstoned" in text
     tombstone_check_pos = text.index('if slot_seed_tombstoned "${seed_slot}"; then')
-    loop_pos = text.index(
-        "for seed_slot in flm tts rerank memory img agent brain qwen3tts coder embed; do"
-    )
+    loop_pos = text.index("for seed_slot in agent brain memory; do")
     cp_pos = text.index('cp "${SLOT_SRC}" "${SLOT_TOML}"')
     assert loop_pos < tombstone_check_pos < cp_pos
 

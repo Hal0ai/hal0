@@ -1327,7 +1327,7 @@ class SlotManager:
         unless the slot is OFFLINE.
 
         If ``slot_name`` is a static seed (:data:`hal0.install.static_seeds.
-        STATIC_SEED_SLOTS`), the vacated name is tombstoned so the boot-time
+        SEED_TEMPLATES`), the vacated name is tombstoned so the boot-time
         seeding pass does not resurrect a duplicate under the old label
         (#1651); renaming into a tombstoned ``new_name`` clears it, mirroring
         :meth:`create`.
@@ -1437,12 +1437,12 @@ class SlotManager:
                 #    tombstone blocks that name from ever being seeded again
                 #    even though a live slot now legitimately owns it.
                 from hal0.install.static_seeds import (
-                    STATIC_SEED_SLOTS,
+                    SEED_TEMPLATES,
                     add_seed_tombstone,
                     clear_seed_tombstone,
                 )
 
-                if canonical in STATIC_SEED_SLOTS:
+                if canonical in SEED_TEMPLATES:
                     add_seed_tombstone(canonical)
                 clear_seed_tombstone(new_name)
         return await self.status(new_name)
@@ -4242,9 +4242,9 @@ class SlotManager:
         # STATIC seeds only: the NPU trio (flm-stt/flm-embed) is reconciled
         # from the anchor by reconcile_trio_slots, which does not consult
         # tombstones — a trio deletion is ephemeral by contract.
-        from hal0.install.static_seeds import STATIC_SEED_SLOTS, add_seed_tombstone
+        from hal0.install.static_seeds import SEED_TEMPLATES, add_seed_tombstone
 
-        if slot_name in STATIC_SEED_SLOTS:
+        if slot_name in SEED_TEMPLATES:
             add_seed_tombstone(slot_name)
 
         # Reconcile capability intent: a deleted capability slot must not

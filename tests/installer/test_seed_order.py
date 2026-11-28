@@ -23,9 +23,7 @@ _INSTALL_SH = Path(__file__).resolve().parents[2] / "installer" / "install.sh"
 def test_seed_copy_loop_runs_before_hal0_setup_auto() -> None:
     text = _INSTALL_SH.read_text(encoding="utf-8")
 
-    seed_loop_marker = (
-        "for seed_slot in flm tts rerank memory img agent brain qwen3tts coder embed; do"
-    )
+    seed_loop_marker = "for seed_slot in agent brain memory; do"
     setup_call_marker = '"${HAL0_BIN}" setup "${_setup_args[@]}"'
 
     seed_loop_pos = text.index(seed_loop_marker)
@@ -48,9 +46,7 @@ def test_seed_device_derivation_runs_after_copy_loop_and_before_setup() -> None:
     treats an existing file as operator intent and never touches it again."""
     text = _INSTALL_SH.read_text(encoding="utf-8")
 
-    seed_loop_marker = (
-        "for seed_slot in flm tts rerank memory img agent brain qwen3tts coder embed; do"
-    )
+    seed_loop_marker = "for seed_slot in agent brain memory; do"
     derive_marker = "-m hal0.install.static_seeds"
     setup_call_marker = '"${HAL0_BIN}" setup "${_setup_args[@]}"'
 

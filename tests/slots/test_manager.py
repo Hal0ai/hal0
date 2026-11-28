@@ -57,10 +57,10 @@ def test_seeded_slots_is_single_sourced_from_static_seeds() -> None:
     # SEEDED_SLOTS previously hand-duplicated the install seed set and drifted
     # (it carried the retired ``stt``/``vision`` scaffolds while missing
     # ``brain``/``coder``/``flm``/``qwen3tts``). It is now a re-export of
-    # STATIC_SEED_SLOTS — one source of truth, no drift possible.
-    from hal0.install.static_seeds import STATIC_SEED_SLOTS
+    # SEED_TEMPLATES — one source of truth, no drift possible.
+    from hal0.install.static_seeds import SEED_TEMPLATES
 
-    assert SEEDED_SLOTS is STATIC_SEED_SLOTS
+    assert SEEDED_SLOTS is SEED_TEMPLATES
     assert "vision" not in SEEDED_SLOTS
     assert "stt" not in SEEDED_SLOTS
     assert "brain" in SEEDED_SLOTS

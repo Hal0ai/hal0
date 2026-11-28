@@ -38,8 +38,8 @@ log = logging.getLogger(__name__)
 # ── Seeded slot catalogue (PR-10, plan §4.2 + §10.2) ────────────────────────
 
 #: Slots with a static install seed — SINGLE-SOURCED from
-#: :data:`hal0.install.static_seeds.STATIC_SEED_SLOTS` (which itself mirrors
-#: install.sh's seed loop). This list previously hand-duplicated the seed set
+#: :data:`hal0.install.static_seeds.SEED_TEMPLATES` (every seed file that
+#: exists, not the shorter fresh-install list). This list previously hand-duplicated the seed set
 #: and drifted badly: it still carried the retired ``stt``/``vision`` scaffold
 #: names (protected-but-never-seeded — the un-deletable ghost-slot bug) while
 #: missing ``brain``/``coder``/``flm``/``qwen3tts`` (seeded-but-unprotected).
@@ -55,7 +55,7 @@ log = logging.getLogger(__name__)
 # canonical llm seeds. `chat` is retired as a slot/role name (the `chat` *capability*
 # is unaffected; any llm slot serves it). `utility` is seeded so the memory
 # extraction target is always present on a fresh box.
-from hal0.install.static_seeds import STATIC_SEED_SLOTS as SEEDED_SLOTS  # noqa: E402
+from hal0.install.static_seeds import SEED_TEMPLATES as SEEDED_SLOTS  # noqa: E402
 
 #: NPU FLM shadow slots seeded only when the FastFlowLM ``.deb`` is
 #: installed (``shutil.which('flm')`` truthy): the ASR + embed tags that
@@ -143,7 +143,8 @@ class LoadedSlot:
 def seeded_slots(*, include_npu: bool | None = None) -> tuple[str, ...]:
     """Return the seeded slot list, optionally including the NPU trio.
 
-    :data:`SEEDED_SLOTS` lands on every hal0 install. The NPU trio
+    :data:`SEEDED_SLOTS` is the full seed-template vocabulary (not the shorter
+    fresh-install list). The NPU trio
     shadows (``flm-stt`` / ``flm-embed``) only seed when the
     FastFlowLM ``.deb`` is installed (``shutil.which('flm')``
     truthy). Per plan §10.2 + §4.2.

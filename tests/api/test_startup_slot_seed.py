@@ -16,7 +16,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from hal0.api import create_app
-from hal0.install.static_seeds import STATIC_SEED_SLOTS
+from hal0.install.static_seeds import FRESH_INSTALL_SEEDS
 
 
 @pytest.fixture(autouse=True)
@@ -32,7 +32,7 @@ def _slots_dir(tmp_hal0_home: str) -> Path:
 
 
 def test_lifespan_seeds_static_slots(tmp_hal0_home: str) -> None:
-    """A blank box grows every static seed at startup."""
+    """A blank box grows the fresh-install seeds (and only those) at startup."""
     slots_dir = _slots_dir(tmp_hal0_home)
     assert not slots_dir.exists()
 
@@ -40,7 +40,7 @@ def test_lifespan_seeds_static_slots(tmp_hal0_home: str) -> None:
         pass
 
     names = {p.stem for p in slots_dir.glob("*.toml")}
-    assert set(STATIC_SEED_SLOTS) <= names
+    assert names == set(FRESH_INSTALL_SEEDS)
     assert "brain" in names
     assert "agent" in names
 
@@ -60,7 +60,7 @@ def test_lifespan_newly_seeded_slot_gets_identity_row_same_boot(tmp_hal0_home: s
     app = create_app()
     with TestClient(app):
         names = app.state.slot_manager.identity_names()
-        assert set(STATIC_SEED_SLOTS) <= names
+        assert set(FRESH_INSTALL_SEEDS) <= names
 
 
 def test_lifespan_slot_seed_converges_old_box_without_touching_edits(

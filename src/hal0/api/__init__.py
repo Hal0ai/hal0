@@ -2095,12 +2095,12 @@ async def _boot_seeds(app: FastAPI, ctx: BootState) -> None:
     except Exception as exc:  # seeding must never block startup
         log.warning("personas.startup_seed_failed", error=str(exc))
 
-    # Static slot seeds (flm/tts/rerank/utility/img/agent/brain) — same
-    # fresh-install-only gap as the persona seed above: install.sh's copy
-    # loop never re-runs on `hal0 update`, so a box upgrading past a
-    # release that added a new seed (e.g. `brain`, the dashboard
-    # steward's slot) never grows the file. Copy-if-absent; an existing
-    # <name>.toml (operator edit or prior seed) is never touched.
+    # Static slot seeds — the FRESH_INSTALL_SEEDS subset (agent/brain/memory;
+    # seed_static_slots() defaults to it): install.sh's copy loop never
+    # re-runs on `hal0 update`, so a box that lacks one of those three gets
+    # it back here. Copy-if-absent; an existing <name>.toml (operator edit
+    # or prior seed) is never touched, and a tombstoned name stays deleted.
+    # The other seven templates are never created at boot.
     try:
         from hal0.install.static_seeds import seed_static_slots
 

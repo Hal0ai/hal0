@@ -1337,7 +1337,7 @@ async def delete_slot(
     409 ``slot.pinned``; pass ``?force=true`` to delete one anyway.
 
     Being *seeded* protects nothing. Every name in
-    :data:`hal0.install.static_seeds.STATIC_SEED_SLOTS` (``flm``, ``tts``,
+    :data:`hal0.install.static_seeds.SEED_TEMPLATES` (``flm``, ``tts``,
     ``rerank``, ``memory``, ``img``, ``agent``, ``brain``, ``qwen3tts``,
     ``coder``, ``embed`` — note there is no ``primary`` and no ``stt``) deletes
     like any other slot, and deleting one writes a tombstone so the boot-time

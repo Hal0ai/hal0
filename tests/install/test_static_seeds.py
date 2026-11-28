@@ -15,11 +15,11 @@ import pytest
 
 from hal0.agents.anchor_window import HERMES_MINIMUM_CONTEXT_LENGTH
 from hal0.install.brain_model import BRAIN_MODEL_IDS
-from hal0.install.static_seeds import STATIC_SEED_SLOTS, seed_static_slots
+from hal0.install.static_seeds import FRESH_INSTALL_SEEDS, SEED_TEMPLATES, seed_static_slots
 from hal0.providers.container import profile_context
 
 
-def _fake_installer_root(tmp_path: Path, names: tuple[str, ...] = STATIC_SEED_SLOTS) -> Path:
+def _fake_installer_root(tmp_path: Path, names: tuple[str, ...] = SEED_TEMPLATES) -> Path:
     root = tmp_path / "installer-root"
     src_dir = root / "installer" / "etc-hal0" / "slots"
     src_dir.mkdir(parents=True)
@@ -32,8 +32,8 @@ def test_seed_static_slots_copies_all_missing(tmp_path: Path) -> None:
     installer_root = _fake_installer_root(tmp_path)
     dest = tmp_path / "slots"
     seeded = seed_static_slots(installer_root=installer_root, slots_dir=dest)
-    assert set(seeded) == set(STATIC_SEED_SLOTS)
-    for name in STATIC_SEED_SLOTS:
+    assert set(seeded) == set(FRESH_INSTALL_SEEDS)
+    for name in FRESH_INSTALL_SEEDS:
         assert (dest / f"{name}.toml").exists()
 
 
@@ -73,10 +73,10 @@ def test_seed_static_slots_idempotent_second_run_noop(tmp_path: Path) -> None:
 def test_seed_static_slots_missing_source_logs_and_continues(tmp_path: Path) -> None:
     """A partially-shipped installer tree (missing one seed source) must
     not abort seeding the rest."""
-    names = tuple(n for n in STATIC_SEED_SLOTS if n != "brain")
+    names = tuple(n for n in SEED_TEMPLATES if n != "brain")
     installer_root = _fake_installer_root(tmp_path, names=names)
     dest = tmp_path / "slots"
-    seeded = seed_static_slots(installer_root=installer_root, slots_dir=dest)
+    seeded = seed_static_slots(installer_root=installer_root, slots_dir=dest, names=SEED_TEMPLATES)
     assert "brain" not in seeded
     assert set(seeded) == set(names)
 
@@ -90,13 +90,13 @@ def test_seed_static_slots_creates_dest_dir(tmp_path: Path) -> None:
 
 
 def test_static_seed_slots_matches_shipped_files() -> None:
-    """Every name in STATIC_SEED_SLOTS must have a real TOML in
+    """Every name in SEED_TEMPLATES must have a real TOML in
     installer/etc-hal0/slots/ — catches "added the name, forgot the
     file" drift (install.sh's list is the sibling that must also stay
     in sync, checked only by review since it's bash)."""
     repo_root = Path(__file__).resolve().parents[2]
     src_dir = repo_root / "installer" / "etc-hal0" / "slots"
-    for name in STATIC_SEED_SLOTS:
+    for name in SEED_TEMPLATES:
         assert (src_dir / f"{name}.toml").is_file(), f"missing seed source for {name!r}"
 
 
@@ -125,15 +125,15 @@ def test_seed_static_slots_existing_names_default_empty_unchanged(tmp_path: Path
     installer_root = _fake_installer_root(tmp_path)
     dest = tmp_path / "slots"
     seeded = seed_static_slots(installer_root=installer_root, slots_dir=dest)
-    assert set(seeded) == set(STATIC_SEED_SLOTS)
+    assert set(seeded) == set(FRESH_INSTALL_SEEDS)
 
 
 def test_seed_static_slots_default_args_seed_real_tree(tmp_path: Path) -> None:
     """Default args (no installer_root/slots_dir override) resolve the
-    real repo tree in this dev/editable checkout and seed every slot."""
+    real repo tree in this dev/editable checkout and seed the fresh-install slots."""
     dest = tmp_path / "slots"
     seeded = seed_static_slots(slots_dir=dest)
-    assert set(seeded) == set(STATIC_SEED_SLOTS)
+    assert set(seeded) == set(FRESH_INSTALL_SEEDS)
 
 
 # ── ADR-0029: the shipped seeds carry placement, the window is the profile's ──
@@ -163,7 +163,7 @@ def _seed_toml(name: str) -> dict:
     return tomllib.loads((_SEED_SRC_DIR / f"{name}.toml").read_bytes().decode("utf-8"))
 
 
-@pytest.mark.parametrize("slot_name", STATIC_SEED_SLOTS)
+@pytest.mark.parametrize("slot_name", SEED_TEMPLATES)
 def test_shipped_seed_carries_no_tuning_key_and_names_a_seed_profile(slot_name: str) -> None:
     """No seed ships a slot-level window / flags (ADR-0029); every LLM-ish seed
     names a code-shipped seed profile, so it resolves on a fresh install."""

@@ -10,17 +10,20 @@ grows the file. This module is the same copy-if-absent logic, callable
 from Python, so the hal0-api lifespan can close that gap the way it
 already does for persona seeding (:func:`hal0.agents.personas.seed_default_personas`).
 
-Keep :data:`STATIC_SEED_SLOTS` in sync with install.sh's
-``for seed_slot in ...`` line by hand — bash and Python don't share a
-source here, mirroring how ``setup_command._SETUP_SLOTS`` and
-``routes.installer._SLOT_META`` already hand-mirror each other.
+Two lists live here. :data:`SEED_TEMPLATES` names every seed file that
+exists under ``installer/etc-hal0/slots/`` (the vocabulary: tombstones,
+``is_seed``, doctor targets). :data:`FRESH_INSTALL_SEEDS` names the subset a
+fresh install actually creates. Keep :data:`FRESH_INSTALL_SEEDS` in sync with
+install.sh's ``for seed_slot in ...`` line by hand — bash and Python don't
+share a source here; ``tests/install/test_seed_lists.py`` fails when they
+drift.
 """
 
 from __future__ import annotations
 
 import re
 import shutil
-from collections.abc import Collection
+from collections.abc import Collection, Iterable
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -33,10 +36,12 @@ if TYPE_CHECKING:
 
 log = structlog.get_logger(__name__)
 
-#: Slot names with a static seed TOML in installer/etc-hal0/slots/.
-#: MUST mirror install.sh's:
-#:   for seed_slot in flm tts rerank memory img agent brain qwen3tts coder embed; do
-STATIC_SEED_SLOTS: tuple[str, ...] = (
+#: Every slot name with a static seed TOML in installer/etc-hal0/slots/.
+#: This is the template vocabulary, NOT the list of slots a box gets: an
+#: existing box keeps every one of these it already has, and a deletion of any
+#: of them is tombstoned. See :data:`FRESH_INSTALL_SEEDS` for what a fresh
+#: install creates.
+SEED_TEMPLATES: tuple[str, ...] = (
     "flm",
     "tts",
     "rerank",
@@ -48,6 +53,11 @@ STATIC_SEED_SLOTS: tuple[str, ...] = (
     "coder",
     "embed",
 )
+
+#: The slots a FRESH install creates, a subset of :data:`SEED_TEMPLATES`.
+#: MUST mirror install.sh's:
+#:   for seed_slot in agent brain memory; do
+FRESH_INSTALL_SEEDS: tuple[str, ...] = ("agent", "brain", "memory")
 
 #: Seed name → :func:`hal0.install.profile_derive.derive_device` capability for
 #: the llama.cpp-backed lifecycle seeds (#2023). Every one of these ships
@@ -376,8 +386,13 @@ def seed_static_slots(
     slots_dir: Path | None = None,
     existing_names: Collection[str] = (),
     hw: HardwareInfo | None = None,
+    names: Iterable[str] | None = None,
 ) -> list[str]:
     """Copy any missing static seed TOML into the slots config dir.
+
+    ``names`` picks which seeds to consider; ``None`` means
+    :data:`FRESH_INSTALL_SEEDS`. A name outside :data:`SEED_TEMPLATES` raises
+    :class:`ValueError`. Tombstoned names are skipped either way.
 
     Idempotent and non-destructive: an existing ``<name>.toml`` — an
     operator edit, a seed from a prior run, or a slot the operator
@@ -408,6 +423,10 @@ def seed_static_slots(
     :func:`_resolve_hardware_info`; unresolvable hardware keeps the verbatim
     copy (fail-soft).
     """
+    wanted = tuple(FRESH_INSTALL_SEEDS if names is None else names)
+    unknown = [n for n in wanted if n not in SEED_TEMPLATES]
+    if unknown:
+        raise ValueError(f"not a seed template: {', '.join(sorted(unknown))}")
     if installer_root is None:
         from hal0.agents.hermes_provision import REPO_ROOT_FOR_INSTALLER
 
@@ -418,7 +437,7 @@ def seed_static_slots(
 
     tombstoned = read_seed_tombstones(slots_dir=dest_dir)
     seeded: list[str] = []
-    for name in STATIC_SEED_SLOTS:
+    for name in wanted:
         dest = dest_dir / f"{name}.toml"
         # "Already known" = the identity store tracks it (id-keyed, no
         # <name>.toml) OR a name-keyed file still exists (pre-migration box).
@@ -567,8 +586,9 @@ if __name__ == "__main__":  # pragma: no cover — exercised via install.sh
 
 
 __all__ = [
+    "FRESH_INSTALL_SEEDS",
     "LLAMA_SEED_CAPABILITIES",
-    "STATIC_SEED_SLOTS",
+    "SEED_TEMPLATES",
     "add_seed_tombstone",
     "apply_context_size_envelope",
     "apply_derived_seed_devices",

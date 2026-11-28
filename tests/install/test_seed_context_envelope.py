@@ -24,7 +24,7 @@ from hal0.config.loader import load_profiles_config
 from hal0.config.schema import GPUInfo, HardwareInfo, slot_tuning_keys
 from hal0.install.static_seeds import (
     LLAMA_SEED_CAPABILITIES,
-    STATIC_SEED_SLOTS,
+    SEED_TEMPLATES,
     apply_context_size_envelope,
     clamped_profile_name,
     ensure_clamped_profile,
@@ -237,10 +237,10 @@ def test_unresolvable_hardware_keeps_verbatim_copy(
 def test_non_llama_seeds_are_never_touched(tmp_path: Path, profiles_path: Path) -> None:
     dest = tmp_path / "slots"
     dest.mkdir()
-    for name in STATIC_SEED_SLOTS:
+    for name in SEED_TEMPLATES:
         shutil.copyfile(_SEED_SRC_DIR / f"{name}.toml", dest / f"{name}.toml")
     rewritten = apply_context_size_envelope(
-        STATIC_SEED_SLOTS, slots_dir=dest, hw=_tiny_cpu_box(), profiles_path=profiles_path
+        SEED_TEMPLATES, slots_dir=dest, hw=_tiny_cpu_box(), profiles_path=profiles_path
     )
     assert set(rewritten).issubset(set(LLAMA_SEED_CAPABILITIES))
 
