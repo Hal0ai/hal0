@@ -11,6 +11,7 @@ from types import FrameType
 
 import pytest
 
+from hal0.install.wizard.session import Interrupted
 from hal0.install.wizard.term import (
     Terminal,
     TerminalUnavailable,
@@ -418,12 +419,15 @@ def test_a_failing_mask_call_still_restores_the_terminal_and_the_mask(
     real = signal.pthread_sigmask
 
     def blocking_fails(how: int, mask: object) -> set[signal.Signals]:
+        result = real(how, mask)  # type: ignore[arg-type]
         if how == signal.SIG_BLOCK and mask:
-            raise _Boom
-        return real(how, mask)  # type: ignore[arg-type]
+            # The block took effect, then something failed before the old mask was
+            # stored: the case that used to leave the signals blocked for good.
+            raise Interrupted
+        return result
 
     monkeypatch.setattr(signal, "pthread_sigmask", blocking_fails)
-    with pytest.raises(_Boom), Terminal(slave_path, raw=True):
+    with pytest.raises(Interrupted), Terminal(slave_path, raw=True):
         assert _attrs(slave_path) != before
     monkeypatch.undo()
     assert _attrs(slave_path) == before

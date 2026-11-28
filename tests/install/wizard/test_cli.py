@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import errno
 import json
 import os
 import re
@@ -1218,6 +1219,36 @@ def test_an_oserror_that_is_a_bug_is_exit_70_not_an_interrupt(
     captured = capsys.readouterr()
     assert code == 70
     assert captured.err == "hal0 setup: internal error (OSError)\n"
+    assert not out.exists()
+    assert _tty_attrs(slave) == before
+
+
+@pytest.mark.parametrize("method", ["read_key", "read_line", "width", "draw"])
+def test_a_lost_terminal_is_an_interruption_exit_130(
+    method: str,
+    catalog_path: Path,
+    tmp_path: Path,
+    pty_pair: tuple[int, str],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from hal0.install.wizard import term
+
+    _, slave = pty_pair
+    before = _tty_attrs(slave)
+
+    def lost(*args: object, **kwargs: object) -> object:
+        raise OSError(errno.EIO, "terminal lost")
+
+    monkeypatch.setattr(term.Terminal, method, lost)
+    plain = method == "read_line"  # read_line is the plain form's call
+    env = {"TERM": "xterm", **({"HAL0_PLAIN": "1"} if plain else {})}
+    out = tmp_path / "a.json"
+    argv = ["--catalog", str(catalog_path), "--out", str(out), "--tty", slave]
+    code = cli.main(argv, environ=env)
+    captured = capsys.readouterr()
+    assert code == cli.EXIT_INTERRUPTED == 130
+    assert captured.out == ""
     assert not out.exists()
     assert _tty_attrs(slave) == before
 
