@@ -78,8 +78,12 @@ case "$cmd" in
     [[ "$cmd" == *"--description "* ]] && printf '%s' "$d" > "$FAKE_STATE/description"
     touch "$FAKE_STATE/present"; exit 0 ;;
   "pct start "*)
+    [[ -z "${FAKE_START_HANGS:-}" ]] || exec sleep 60
     exit 0 ;;
   *"pct destroy "*)
+    touch "$FAKE_STATE/destroy-started"
+    [[ -z "${FAKE_DESTROY_HANGS:-}" ]] || exec sleep 60
+    [[ -z "${FAKE_DESTROY_SLEEP:-}" ]] || sleep "$FAKE_DESTROY_SLEEP"
     [[ -z "${FAKE_DESTROY_FAILS:-}" ]] || exit 1
     rm -f "$FAKE_STATE/present"; exit 0 ;;
 esac
@@ -444,6 +448,69 @@ def test_failed_destroy_prints_left_behind(host):
     assert r.returncode == 1
 
 
+DESTROY_CMD = "ssh testpve pct destroy 172 --force --purge"
+
+
+def test_left_behind_is_also_written_to_run_txt(host):
+    r = host.run("u2404-cpu", "--vmid", "172", "--out", str(host.out), FAKE_DESTROY_FAILS="1")
+    note = (host.out / "run.txt").read_text().splitlines()
+    assert "left_behind=172" in note
+    assert f"destroy_command={DESTROY_CMD}" in note, r.stderr
+
+
+def test_the_destroy_command_is_printed_as_soon_as_the_container_exists(host):
+    r = host.run("u2404-cpu", "--vmid", "172", "--out", str(host.out))
+    assert r.returncode == 0, r.stderr
+    line = f"container 172 exists; if this run dies, destroy it with: {DESTROY_CMD}"
+    assert r.stderr.count(line) == 2, r.stderr  # after create, and at the start of cleanup
+    first = r.stderr.index(line)
+    assert first < r.stderr.index("installing (")
+
+
+def test_a_hung_start_is_cut_off_and_the_container_is_still_destroyed(host):
+    r = host.run(
+        "u2404-cpu", "--vmid", "172", "--out", str(host.out),
+        FAKE_START_HANGS="1", HAL0_MATRIX_TIMEOUT_START="1",
+    )  # fmt: skip
+    assert r.returncode == 1, r.stderr
+    assert "could not start container 172" in r.stderr
+    assert not (host.state / "present").exists()
+
+
+def test_a_hung_destroy_ends_in_left_behind_not_a_hang(host):
+    r = host.run(
+        "u2404-cpu", "--vmid", "172", "--out", str(host.out),
+        FAKE_DESTROY_HANGS="1", HAL0_MATRIX_TIMEOUT_DESTROY="1",
+    )  # fmt: skip
+    assert r.returncode == 1
+    assert "LEFT BEHIND: 172" in r.stderr
+    assert "left_behind=172" in (host.out / "run.txt").read_text()
+
+
+def test_a_second_interrupt_during_cleanup_still_reports_left_behind(host):
+    proc = subprocess.Popen(
+        ["bash", str(RUN_SHAPE), "u2604-cpu-unattended", "--vmid", "172", "--out", str(host.out)],
+        env=host.env(FAKE_INSTALL_SLEEP="60", FAKE_DESTROY_SLEEP="3", FAKE_DESTROY_FAILS="1"),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+    )
+    deadline = time.monotonic() + 90
+    while not (host.state / "install-started").exists():
+        assert proc.poll() is None and time.monotonic() < deadline
+        time.sleep(0.05)
+    os.killpg(proc.pid, signal.SIGINT)
+    while not (host.state / "destroy-started").exists():
+        assert proc.poll() is None and time.monotonic() < deadline
+        time.sleep(0.05)
+    os.killpg(proc.pid, signal.SIGINT)
+    os.killpg(proc.pid, signal.SIGTERM)
+    out, err = proc.communicate(timeout=120)
+    assert "LEFT BEHIND: 172" in err, err
+    assert "left_behind=172" in (host.out / "run.txt").read_text()
+
+
 def test_failed_install_still_writes_result(host):
     r = host.run("u2604-cpu-unattended", "--vmid", "172", "--out", str(host.out), FAKE_INSTALL_RC="1")
     assert r.returncode == 1
@@ -484,6 +551,8 @@ def test_successful_terminal_run(host):
     assert "installing hal0" in (host.out / "transcript.txt").read_text()
     assert not (host.state / "present").exists()
     assert any("-tt" in c and "pct exec 172" in c for c in host.calls())
+    tty = [c for c in host.calls() if "-tt" in c][0]
+    assert "-o ServerAliveInterval=15 -o ServerAliveCountMax=4" in tty
 
 
 def test_keep_leaves_the_container(host):

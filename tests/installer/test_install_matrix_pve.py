@@ -29,6 +29,9 @@ UNTAGGED_CONF = "hostname: hal0-mx-{vmid}\ncores: 2\n"
 WRONG_HOST_CONF = "hostname: hal0\ntags: hal0-matrix\ncores: 2\n"
 
 
+HANG = "__HANG__"  # a rule answering this never returns (until killed)
+
+
 class Fake:
     """A fake ssh on PATH. ``rules`` is a list of (needle, stdout, rc); the first
     rule whose needle occurs in the command string answers. Unmatched commands
@@ -68,6 +71,9 @@ class Fake:
         for i, (needle, out, rc) in enumerate(self.rules):
             f = self.dir / f"out{i}"
             f.write_bytes(out if isinstance(out, bytes) else out.encode())
+            if out == HANG:
+                lines.append(f"if [[ \"$cmd\" == *{shlex.quote(needle)}* ]]; then exec sleep 60; fi")
+                continue
             lines.append(
                 f"if [[ \"$cmd\" == *{shlex.quote(needle)}* ]]; then "
                 f"cat {shlex.quote(str(f))}; exit {rc}; fi"
@@ -280,7 +286,10 @@ def test_pve_run_passes_one_argument_with_batch_options(fake):
     fake.run("pve_run 'echo hi; echo there'")
     fake.run("pve_run 'echo hi'")
     call = fake.calls()[-1]
-    assert call == "-n -o BatchMode=yes -o ConnectTimeout=10 -- testpve echo hi"
+    assert call == (
+        "-n -o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=15 "
+        "-o ServerAliveCountMax=4 -- testpve echo hi"
+    )
 
 
 def test_pve_run_rejects_option_like_alias(fake):
@@ -295,6 +304,65 @@ def test_pve_run_leaves_callers_stdin_alone(fake):
     )
     assert r.stdout.split() == ["got", "a", "got", "b"]
     assert not fake.stdin_dump.exists() or fake.stdin_dump.read_bytes() == b""
+
+
+# --- deadlines --------------------------------------------------------------
+
+TIMED_OUT = ("124", "137")  # timeout's status, or the KILL it sent
+
+
+def _hangs_then_gives_up(fake, call, env_name, rules=()):
+    for needle, out in rules:
+        fake.rule(needle, out)
+    started = __import__("time").monotonic()
+    r = fake.run(f"{call}; echo rc=$?", env={env_name: "1"})
+    took = __import__("time").monotonic() - started
+    assert took < 20, f"the call was not cut off ({took:.0f}s)"
+    return r
+
+
+@pytest.mark.parametrize(
+    "call,env_name,hang",
+    [
+        ("ct_exec 172 id", "HAL0_MATRIX_TIMEOUT_EXEC", "pct exec 172"),
+        ("ct_start 172", "HAL0_MATRIX_TIMEOUT_START", "pct start 172"),
+        ("ct_push 172 /etc/hostname /root/x", "HAL0_MATRIX_TIMEOUT_PULL", "pct exec 172"),
+        ("ct_pull 172 /root/x /dev/null", "HAL0_MATRIX_TIMEOUT_PULL", "pct exec 172"),
+    ],
+)
+def test_guest_calls_run_under_a_deadline(fake, tmp_path, call, env_name, hang):
+    call = call.replace("/dev/null", str(tmp_path / "pulled"))
+    _owned_rules(fake, 172)
+    r = _hangs_then_gives_up(fake, call, env_name, [(hang, HANG)])
+    assert re.search(r"rc=(124|137|1)\b", r.stdout), r.stdout
+    assert "deadline" in r.stderr
+
+
+def test_create_runs_under_a_deadline(fake):
+    fake.rule("pvesm status --content rootdir", STORAGE)
+    fake.rule("test -e /etc/pve/lxc/172.conf", "absent\n")
+    r = _hangs_then_gives_up(
+        fake,
+        "ct_create 172 local:vztmpl/x.tar.zst 0 4 8192 40",
+        "HAL0_MATRIX_TIMEOUT_CREATE",
+        [("pct create", HANG)],
+    )
+    assert re.search(r"rc=(124|137)", r.stdout), r.stdout
+
+
+def test_destroy_runs_under_a_deadline_and_reports_the_guest_still_there(fake):
+    _owned_rules(fake, 172)
+    fake.rule("test -e /etc/pve/lxc/172.conf", "present\n")
+    r = _hangs_then_gives_up(
+        fake, "ct_destroy 172", "HAL0_MATRIX_TIMEOUT_DESTROY", [("pct destroy 172", HANG)]
+    )
+    assert "rc=1" in r.stdout and "still present" in r.stderr
+
+
+def test_a_bad_deadline_variable_falls_back_to_the_default(fake):
+    fake.rule("echo hi", "hi\n")
+    r = fake.run("pve_run 'echo hi'", env={"HAL0_MATRIX_TIMEOUT_READ": "1; id"})
+    assert r.stdout.strip() == "hi"
 
 
 # --- template and storage ---------------------------------------------------

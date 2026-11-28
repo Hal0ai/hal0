@@ -29,6 +29,11 @@ REPO="$(cd "${HERE}/../.." && pwd)"
 # shellcheck source-path=SCRIPTDIR source=lib/pve.sh
 source "${HERE}/lib/pve.sh"
 
+# Deadlines (seconds) for guest commands longer than ct_exec's default 120.
+T_SLOW=300      # package install, unpacking a tree, downloading install.sh
+T_PROBE=900     # collect.sh probe (a chat, a memory write, a Hermes reply)
+T_UNINSTALL=600
+
 INSTALL_URL="https://hal0.dev/install.sh"
 SUMMARY_PATH="/root/hal0-summary.json"
 
@@ -188,6 +193,19 @@ POST_DONE=0 PULL_DONE=0 RESULT_WRITTEN=0
 CHILD_PID="" CHILD_TREE=0
 CLEANED=0
 declare -a DEVS=() MAJORS=()
+
+# The exact command that destroys this run's container by hand.
+GUEST_LOCKED=0     # the guest's config shows a lock: line
+destroy_hint() {
+  if [[ "$GUEST_LOCKED" == "1" ]]; then
+    printf "ssh %s 'pct unlock %s && pct destroy %s --force --purge'" "$PVE_ALIAS" "$VMID" "$VMID"
+  else
+    printf 'ssh %s pct destroy %s --force --purge' "$PVE_ALIAS" "$VMID"
+  fi
+}
+announce_container() {
+  log "container ${VMID} exists; if this run dies, destroy it with: $(destroy_hint)"
+}
 
 kv_get() { sed -n "s/^${2}=//p" "$1" 2>/dev/null | head -n 1; }
 
@@ -373,6 +391,7 @@ cleanup() {
   set +e +u
   [[ "$CLEANED" == "0" ]] || exit "$rc"
   CLEANED=1
+  [[ "$CT_MAYBE" != "1" ]] || announce_container
   stop_watchdog
   stop_child
   if [[ -n "$ABORT_REASON" ]]; then
@@ -396,12 +415,12 @@ cleanup() {
         run_bounded 240 finish_result
       fi
       if [[ "$KEEP" == "1" ]]; then
-        log "--keep: container ${VMID} left in place; destroy it with: ssh ${PVE_ALIAS} pct destroy ${VMID} --force --purge"
+        log "--keep: container ${VMID} left in place; destroy it with: $(destroy_hint)"
       elif ct_destroy "$VMID" "$NONCE"; then
         log "destroyed container ${VMID}"
       else
-        printf 'LEFT BEHIND: %s (destroy it with: ssh %s pct destroy %s --force --purge)\n' \
-          "$VMID" "$PVE_ALIAS" "$VMID" >&2
+        printf 'LEFT BEHIND: %s (destroy it with: %s)\n' "$VMID" "$(destroy_hint)" >&2
+        [[ -z "$ART" ]] || printf 'left_behind=%s\ndestroy_command=%s\n' "$VMID" "$(destroy_hint)" >>"${ART}/run.txt"
         [[ "$rc" -ne 0 ]] || rc=1
       fi
     fi
@@ -413,6 +432,8 @@ cleanup() {
 }
 
 on_signal() {
+  # A second signal must not cut the cleanup short: ignore them from here on.
+  trap '' INT TERM HUP USR1
   INTERRUPTED="$1"
   log "interrupted (signal $1); cleaning up"
   exit $((128 + $1))
@@ -478,6 +499,7 @@ ct_create "$VMID" "$VOLID" "$SHAPE_UNPRIVILEGED" "$SHAPE_CORES" "$SHAPE_MEMORY_M
 # (status 90) created nothing, and what is at that VMID is not ours.
 [[ "$create_rc" == "$_CT_REFUSED" ]] || CT_MAYBE=1
 [[ "$create_rc" == "0" ]] || { log "could not create container ${VMID}"; exit 1; }
+announce_container
 [[ "$DRY_RUN" == "1" ]] || start_watchdog
 if [[ ${#MAJORS[@]} -gt 0 ]]; then
   ct_apply_device_rules "$VMID" "$SHAPE_UNPRIVILEGED" "${MAJORS[@]}" || { log "could not apply device rules"; exit 1; }
@@ -497,7 +519,7 @@ else
   exit 1
 fi
 echo "prereqs=curl ca-certificates"'
-prereq_out="$(ct_exec "$VMID" "$PREREQ_SCRIPT")" || { log "could not install curl in the guest"; exit 1; }
+prereq_out="$(CT_EXEC_TIMEOUT=$T_SLOW ct_exec "$VMID" "$PREREQ_SCRIPT")" || { log "could not install curl in the guest"; exit 1; }
 PREREQS="$(printf '%s\n' "$prereq_out" | sed -n 's/^prereqs=//p' | head -n 1)"
 [[ "$PREREQS" == "curl ca-certificates" ]] || PREREQS=""
 
@@ -514,14 +536,14 @@ CHAN_ENV="" UNATT_ENV=""
 
 if [[ -n "$TREE_DIR" ]]; then
   ct_push "$VMID" "$TREE_TAR" /root/hal0-src.tgz || { log "could not copy the tree"; exit 1; }
-  ct_exec "$VMID" "mkdir -p /root/hal0-src && tar -xzf /root/hal0-src.tgz -C /root/hal0-src" \
+  CT_EXEC_TIMEOUT=$T_SLOW ct_exec "$VMID" "mkdir -p /root/hal0-src && tar -xzf /root/hal0-src.tgz -C /root/hal0-src" \
     || { log "could not unpack the tree"; exit 1; }
   # SKIP_VERIFY is the one thing a tree install must set: there is no signed
   # release to check. Stable, preview and nightly never set it.
   INSTALL_SCRIPT="cd /root/hal0-src && ${UNATT_ENV}HAL0_INSTALL_SKIP_VERIFY=1 bash installer/install.sh ${ARGS}"
   [[ "$SHAPE_ENTRY" == "terminal" ]] || INSTALL_SCRIPT+=" < /dev/null"
 elif [[ "$SHAPE_ENTRY" == "terminal" ]]; then
-  ct_exec "$VMID" "curl -fsSL ${INSTALL_URL} -o /root/install.sh" || { log "could not download install.sh"; exit 1; }
+  CT_EXEC_TIMEOUT=$T_SLOW ct_exec "$VMID" "curl -fsSL ${INSTALL_URL} -o /root/install.sh" || { log "could not download install.sh"; exit 1; }
   INSTALL_SCRIPT="${CHAN_ENV}bash /root/install.sh ${ARGS}"
 else
   INSTALL_SCRIPT="set -o pipefail; curl -fsSL ${INSTALL_URL} | ${UNATT_ENV}${CHAN_ENV}bash -s -- ${ARGS}"
@@ -531,7 +553,8 @@ install_in_terminal() {
   local remote tty_argv drv rc=0
   ct_owned "$VMID" || { log "refusing: container ${VMID} is not harness-owned"; return 1; }
   remote="pct exec ${VMID} -- bash -c $(sq "$INSTALL_SCRIPT")"
-  tty_argv=(ssh -tt -o BatchMode=yes -o ConnectTimeout=10 -- "$PVE_ALIAS" "$remote")
+  tty_argv=(ssh -tt -o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=15 -o ServerAliveCountMax=4
+    -- "$PVE_ALIAS" "$remote")
   drv=(python3 -I "${HERE}/tty_drive.py" --answers "$ANSWERS_FILE" --transcript "${ART}/transcript.txt"
     --result "${ART}/driver.json" --timeout "$TIMEOUT" -- "${tty_argv[@]}")
   if [[ "$DRY_RUN" == "1" ]]; then
@@ -553,7 +576,9 @@ install_unattended() {
   fi
   return "$rc"
 }
-ct_exec_to_transcript() { ct_exec "$VMID" "$INSTALL_SCRIPT" >"${ART}/transcript.txt" 2>&1; }
+# The install keeps its own --timeout (run_bounded); the ssh under it gets a
+# little longer so the install's deadline is the one that fires.
+ct_exec_to_transcript() { CT_EXEC_TIMEOUT=$((TIMEOUT + 60)) ct_exec "$VMID" "$INSTALL_SCRIPT" >"${ART}/transcript.txt" 2>&1; }
 
 log "installing (${SHAPE_ENTRY}, ${SOURCE})"
 rc=0
@@ -568,14 +593,14 @@ log "install exited ${INSTALL_RC}"
 # ── step 9: what the install left behind ─────────────────────────────────────
 collect_post
 if [[ "$INSTALL_RC" == "0" ]]; then
-  ct_exec "$VMID" "bash /root/collect.sh probe" >"${ART}/probe.txt" 2>>"${ART}/collect.err" || log "collect probe failed"
+  CT_EXEC_TIMEOUT=$T_PROBE ct_exec "$VMID" "bash /root/collect.sh probe" >"${ART}/probe.txt" 2>>"${ART}/collect.err" || log "collect probe failed"
 fi
 
 # ── step 10: optional uninstall and residue check ────────────────────────────
 if [[ "$UNINSTALL" == "1" ]]; then
   log "uninstalling"
   UNINSTALL_OK=0
-  ct_exec "$VMID" 'hal0 uninstall --purge --force || bash /usr/lib/hal0/current/installer/uninstall.sh --purge --force || bash /opt/hal0/installer/uninstall.sh --purge --force' \
+  CT_EXEC_TIMEOUT=$T_UNINSTALL ct_exec "$VMID" 'hal0 uninstall --purge --force || bash /usr/lib/hal0/current/installer/uninstall.sh --purge --force || bash /opt/hal0/installer/uninstall.sh --purge --force' \
     >>"${ART}/transcript-uninstall.txt" 2>&1 && UNINSTALL_OK=1
   # shellcheck disable=SC2016  # the guest shell expands these, not this one
   RESIDUE_SCRIPT='r=""; for p in /opt/hal0 /usr/lib/hal0/current /etc/hal0 /var/lib/hal0 /usr/local/bin/hal0 /usr/local/bin/hal0-agent; do [ -e "$p" ] && r="$r path:$p"; done; for u in hal0-api hal0-openwebui hal0-agent@; do systemctl list-unit-files 2>/dev/null | grep -q "^$u" && r="$r unit:$u"; done; getent group hal0 >/dev/null && r="$r group:hal0"; echo "$r"'

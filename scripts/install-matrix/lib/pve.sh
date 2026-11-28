@@ -55,17 +55,41 @@ _pve_in_range() {
   ((10#$1 >= 10#$lo && 10#$1 <= 10#$hi))
 }
 
+# Deadlines, in seconds, one per kind of call. Each can be set through
+# HAL0_MATRIX_TIMEOUT_<NAME>; a value that is not a plain number is ignored.
+# _pve_t <NAME> <default> [override]
+_pve_t() {
+  local var="HAL0_MATRIX_TIMEOUT_${1}" v="${3:-}"
+  [[ "$v" =~ ^[1-9][0-9]{0,6}$ ]] || v="${!var:-}"
+  [[ "$v" =~ ^[1-9][0-9]{0,6}$ ]] || v="$2"
+  printf '%s' "$v"
+}
+
 # _pve_ssh <stdin: 0|1> <command string>. `--` ends ssh options so the alias
 # can never be read as one; stdin is closed (-n) unless the caller feeds it,
-# so a caller's `while read` loop keeps its input.
+# so a caller's `while read` loop keeps its input. ServerAlive* drops a dead
+# connection, and every call runs under `timeout` (KILL, because cleanup runs
+# with TERM ignored and a child inherits that): _PVE_DEADLINE seconds, which a
+# ct_* function sets for its own calls, else the READ deadline. A shell
+# function named ssh (the dry run's shadow) cannot run under timeout, so it is
+# called directly.
 _pve_ssh() {
-  local host="${HAL0_PVE:-pve}" nflag=()
+  local host="${HAL0_PVE:-pve}" nflag=() tmo=() dl rc=0
   if [[ "$host" == -* || ! "$host" =~ ^[^[:space:]]+$ ]]; then
     _pve_err "bad HAL0_PVE alias: ${host}"
     return 1
   fi
   [[ "$1" == "1" ]] || nflag=(-n)
-  ssh "${nflag[@]}" -o BatchMode=yes -o ConnectTimeout=10 -- "$host" "$2"
+  dl="${_PVE_DEADLINE:-$(_pve_t READ 120)}"
+  if [[ "$(type -t ssh)" != "function" ]]; then
+    tmo=(timeout --foreground -s KILL "$dl")
+  fi
+  "${tmo[@]}" ssh "${nflag[@]}" -o BatchMode=yes -o ConnectTimeout=10 \
+    -o ServerAliveInterval=15 -o ServerAliveCountMax=4 -- "$host" "$2" || rc=$?
+  if [[ "${#tmo[@]}" -gt 0 && ( "$rc" -eq 124 || "$rc" -eq 137 ) ]]; then
+    _pve_err "the call to the host passed its ${dl}s deadline and was stopped"
+  fi
+  return "$rc"
 }
 
 # pve_run <command string>
@@ -74,7 +98,8 @@ pve_run() { _pve_ssh 0 "$1"; }
 # _ct_presence <vmid>: prints present, absent or unknown (ssh failed or the
 # host said something else). Decided from the config file, not an exit code.
 _ct_presence() {
-  local out rc
+  local out rc _PVE_DEADLINE
+  _PVE_DEADLINE="$(_pve_t READ 60)"
   out="$(pve_run "if test -e /etc/pve/lxc/${1}.conf; then echo present; else echo absent; fi")" && rc=0 || rc=$?
   if [[ "$rc" -eq 0 && ( "$out" == "present" || "$out" == "absent" ) ]]; then
     printf '%s\n' "$out"
@@ -92,7 +117,8 @@ _PVE_HEADROOM_CMD='free -g; for d in /sys/class/drm/card*/device; do if [ -r "$d
 
 # pve_mem_available_gb: integer from the "available" column of `free -g`.
 pve_mem_available_gb() {
-  local out n
+  local out n _PVE_DEADLINE
+  _PVE_DEADLINE="$(_pve_t READ 60)"
   out="$(pve_run 'free -g')" || return 1
   n="$(awk '/^Mem:/ {print $7}' <<<"$out")"
   [[ "$n" =~ ^[0-9]+$ ]] || return 1
@@ -223,7 +249,8 @@ print(lo)
 # nonce the guest's description must also be `hal0-matrix run <nonce>`, which
 # proves it is the guest THIS run created.
 ct_owned() {
-  local vmid="${1:-}" nonce="${2:-}" conf line tags="" host="" desc="" t found=1
+  local vmid="${1:-}" nonce="${2:-}" conf line tags="" host="" desc="" t found=1 _PVE_DEADLINE
+  _PVE_DEADLINE="$(_pve_t READ 60)"
   _pve_in_range "$vmid" || return 1
   if [[ -n "$nonce" ]]; then
     [[ "$nonce" =~ ^[0-9a-f]{16}$ ]] || return 1
@@ -262,7 +289,8 @@ _ct_require_owned() {
 ct_create() {
   local vmid="${1:-}" volid="${2:-}" unpriv="${3:-}" cores="${4:-}" mem="${5:-}" disk="${6:-}"
   shift 6 2>/dev/null || { _pve_err "ct_create: too few arguments"; return "$_CT_REFUSED"; }
-  local bridge="${HAL0_MATRIX_BRIDGE:-vmbr0}" storage dev i=0 cmd st
+  local bridge="${HAL0_MATRIX_BRIDGE:-vmbr0}" storage dev i=0 cmd st _PVE_DEADLINE
+  _PVE_DEADLINE="$(_pve_t CREATE 600)"
   _pve_in_range "$vmid" || { _pve_err "refusing: VMID '${vmid}' is outside the harness range"; return "$_CT_REFUSED"; }
   [[ "$volid" =~ ^[A-Za-z0-9._+-]+:[A-Za-z0-9._+/-]+$ ]] || { _pve_err "bad template volume id"; return "$_CT_REFUSED"; }
   [[ "$unpriv" =~ ^[01]$ ]] || { _pve_err "unprivileged must be 0 or 1"; return "$_CT_REFUSED"; }
@@ -310,7 +338,8 @@ ct_create() {
 # privileged guest the unconfined AppArmor profile. Each line is appended only
 # if absent.
 ct_apply_device_rules() {
-  local vmid="${1:-}" unpriv="${2:-}" maj line cmd="" conf seen=" "
+  local vmid="${1:-}" unpriv="${2:-}" maj line cmd="" conf seen=" " _PVE_DEADLINE
+  _PVE_DEADLINE="$(_pve_t EXEC 120)"
   shift 2 2>/dev/null || { _pve_err "ct_apply_device_rules: too few arguments"; return 1; }
   _ct_require_owned "$vmid" || return 1
   [[ "$unpriv" =~ ^[01]$ ]] || { _pve_err "unprivileged must be 0 or 1"; return 1; }
@@ -336,13 +365,17 @@ ct_apply_device_rules() {
 
 # ct_start <vmid>
 ct_start() {
+  local _PVE_DEADLINE
+  _PVE_DEADLINE="$(_pve_t START 120)"
   _ct_require_owned "${1:-}" || return 1
   pve_run "pct start $1"
 }
 
-# ct_exec <vmid> <command string>: root, no terminal.
+# ct_exec <vmid> <command string>: root, no terminal. 120 s unless the caller
+# sets CT_EXEC_TIMEOUT for this call (the install does).
 ct_exec() {
-  local vmid="${1:-}"
+  local vmid="${1:-}" _PVE_DEADLINE
+  _PVE_DEADLINE="$(_pve_t EXEC 120 "${CT_EXEC_TIMEOUT:-}")"
   _ct_require_owned "$vmid" || return 1
   [[ $# -ge 2 ]] || { _pve_err "ct_exec: no command given"; return 1; }
   pve_run "pct exec ${vmid} -- bash -c $(_pve_q "$2")"
@@ -371,7 +404,8 @@ ct_wait_network() {
 
 # ct_push <vmid> <local> <remote>: stream a local file into the guest.
 ct_push() {
-  local vmid="${1:-}" src="${2:-}" dst="${3:-}"
+  local vmid="${1:-}" src="${2:-}" dst="${3:-}" _PVE_DEADLINE
+  _PVE_DEADLINE="$(_pve_t PULL 300)"
   _ct_require_owned "$vmid" || return 1
   [[ -f "$src" ]] || { _pve_err "no such local file: ${src}"; return 1; }
   [[ -n "$dst" ]] || { _pve_err "ct_push: no remote path"; return 1; }
@@ -380,7 +414,8 @@ ct_push() {
 
 # ct_pull <vmid> <remote> <local>: stream a guest file out.
 ct_pull() {
-  local vmid="${1:-}" src="${2:-}" dst="${3:-}" tmp rc
+  local vmid="${1:-}" src="${2:-}" dst="${3:-}" tmp rc _PVE_DEADLINE
+  _PVE_DEADLINE="$(_pve_t PULL 300)"
   _ct_require_owned "$vmid" || return 1
   [[ -n "$src" && -n "$dst" ]] || { _pve_err "ct_pull: need a remote and a local path"; return 1; }
   tmp="$(mktemp "${dst}.XXXXXX")" || { _pve_err "cannot create a temporary file beside ${dst}"; return 1; }
@@ -402,7 +437,8 @@ ct_pull() {
 # the host; an ssh failure is "unknown" and never counts as gone. The [l] in
 # the pkill pattern keeps the remote shell's own command line from matching it.
 ct_destroy() {
-  local vmid="${1:-}" nonce="${2:-}" attempt out="" state=""
+  local vmid="${1:-}" nonce="${2:-}" attempt out="" state="" _PVE_DEADLINE
+  _PVE_DEADLINE="$(_pve_t DESTROY 300)"
   for attempt in 1 2; do
     _ct_require_owned "$vmid" "$nonce" || return 1
     out="$(pve_run "pkill -9 -f '[l]xc-start -F -n ${vmid}( |\$)' 2>/dev/null; sleep 2; rm -f /run/lock/lxc/pve-config-${vmid}.lock; pct destroy ${vmid} --force --purge" 2>&1)" || true
