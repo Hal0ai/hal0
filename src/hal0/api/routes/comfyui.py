@@ -1268,6 +1268,25 @@ async def _after_install(model: ImageModel, *, orchestrator: Any, tree_lock: asy
         await asyncio.to_thread(_rewire_open_webui, model.id)
 
 
+async def _ensure_img_slot(app: FastAPI) -> None:
+    """Create the ``img`` slot from its seed when the box has none (best-effort).
+
+    A fresh install ships no ``img`` slot; the first image-model install switches the
+    images job on. An existing slot, id-keyed or not, is left untouched. A failure is
+    logged and never fails the install: the weights still download, and the capability
+    apply that follows retries the creation.
+    """
+    manager = getattr(app.state, "slot_manager", None)
+    if manager is None:
+        return
+    try:
+        from hal0.capabilities.orchestrator import ensure_seed_slot_registered
+
+        await ensure_seed_slot_registered(manager, _IMG_SLOT)
+    except Exception:
+        log.warning("comfyui.img_slot_create_failed", exc_info=True)
+
+
 async def start_image_install(app: FastAPI, model_id: str) -> PullJob:
     """Start downloading what the model is missing and return the new install job.
 
@@ -1295,6 +1314,9 @@ async def start_image_install(app: FastAPI, model_id: str) -> PullJob:
                 comfyui_install.require_one_filesystem()
                 comfyui_install.require_writable_destinations(model)
                 comfyui_install.preflight_disk(model)
+        await _ensure_img_slot(
+            app
+        )  # installing an image model is how the images job is switched on
         comfyui_install.clear_removed(model.id)  # asking for it is the operator changing their mind
         job = make_job(model_id)
         jobs[model_id] = job
