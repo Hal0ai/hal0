@@ -8,9 +8,9 @@
       "unprivileged": 1,
       "hardware": "cpu",
       "entry": "oneliner-unattended",
-      "cores": 8,
-      "memory_mb": 16384,
-      "disk_gb": 60,
+      "cores": 4,
+      "memory_mb": 8192,
+      "disk_gb": 40,
       "runnable": "yes"
     },
     {
@@ -20,9 +20,9 @@
       "unprivileged": 1,
       "hardware": "cpu",
       "entry": "terminal",
-      "cores": 8,
-      "memory_mb": 16384,
-      "disk_gb": 60,
+      "cores": 4,
+      "memory_mb": 8192,
+      "disk_gb": 40,
       "runnable": "yes"
     },
     {
@@ -68,9 +68,9 @@
       "unprivileged": 1,
       "hardware": "cpu",
       "entry": "oneliner",
-      "cores": 8,
-      "memory_mb": 16384,
-      "disk_gb": 60,
+      "cores": 4,
+      "memory_mb": 8192,
+      "disk_gb": 40,
       "runnable": "yes"
     },
     {
@@ -80,9 +80,9 @@
       "unprivileged": 1,
       "hardware": "cpu",
       "entry": "oneliner",
-      "cores": 8,
-      "memory_mb": 16384,
-      "disk_gb": 60,
+      "cores": 4,
+      "memory_mb": 8192,
+      "disk_gb": 40,
       "runnable": "yes"
     },
     {
@@ -92,9 +92,9 @@
       "unprivileged": 1,
       "hardware": "cpu",
       "entry": "oneliner",
-      "cores": 8,
-      "memory_mb": 16384,
-      "disk_gb": 60,
+      "cores": 4,
+      "memory_mb": 8192,
+      "disk_gb": 40,
       "runnable": "yes"
     },
     {
@@ -104,9 +104,9 @@
       "unprivileged": 1,
       "hardware": "cpu",
       "entry": "box",
-      "cores": 8,
-      "memory_mb": 16384,
-      "disk_gb": 60,
+      "cores": 4,
+      "memory_mb": 8192,
+      "disk_gb": 40,
       "runnable": "yes"
     },
     {
@@ -116,9 +116,9 @@
       "unprivileged": 0,
       "hardware": "cpu",
       "entry": "vm",
-      "cores": 8,
-      "memory_mb": 16384,
-      "disk_gb": 60,
+      "cores": 4,
+      "memory_mb": 8192,
+      "disk_gb": 40,
       "runnable": "needs-image"
     },
     {

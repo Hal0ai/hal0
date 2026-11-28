@@ -177,7 +177,7 @@ def test_sourcing_sets_no_options_or_traps(fake):
 def test_headroom_refuses_below_floor(fake):
     fake.rule("free -g", _free(9))
     r = fake.run("pve_require_headroom 2>&1; echo rc=$?")
-    assert "host has 9 GB available, need 12" in r.stdout
+    assert "host has 9 GB available now, the floor is 12 GB" in r.stdout
     assert "rc=1" in r.stdout
 
 
@@ -187,32 +187,43 @@ def test_headroom_passes_at_floor(fake):
     assert "rc=0" in r.stdout
 
 
-def test_headroom_adds_half_the_containers_memory_to_the_floor(fake):
+def test_headroom_adds_the_containers_whole_memory_limit_to_the_floor(fake):
     fake.rule("free -g", _free(19))
-    r = fake.run("pve_require_headroom none 16384 2>&1; echo rc=$?")
-    assert "host has 19 GB available, need 20" in r.stdout and "rc=1" in r.stdout
-    # all three numbers are printed
-    assert "floor 12" in r.stdout and "8 GB" in r.stdout and "need 20" in r.stdout
+    r = fake.run("pve_require_headroom none 8192 2>&1; echo rc=$?")
+    assert "rc=1" in r.stdout
+    assert (
+        "host has 19 GB available now, the floor is 12 GB, "
+        "the container's limit is 8 GB, so 20 GB are needed"
+    ) in r.stdout
+    assert not any("pct create" in c for c in fake.calls())
 
 
-def test_headroom_passes_at_floor_plus_half(fake):
+def test_headroom_passes_at_floor_plus_limit(fake):
     fake.rule("free -g", _free(20))
-    r = fake.run("pve_require_headroom none 16384; echo rc=$?")
+    r = fake.run("pve_require_headroom none 8192; echo rc=$?")
     assert "rc=0" in r.stdout
 
 
-def test_headroom_rounds_the_half_up_to_a_whole_gb(fake):
+def test_headroom_rounds_the_limit_up_to_a_whole_gb(fake):
     fake.rule("free -g", _free(13))
-    r = fake.run("pve_require_headroom none 1100 2>&1; echo rc=$?")  # half is 0.54 GB -> 1
+    r = fake.run("pve_require_headroom none 1100 2>&1; echo rc=$?")  # 1.07 GB -> 2
+    assert "need" in r.stdout and "14 GB are needed" in r.stdout and "rc=1" in r.stdout
+    r = fake.run("pve_require_headroom none 1024 2>&1; echo rc=$?")  # exactly 1 GB
     assert "rc=0" in r.stdout
-    r = fake.run("pve_require_headroom none 3000 2>&1; echo rc=$?")  # 1.46 GB -> 2
-    assert "need 14" in r.stdout and "rc=1" in r.stdout
 
 
-def test_headroom_gpu_floor_plus_half_of_the_gpu_shape(fake):
+def test_headroom_gpu_floor_plus_the_gpu_shapes_memory(fake):
     _gpu_rules(fake, 37, (str(GIB), str(96 * GIB)))
     r = fake.run("pve_require_headroom gpu 32768 2>&1; echo rc=$?")
-    assert "need 38" in r.stdout and "rc=1" in r.stdout
+    assert "the floor is 22 GB" in r.stdout and "32 GB" in r.stdout
+    assert "54 GB are needed" in r.stdout and "rc=1" in r.stdout
+
+
+def test_headroom_need_prints_the_sum(fake):
+    r = fake.run("pve_headroom_need none 8192; pve_headroom_need gpu 32768")
+    assert r.stdout.split("\n")[:2] == ["20 12 8", "54 22 32"]
+    bad = fake.run("pve_headroom_need none '1; id' 2>&1; echo rc=$?")
+    assert "rc=1" in bad.stdout and "bad container memory" in bad.stdout
 
 
 def test_headroom_rejects_a_bad_memory_figure(fake):
@@ -260,7 +271,7 @@ def test_gpu_shape_uses_the_higher_floor(fake):
     for dev in ("gpu", "gpu+npu"):
         bad = fake.run(f"pve_require_headroom {dev} 2>&1; echo rc=$?")
         assert "rc=1" in bad.stdout
-        assert "host has 16 GB available, need 22" in bad.stdout
+        assert "the floor is 22 GB" in bad.stdout and "16 GB available now" in bad.stdout
     assert not any("pct create" in c for c in fake.calls())
 
 
@@ -270,7 +281,7 @@ def test_floors_come_from_the_environment(fake):
         "pve_require_headroom 2>&1; echo rc=$?",
         env={"HAL0_MATRIX_MIN_AVAILABLE_GB": "20"},
     )
-    assert "need 20" in r.stdout and "rc=1" in r.stdout
+    assert "the floor is 20 GB" in r.stdout and "rc=1" in r.stdout
     r = fake.run(
         "pve_require_headroom gpu 2>&1; echo rc=$?",
         env={"HAL0_MATRIX_MIN_AVAILABLE_GB_GPU": "15"},
@@ -882,7 +893,7 @@ def test_create_mirrors_proxmox_script_features(fake):
     assert FEATURES in call
     assert "--tags hal0-matrix" in call
     assert "--hostname hal0-mx-172" in call
-    assert "--swap 1024" in call and "--onboot 0" in call
+    assert "--swap 0" in call and "--cores 4 --memory 8192" in call and "--onboot 0" in call
     assert "--net0 name=eth0,bridge=vmbr0,ip=dhcp" in call
     assert "--rootfs local:40" in call
     assert "--unprivileged 0" in call

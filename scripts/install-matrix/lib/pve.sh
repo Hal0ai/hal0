@@ -185,17 +185,14 @@ pve_mem_available_gb() {
   printf '%s\n' "$n"
 }
 
-# pve_require_headroom [devices] [container_memory_mb]
+# pve_headroom_need [devices] [container_memory_mb]: print, as a whole number
+# of GB, what the host must show as available before a container is created:
+# the floor plus the container's whole memory limit rounded up to a whole GB.
 # devices is the shape's hardware value: gpu and gpu+npu use the GPU floor,
-# anything else (none, cpu, absent) the CPU-only one. The host must show at
-# least the floor plus half the container's memory limit (rounded up to a
-# whole GB) as available; all three numbers are printed. The host's reply is
-# untrusted text: only lines that are exactly `Mem: ...` or `gpu <digits>
-# <digits>` are used, every number is digits-checked before arithmetic, and
-# nothing read is ever evaluated or put into a later command.
-pve_require_headroom() {
-  local devices="${1:-none}" mem_mb="${2:-0}" floor floor_name out tag a b c f
-  local have="" gpu_used=0 gpu_total=0 gpu_seen=0 gpu_text half=0 limit_gb=0 need
+# anything else (none, cpu, absent) the CPU-only one. Both arguments are
+# digits-checked; the floor is HAL0_MATRIX_MIN_AVAILABLE_GB[_GPU].
+pve_headroom_need() {
+  local devices="${1:-none}" mem_mb="${2:-0}" floor floor_name
   case "$devices" in
     gpu | gpu+npu)
       floor_name="HAL0_MATRIX_MIN_AVAILABLE_GB_GPU"
@@ -206,9 +203,20 @@ pve_require_headroom() {
   esac
   _pve_uint_ok "$floor" || { _pve_err "bad headroom floor: ${floor_name}"; return 1; }
   _pve_uint_ok "$mem_mb" || { _pve_err "bad container memory: ${mem_mb}"; return 1; }
-  half=$(((10#$mem_mb + 2047) / 2048))
-  limit_gb=$(((10#$mem_mb + 1023) / 1024))
-  need=$((10#$floor + half))
+  printf '%s %s %s\n' "$((10#$floor + (10#$mem_mb + 1023) / 1024))" "$floor" "$(((10#$mem_mb + 1023) / 1024))"
+}
+
+# pve_require_headroom [devices] [container_memory_mb]
+# The host must show at least the floor plus the container's whole memory limit
+# (rounded up to a whole GB) as available; all the numbers are printed. The
+# host's reply is untrusted text: only lines that are exactly `Mem: ...` or
+# `gpu <digits> <digits>` are used, every number is digits-checked before
+# arithmetic, and nothing read is ever evaluated or put into a later command.
+pve_require_headroom() {
+  local devices="${1:-none}" mem_mb="${2:-0}" floor out tag a b c f figures
+  local have="" gpu_used=0 gpu_total=0 gpu_seen=0 gpu_text limit_gb=0 need
+  figures="$(pve_headroom_need "$devices" "$mem_mb")" || return 1
+  read -r need floor limit_gb <<<"$figures"
   out="$(_pve_ssh 0 "$_PVE_HEADROOM_CMD")" || { _pve_err "cannot read host memory"; return 1; }
   while read -r tag a b c _ _ f; do
     if [[ "$tag" == "Mem:" ]]; then
@@ -226,9 +234,9 @@ pve_require_headroom() {
     gpu_text="gpu memory: not reported"
   fi
   _pve_err "host memory: ${have} GB available, ${gpu_text}"
-  _pve_err "host needs ${need} GB available: floor ${floor} GB + ${half} GB (half of the container's ${limit_gb} GB limit)"
+  _pve_err "host needs ${need} GB available: the floor of ${floor} GB plus the container's memory limit of ${limit_gb} GB"
   if ((10#$have < need)); then
-    _pve_err "host has ${have} GB available, need ${need}"
+    _pve_err "host has ${have} GB available now, the floor is ${floor} GB, the container's limit is ${limit_gb} GB, so ${need} GB are needed"
     return 1
   fi
 }
@@ -452,7 +460,7 @@ ct_create() {
   cmd+=" --hostname $(_pve_q "${_PVE_HOST_PREFIX}${vmid}")"
   cmd+=" --tags $(_pve_q "$_PVE_TAG")"
   [[ -z "$CT_NONCE" ]] || cmd+=" --description $(_pve_q "hal0-matrix run ${CT_NONCE}")"
-  cmd+=" --cores ${cores} --memory ${mem} --swap 1024"
+  cmd+=" --cores ${cores} --memory ${mem} --swap 0"
   cmd+=" --rootfs $(_pve_q "${storage}:${disk}")"
   cmd+=" --net0 $(_pve_q "name=eth0,bridge=${bridge},ip=dhcp")"
   cmd+=" --unprivileged ${unpriv}"

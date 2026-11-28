@@ -100,9 +100,17 @@ def test_invalid_file_exits_2(tmp_path):
 
 def test_cpu_shape_sizes():
     got = _get("u2604-cpu-unattended")
-    assert got["SHAPE_CORES"] == "8"
-    assert got["SHAPE_MEMORY_MB"] == "16384"
-    assert got["SHAPE_DISK_GB"] == "60"
+    assert got["SHAPE_CORES"] == "4"
+    assert got["SHAPE_MEMORY_MB"] == "8192"
+    assert got["SHAPE_DISK_GB"] == "40"
+
+
+def test_every_cpu_shape_is_sized_to_a_cpu_only_install():
+    data = json.loads(SHAPES_JSON.read_text(encoding="utf-8"))
+    cpu = [s for s in data["shapes"] if s["hardware"] == "cpu"]
+    assert cpu
+    for s in cpu:
+        assert (s["cores"], s["memory_mb"], s["disk_gb"]) == (4, 8192, 40), s["id"]
 
 
 def test_gpu_shape_sizes():

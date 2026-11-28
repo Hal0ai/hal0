@@ -558,6 +558,11 @@ on_signal() {
 }
 
 # ── step 2: host headroom and the VMID ───────────────────────────────────────
+if [[ "$DRY_RUN" == "1" ]]; then
+  NEED_FIGURES="$(pve_headroom_need "$SHAPE_HARDWARE" "$SHAPE_MEMORY_MB")" || die2 "refusing: bad headroom figures"
+  read -r NEED_GB _ <<<"$NEED_FIGURES"
+  plan "host must show ${NEED_GB} GB available to start: the floor plus the container's ${SHAPE_MEMORY_MB} MB memory limit, rounded up to whole GB"
+fi
 pve_require_headroom "$SHAPE_HARDWARE" "$SHAPE_MEMORY_MB" || die2 "refusing: the Proxmox host does not have enough free memory"
 picked="$(pve_pick_vmid)" || die2 "refusing: no usable VMID (see above)"
 if [[ -n "$VMID" ]]; then

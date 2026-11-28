@@ -289,19 +289,38 @@ def test_run_shape_passes_devices_to_the_guard(host):
     gpu_mem = f"{2 * 1024**3} {96 * 1024**3}"
     r = host.run("u2604-gpu", "--out", str(host.out), FAKE_MEM="16", FAKE_GPU_MEM=gpu_mem)
     assert r.returncode == 2
-    assert "16 GB available, need 38" in r.stderr  # floor 22 + half of 32 GB
+    assert "16 GB available now, the floor is 22 GB" in r.stderr
+    assert "limit is 32 GB, so 54 GB are needed" in r.stderr  # floor 22 + 32 GB
     assert "gpu memory: 2 GB used of 96 GB" in r.stderr
     assert not any("pct create" in c for c in host.calls())
     cpu = host.run("u2404-cpu", "--dry-run", "--out", str(host.out), FAKE_MEM="20")
     assert cpu.returncode == 0, cpu.stderr
 
 
-def test_the_start_guard_counts_half_the_containers_memory(host):
+def test_the_start_guard_counts_the_containers_whole_memory(host):
     r = host.run("u2404-cpu", "--out", str(host.out), FAKE_MEM="19")
     assert r.returncode == 2
-    assert "19 GB available, need 20" in r.stderr
-    assert "floor 12" in r.stderr and "8 GB" in r.stderr
+    assert (
+        "19 GB available now, the floor is 12 GB, the container's limit is 8 GB, "
+        "so 20 GB are needed"
+    ) in r.stderr
     assert not any("pct create" in c for c in host.calls())
+    assert not host.out.exists()
+
+
+def test_the_start_guard_lets_a_cpu_shape_start_at_the_sum(host):
+    r = host.dry("u2404-cpu", FAKE_MEM="20")
+    assert r.returncode == 0, r.stderr
+
+
+def test_dry_run_plan_shows_the_needed_sum(host):
+    r = host.dry("u2404-cpu")
+    assert r.returncode == 0, r.stderr
+    plan = "\n".join(plan_lines(r))
+    assert "host must show 20 GB available to start" in plan
+    assert "8192 MB" in plan
+    gpu = "\n".join(plan_lines(host.dry("u2604-gpu")))
+    assert "host must show 54 GB available to start" in gpu
 
 
 def _watch_env(**extra):
@@ -692,15 +711,15 @@ def test_a_dry_run_of_a_privileged_shape_still_prints_the_plan(host):
 
 
 def test_refuses_when_the_storage_is_too_small_for_the_disk(host):
-    # 60 GB disk + 10: 69 GB free is not enough, 70 is
-    r = host.run("u2404-cpu", "--out", str(host.out), FAKE_STORAGE_AVAIL=str(69 * 1048576))
+    # 40 GB disk + 10: 49 GB free is not enough, 50 is
+    r = host.run("u2404-cpu", "--out", str(host.out), FAKE_STORAGE_AVAIL=str(49 * 1048576))
     assert r.returncode == 2
-    assert "storage local: 69 GB free, need 70" in r.stderr
+    assert "storage local: 49 GB free, need 50" in r.stderr
     assert not any("pct create" in c for c in host.calls())
     assert not host.out.exists()
-    ok = host.run("u2404-cpu", "--out", str(host.out), FAKE_STORAGE_AVAIL=str(70 * 1048576))
+    ok = host.run("u2404-cpu", "--out", str(host.out), FAKE_STORAGE_AVAIL=str(50 * 1048576))
     assert ok.returncode == 0, ok.stderr
-    assert "storage local: 70 GB free" in ok.stderr
+    assert "storage local: 50 GB free" in ok.stderr
 
 
 @pytest.mark.parametrize(
