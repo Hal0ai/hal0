@@ -89,7 +89,9 @@ config schema version is unchanged.
   `--no-direct-io`. From 1.8.3 the dashboard refuses to save a profile that
   still carries one, with a 422 that names the replacement, and importing an
   exported profile or stack that carries one is refused as a whole. hal0 does
-  not rewrite stored profiles.
+  not rewrite stored profiles. The bundled tune skill used to suggest
+  `--no-mmap`; an updated box keeps that copy of the skill until the
+  installer is run again, so an agent may still propose it.
 - **A request for the NPU embed slot with the NPU embed role off now answers
   404.** `POST /v1/embeddings` with `model` set to `flm-embed`, `embed-npu`
   or the NPU embed model used to be answered by another embed slot, with
