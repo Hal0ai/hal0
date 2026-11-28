@@ -117,11 +117,13 @@ hal0_apply_answers() {
     done
     # shellcheck disable=SC2034 # read by install.sh, which sources this file
     HAL0_ANSWERS_APPLIED=1
+    _hal0_prepare_saved_answers "${path}"
     return 0
 }
 
 hal0_collect_answers() {
     HAL0_ANSWERS_APPLIED=0
+    HAL0_ANSWERS_SAVED=""
     HAL0_ANSWERS_EXPORTED=()
     export HAL0_FACTS_FILE="${HAL0_FACTS_FILE:-/run/hal0-install/facts.json}"
     local path="${HAL0_ANSWERS_FILE:-}"
@@ -133,26 +135,47 @@ hal0_collect_answers() {
 }
 
 # Keep a copy of the applied document at ${ETC_DIR}/install-answers.json so a
-# later run can start from the same choices. The reader writes the copy to
-# standard output without the huggingface section and without
-# apps.hermes.terminal_tool; `nofollow write` creates it root:root 0600
-# (random O_EXCL temp file, fchmod before rename), so it is never wider than
-# 0600. The install has already succeeded: nothing here may fail it.
+# later run can start from the same choices. The saved form is produced once,
+# at apply time (_hal0_prepare_saved_answers), so the file written at the end
+# is what was applied even if the document changed or went away meanwhile. The
+# reader emits it without the huggingface section, without
+# apps.hermes.terminal_tool and without unknown keys; `nofollow write` creates
+# it root:root 0600 (random O_EXCL temp file, fchmod before rename), so it is
+# never wider than 0600. The install has already succeeded: nothing here may
+# fail it.
+HAL0_ANSWERS_SAVED=""
+
+_hal0_answers_warn() {
+    if declare -F warn >/dev/null 2>&1; then warn "$*"; else echo "warning: $*" >&2; fi
+}
+
+# Produce the saved form of the document at PATH into HAL0_ANSWERS_SAVED.
+# In this reader mode stdout carries the JSON on success and stderr only an
+# error (no warnings: apply already printed them), so merging them is safe.
+# On failure: one warning, nothing saved at the end. Always returns 0.
+_hal0_prepare_saved_answers() {
+    local path="${1:-}" out rc=0
+    HAL0_ANSWERS_SAVED=""
+    out="$("${PY}" -I "${_HAL0_ANSWERS_READER}" --emit-saved "${path}" 2>&1)" || rc=$?
+    if [[ "${rc}" -ne 0 || -z "${out}" ]]; then
+        _hal0_answers_warn "could not prepare a copy of the answers document to keep: ${out%%$'\n'*}"
+        return 0
+    fi
+    HAL0_ANSWERS_SAVED="${out}"
+    return 0
+}
+
+# Write the copy prepared at apply time. Does not read the document again.
 hal0_save_answers() {
     [[ "${HAL0_ANSWERS_APPLIED:-0}" == "1" ]] || return 0
-    local path="${HAL0_ANSWERS_FILE:-}" saved rc=0
-    if [[ -z "${path}" || -z "${PY:-}" || -z "${ETC_DIR:-}" ]]; then
-        warn "could not keep the answers document (nothing to read it from)"
+    [[ -n "${HAL0_ANSWERS_SAVED:-}" ]] || return 0
+    if [[ -z "${ETC_DIR:-}" ]]; then
+        _hal0_answers_warn "could not keep the answers document (no configuration directory)"
         return 0
     fi
-    saved="$("${PY}" -I "${_HAL0_ANSWERS_READER}" --emit-saved "${path}")" || rc=$?
-    if [[ "${rc}" -ne 0 || -z "${saved}" ]]; then
-        warn "could not keep the answers document in ${ETC_DIR}/install-answers.json"
-        return 0
-    fi
-    if ! printf '%s\n' "${saved}" \
+    if ! printf '%s\n' "${HAL0_ANSWERS_SAVED}" \
         | nofollow write --owner root:root --mode 0600 --require-trusted-dir "${ETC_DIR}/install-answers.json"; then
-        warn "could not write ${ETC_DIR}/install-answers.json"
+        _hal0_answers_warn "could not write ${ETC_DIR}/install-answers.json; any earlier saved copy was left as it was"
     fi
     return 0
 }

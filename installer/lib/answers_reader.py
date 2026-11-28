@@ -696,28 +696,32 @@ def _parse_args(argv: list[str]) -> tuple[str, str, str] | None:
     return origin, path, manifest
 
 
-def _strip_saved(node: Any) -> Any:
-    """Copy of NODE without any `huggingface` key (any depth, any letter case)."""
-    if isinstance(node, dict):
-        return {
-            key: _strip_saved(value)
-            for key, value in node.items()
-            if key.strip().casefold() != "huggingface"
-        }
-    if isinstance(node, list):
-        return [_strip_saved(value) for value in node]
-    return node
-
-
 def _saved_document(doc: dict[str, Any]) -> dict[str, Any]:
-    """The document as it is kept after an install: no secret, no terminal grant."""
-    saved = _strip_saved(doc)
-    apps = saved.get("apps")
-    if isinstance(apps, dict):
-        for app_key, entry in apps.items():
-            if app_key.strip().casefold() == "hermes" and isinstance(entry, dict):
-                for key in [k for k in entry if k.strip().casefold() == "terminal_tool"]:
-                    del entry[key]
+    """The document as it is kept after an install: only keys the format knows.
+
+    Unknown keys are dropped at every level that has a key table (a pasted
+    secret would sit in one); `huggingface` and `apps.hermes.terminal_tool`
+    are known but never kept. `slots` is kept whole. Document key order holds.
+    """
+    tables: dict[str, frozenset[str]] = dict(_SECTION_KEYS)
+    tables["access"] = frozenset({"admin_key"})
+    saved: dict[str, Any] = {}
+    for key, value in doc.items():
+        if key not in _TOP_KEYS or key == "huggingface":
+            continue
+        if key == "apps" and isinstance(value, dict):
+            apps: dict[str, Any] = {}
+            for app, entry in value.items():
+                if app not in _APP_KEYS:
+                    continue
+                if isinstance(entry, dict):
+                    keep = _APP_KEYS[app] - {"terminal_tool"}
+                    entry = {k: v for k, v in entry.items() if k in keep}
+                apps[app] = entry
+            value = apps
+        elif key in tables and isinstance(value, dict):
+            value = {k: v for k, v in value.items() if k in tables[key]}
+        saved[key] = value
     return saved
 
 
@@ -745,8 +749,7 @@ def _emit_saved(argv: list[str]) -> int:
     if doc is not None:
         _walk_strings(doc, "", problems)
         _build(doc, "file", problems, manifest)
-    for warning in problems.warnings:
-        sys.stderr.write(f"warning: {warning}\n")
+    # Warnings are not repeated here: the apply run already printed them.
     if problems.errors or doc is None:
         for error in problems.errors:
             sys.stderr.write(f"error: {error}\n")

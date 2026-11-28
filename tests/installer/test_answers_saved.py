@@ -98,16 +98,40 @@ def test_saved_document_reloads_with_file_origin(tmp_path: Path) -> None:
 
 
 def test_failures_never_fail_the_install(tmp_path: Path) -> None:
-    bad = tmp_path / "bad.json"
-    bad.write_text("{not json", encoding="utf-8")
-    proc = _bash(f'HAL0_ANSWERS_APPLIED=1; HAL0_ANSWERS_FILE="{bad}"; hal0_save_answers; echo rc=$?', tmp_path)
-    assert "rc=0" in proc.stdout and "WARN" in proc.stderr
-    assert not (tmp_path / "nofollow.args").exists()
-
     doc = _doc(tmp_path, DOC)
     proc = _bash(
-        f'HAL0_ANSWERS_APPLIED=1; HAL0_ANSWERS_FILE="{doc}"; hal0_save_answers; echo rc=$?',
+        f'HAL0_ANSWERS_FILE="{doc}"; hal0_collect_answers; hal0_save_answers; echo rc=$?',
         tmp_path,
         nofollow_rc=1,
     )
-    assert "rc=0" in proc.stdout and "WARN" in proc.stderr
+    assert "rc=0" in proc.stdout
+    assert proc.stderr.count("WARN") == 1
+    assert "earlier saved copy was left as it was" in proc.stderr
+
+
+def test_saved_form_is_taken_at_apply_time(tmp_path: Path) -> None:
+    doc = _doc(tmp_path, DOC)
+    proc = _bash(
+        f'HAL0_ANSWERS_FILE="{doc}"; hal0_collect_answers; rm -f "{doc}"; hal0_save_answers; echo rc=$?',
+        tmp_path,
+    )
+    assert "rc=0" in proc.stdout and "WARN" not in proc.stderr, proc.stderr
+    assert json.loads((tmp_path / "nofollow.body").read_text(encoding="utf-8"))["version"] == 1
+
+
+def test_prepare_failure_warns_once_and_saves_nothing(tmp_path: Path) -> None:
+    doc = _doc(tmp_path, DOC)
+    proc = _bash(
+        f'_hal0_prepare_saved_answers "/nonexistent/x.json"; HAL0_ANSWERS_APPLIED=1; '
+        f'hal0_save_answers; echo rc=$?; echo "saved=[$HAL0_ANSWERS_SAVED]"; : "{doc}"',
+        tmp_path,
+    )
+    assert "rc=0" in proc.stdout and "saved=[]" in proc.stdout
+    assert proc.stderr.count("WARN") == 1 and "cannot read" in proc.stderr
+    assert not (tmp_path / "nofollow.args").exists()
+
+
+def test_warnings_are_printed_once(tmp_path: Path) -> None:
+    doc = _doc(tmp_path, DOC)
+    proc = _bash(f'HAL0_ANSWERS_FILE="{doc}"; hal0_collect_answers; hal0_save_answers', tmp_path)
+    assert proc.stderr.count("huggingface settings are not read") == 1, proc.stderr

@@ -587,3 +587,40 @@ def test_emit_saved_rejects_like_a_normal_run(tmp_path: Path) -> None:
     assert proc.returncode == 2 and proc.stdout == "" and "version" in proc.stderr
     proc = _emit("{not json", tmp_path)
     assert proc.returncode == 2 and proc.stdout == ""
+
+
+def test_emit_saved_drops_unknown_keys_at_every_level(tmp_path: Path) -> None:
+    doc = {
+        "version": 1,
+        "extra_thing": "hf_SECRETSECRET",
+        "memory": {"enabled": True, "note": "hf_SECRETSECRET"},
+        "apps": {"pi": {"enabled": True, "x": "hf_SECRETSECRET"}, "mystery": {"a": "hf_SECRETSECRET"}},
+        "access": {"admin_key": "create"},
+    }
+    proc = _emit(doc, tmp_path)
+    assert proc.returncode == 0, proc.stderr
+    assert "SECRETSECRET" not in proc.stdout
+    assert json.loads(proc.stdout) == {
+        "version": 1,
+        "memory": {"enabled": True},
+        "apps": {"pi": {"enabled": True}},
+        "access": {"admin_key": "create"},
+    }
+
+
+def test_emit_saved_known_keys_round_trip(tmp_path: Path) -> None:
+    doc = {
+        "version": 1,
+        "strict": False,
+        "model_store": {"path": "/mnt/m"},
+        "apps": {"hermes": {"enabled": True, "terminal_tool": True}, "comfyui": {"enabled": False}},
+        "network": {"port": 80, "bind_host": "0.0.0.0"},
+        "access": {"admin_key": "none"},
+        "slots": [{"name": "a", "anything": 1}],
+    }
+    proc = _emit(doc, tmp_path)
+    assert proc.returncode == 0, proc.stderr
+    expected = json.loads(json.dumps(doc))
+    expected["apps"]["hermes"] = {"enabled": True}
+    assert json.loads(proc.stdout) == expected
+    assert proc.stderr == ""
