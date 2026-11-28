@@ -1,10 +1,12 @@
 """A model store from an answers document: the rules about the disk live in the sink.
 
 The reader checks the path's text only. The "Filesystem layout" step then
-walks the path from / down: every existing ancestor must be a directory only
-root can change (a symlink is allowed when it sits in such a directory), an
-existing store must belong to root or hal0, and the missing folders are made
-root:root 0755 by one `nofollow dir --create --expect root` call. Any refusal
+walks the path from / down, looking at each component itself (lstat): no
+component may be a symbolic link, wherever it sits; outside the default store
+every existing ancestor must be a directory only root can change; an existing
+store must be root's with no group or other write bit, or the hal0 account's.
+Missing folders are made through `nofollow`: root:root 0755 outside the default
+store, hal0:hal0 2775 (as the default store itself) inside it. Any refusal
 stops the install with one line.
 
 The block and its helpers are sliced out of installer/install.sh by text
@@ -25,6 +27,9 @@ INSTALL_SH = Path(__file__).resolve().parents[2] / "installer" / "install.sh"
 TEXT = INSTALL_SH.read_text(encoding="utf-8")
 HAL0_UID = "990"
 NOFOLLOW_ROOT = "nofollow dir --create --owner root:root --mode 0755 --expect root"
+NOFOLLOW_HAL0 = "nofollow dir --create --owner hal0:hal0 --mode 2775 --expect adopt"
+NOFOLLOW_DEV = "nofollow dir --create --mode 0755 --expect adopt"
+EXISTING = "it already exists and is not a folder only root can change, nor one the hal0 account owns"
 
 
 def _slice(start: str, end: str) -> str:
@@ -33,7 +38,7 @@ def _slice(start: str, end: str) -> str:
 
 
 def _run(tmp_path: Path, models_dir: str, *, from_doc: int = 1, owners: dict[str, str] | None = None,
-         fail: int = 0, var_dir: str = "/v", hal0_exists: bool = True,
+         fail: int = 0, var_dir: str = "/v", hal0_exists: bool = True, dev_mode: int = 0,
          expect_rc: int = 0) -> tuple[list[str], str]:
     """Run the step. ``owners`` maps a path to the "UID MODE" its stubbed `stat -L` reports."""
     log = tmp_path / "calls.log"
@@ -42,7 +47,7 @@ def _run(tmp_path: Path, models_dir: str, *, from_doc: int = 1, owners: dict[str
     script = f"""
 set -euo pipefail
 LOG="{log}"
-PREFIX=/p ETC_DIR=/e VAR_DIR="{var_dir}" UNIT_DIR=/u
+PREFIX=/p ETC_DIR=/e VAR_DIR="{var_dir}" UNIT_DIR=/u DEV_MODE={dev_mode}
 MODELS_DIR="{models_dir}"
 MODELS_DIR_FROM_DOC={from_doc}
 declare -A OWN=({table})
@@ -59,10 +64,17 @@ id() {{
     else return 1; fi
 }}
 stat() {{
+    # lstat only: the type comes from the real entry, owner and mode from OWN
     echo "stat $*" >>"$LOG"
-    local p="${{@: -1}}"
-    [[ "$*" == "-L -c %u %a -- $p" ]] || return 9
-    echo "${{OWN[$p]-0 755}}"
+    local p="${{@: -1}}" v t
+    [[ "$*" == "-c %f %u -- $p" ]] || return 9
+    v="${{OWN[$p]-0 755}}"
+    [[ -n "$v" ]] || return 1
+    if [[ -L "$p" ]]; then t=8#120000
+    elif [[ -d "$p" ]]; then t=8#040000
+    elif [[ -e "$p" ]]; then t=8#100000
+    else return 1; fi
+    printf '%x %s\n' $(( t | 8#${{v#* }} )) "${{v%% *}}"
 }}
 {_slice('ui_step "Filesystem layout"', 'info "directories under')}
 echo DONE
@@ -82,15 +94,28 @@ def _mkdir_p(calls: list[str]) -> str:
     return line
 
 
-def _died(calls: list[str], out: str, store: str, why: str) -> None:
-    """One line naming the store and why, pointing at --models-dir; nothing made at all."""
+def _died(calls: list[str], out: str, store: str, why: str, *, after_mkdir: bool = False) -> None:
+    """One line naming the store and why, pointing at --models-dir; nothing made at all.
+
+    ``after_mkdir``: a store inside the default store is checked once the
+    default store's own folders exist, so the product's `mkdir -p` has run.
+    """
     assert out.count("DIE:") == 1 and "DONE" not in out and "WARN" not in out
     assert len(out.strip().splitlines()) == 1
     assert f"model store {store} from the answers document cannot be used" in out
     assert why in out, out
     assert "--models-dir=PATH" in out and "your own choice" in out
     assert _nofollow(calls) == [], calls
-    assert not any(c.startswith("mkdir") for c in calls), calls  # not even the other folders
+    made = [c for c in calls if c.startswith("mkdir")]
+    if after_mkdir:
+        assert len(made) == 1, calls  # the product's own folders, the default store with them
+    else:
+        assert made == [], calls  # not even the other folders
+
+
+def _link_died(calls: list[str], out: str, store: str, link: str, **kwargs: bool) -> None:
+    _died(calls, out, store, f"a link is on the path ({link} is a symbolic link)", **kwargs)
+    assert "reached through a link" in out and "--models-dir=PATH" in out
 
 
 # ── accepted ────────────────────────────────────────────────────────────────
@@ -116,9 +141,10 @@ def test_existing_components_are_not_re_moded(tmp_path: Path) -> None:
     assert _nofollow(calls) == [f"{NOFOLLOW_ROOT} {store}"]
 
 
-@pytest.mark.parametrize("owner", ["0 755", f"{HAL0_UID} 2775", "0 700", f"{HAL0_UID} 777"])
-def test_an_existing_store_owned_by_root_or_hal0_needs_no_creation(tmp_path: Path,
-                                                                   owner: str) -> None:
+@pytest.mark.parametrize("owner", ["0 755", "0 700", "0 1755", f"{HAL0_UID} 2775",
+                                   f"{HAL0_UID} 777"])
+def test_an_existing_store_owned_by_root_alone_or_by_hal0_needs_no_creation(tmp_path: Path,
+                                                                            owner: str) -> None:
     (tmp_path / "models").mkdir()
     store = f"{tmp_path}/models"
     calls, out = _run(tmp_path, store, owners={store: owner})
@@ -126,28 +152,80 @@ def test_an_existing_store_owned_by_root_or_hal0_needs_no_creation(tmp_path: Pat
     assert store not in _mkdir_p(calls)
 
 
-def test_a_symlink_component_in_a_root_only_directory_is_followed_as_roots_choice(
+def test_the_store_and_its_parents_are_looked_at_without_following_links(tmp_path: Path) -> None:
+    (tmp_path / "a").mkdir()
+    calls, _ = _run(tmp_path, f"{tmp_path}/a/m")
+    looked = [c for c in calls if c.startswith("stat")]
+    assert looked and all(c.startswith("stat -c %f %u -- ") for c in looked), looked
+
+
+def test_a_path_inside_the_default_store_is_made_through_nofollow_like_the_default_store(
         tmp_path: Path) -> None:
-    # like /home -> /var/home: root put the link there, and where it leads is checked too
-    (tmp_path / "var" / "home").mkdir(parents=True)
-    (tmp_path / "home").symlink_to(tmp_path / "var" / "home")
-    store = f"{tmp_path}/home/me/models"
-    calls, out = _run(tmp_path, store)
-    assert "DONE" in out, out
-    assert _nofollow(calls) == [f"{NOFOLLOW_ROOT} {tmp_path}/home/me {store}"]
-    assert f"stat -L -c %u %a -- {tmp_path}/home" in calls
+    # the default store is hal0:hal0 2775 (the adopt loop below); folders a document
+    # adds inside it get the same, through `nofollow`, never `mkdir -p` by name
+    var_dir = f"{tmp_path}/var"
+    (tmp_path / "var" / "models").mkdir(parents=True)  # the step's own `mkdir -p` made it
+    store = f"{var_dir}/models/deeper/x"
+    calls, out = _run(tmp_path, store, var_dir=var_dir,
+                      owners={str(tmp_path): "4242 777",  # its parents' owners do not matter
+                              f"{var_dir}/models": f"{HAL0_UID} 2775"})
+    assert "DIE" not in out and "DONE" in out, out
+    assert _nofollow(calls) == [f"{NOFOLLOW_HAL0} {var_dir}/models/deeper {store}"]
+    mkdir_p = _mkdir_p(calls).split()
+    assert f"{var_dir}/models" in mkdir_p and store not in mkdir_p
+    assert calls.index(_mkdir_p(calls)) < calls.index(_nofollow(calls)[0])
 
 
-def test_a_path_inside_the_default_store_is_made_like_the_default_stores_folders(
+def test_the_default_store_itself_from_a_document_needs_no_creation(tmp_path: Path) -> None:
+    var_dir = f"{tmp_path}/var"
+    (tmp_path / "var" / "models").mkdir(parents=True)
+    calls, out = _run(tmp_path, f"{var_dir}/models", var_dir=var_dir,
+                      owners={f"{var_dir}/models": f"{HAL0_UID} 2775"})
+    assert "DONE" in out and _nofollow(calls) == []
+    assert f"{var_dir}/models" in _mkdir_p(calls).split()
+
+
+def test_inside_the_default_store_without_a_hal0_account_folders_are_made_plain(
         tmp_path: Path) -> None:
     var_dir = f"{tmp_path}/var"
-    for store in (f"{var_dir}/models", f"{var_dir}/models/deeper/x"):
-        calls, out = _run(tmp_path, store, var_dir=var_dir,
-                          owners={str(tmp_path): "4242 777"})  # its parents do not matter
-        assert "DIE" not in out and "DONE" in out
-        assert store in _mkdir_p(calls) and _nofollow(calls) == []
-        assert not any(c.startswith("stat") for c in calls)
+    (tmp_path / "var" / "models").mkdir(parents=True)
+    store = f"{var_dir}/models/x"
+    for kwargs in ({"hal0_exists": False}, {"dev_mode": 1}):
+        calls, out = _run(tmp_path, store, var_dir=var_dir, **kwargs)
+        assert "DONE" in out, out
+        assert _nofollow(calls) == [f"{NOFOLLOW_DEV} {store}"]
         (tmp_path / "calls.log").unlink()
+
+
+def test_a_link_inside_the_default_store_stops_the_install(tmp_path: Path) -> None:
+    # the hal0 account owns the default store: a link it planted there is refused
+    var_dir = f"{tmp_path}/var"
+    (tmp_path / "var" / "models").mkdir(parents=True)
+    (tmp_path / "elsewhere").mkdir()
+    (tmp_path / "var" / "models" / "deeper").symlink_to(tmp_path / "elsewhere")
+    store = f"{var_dir}/models/deeper/x"
+    calls, out = _run(tmp_path, store, var_dir=var_dir, expect_rc=1)
+    _link_died(calls, out, store, f"{var_dir}/models/deeper", after_mkdir=True)
+
+
+def test_a_default_store_that_is_a_link_stops_a_documents_store_inside_it(tmp_path: Path) -> None:
+    var_dir = f"{tmp_path}/var"
+    (tmp_path / "var").mkdir()
+    (tmp_path / "big").mkdir()
+    (tmp_path / "var" / "models").symlink_to(tmp_path / "big")
+    for store in (f"{var_dir}/models", f"{var_dir}/models/x"):
+        calls, out = _run(tmp_path, store, var_dir=var_dir, expect_rc=1)
+        _link_died(calls, out, store, f"{var_dir}/models", after_mkdir=True)
+        (tmp_path / "calls.log").unlink()
+
+
+def test_an_existing_store_inside_the_default_store_gets_the_existing_folder_rule(
+        tmp_path: Path) -> None:
+    var_dir = f"{tmp_path}/var"
+    (tmp_path / "var" / "models" / "x").mkdir(parents=True)
+    store = f"{var_dir}/models/x"
+    calls, out = _run(tmp_path, store, var_dir=var_dir, owners={store: "0 1777"}, expect_rc=1)
+    _died(calls, out, store, EXISTING, after_mkdir=True)
 
 
 def test_a_look_alike_of_the_default_store_gets_the_full_rule(tmp_path: Path) -> None:
@@ -202,7 +280,18 @@ def test_an_existing_store_owned_by_another_account_stops_the_install(tmp_path: 
     (tmp_path / "models").mkdir()
     store = f"{tmp_path}/models"
     calls, out = _run(tmp_path, store, owners={store: owner}, expect_rc=1)
-    _died(calls, out, store, "belongs to an account other than root or hal0")
+    _died(calls, out, store, EXISTING)
+
+
+@pytest.mark.parametrize("mode", ["1777", "2775", "775", "757", "777", "3777"])
+def test_an_existing_root_store_a_group_or_others_can_write_stops_the_install(
+        tmp_path: Path, mode: str) -> None:
+    # /var/tmp, /var/crash (1777), /var/mail, /var/local (2775): root's later
+    # downloads write by name below the store, where anyone could plant a link
+    (tmp_path / "shared").mkdir()
+    store = f"{tmp_path}/shared"
+    calls, out = _run(tmp_path, store, owners={store: f"0 {mode}"}, expect_rc=1)
+    _died(calls, out, store, EXISTING)
 
 
 def test_without_a_hal0_account_only_root_may_own_an_existing_store(tmp_path: Path) -> None:
@@ -210,7 +299,7 @@ def test_without_a_hal0_account_only_root_may_own_an_existing_store(tmp_path: Pa
     store = f"{tmp_path}/models"
     calls, out = _run(tmp_path, store, owners={store: f"{HAL0_UID} 755"}, hal0_exists=False,
                       expect_rc=1)
-    _died(calls, out, store, "belongs to an account other than root or hal0")
+    _died(calls, out, store, EXISTING)
 
 
 def test_a_symlink_component_in_a_directory_someone_else_owns_stops_the_install(
@@ -224,19 +313,59 @@ def test_a_symlink_component_in_a_directory_someone_else_owns_stops_the_install(
 
 
 def test_a_symlink_leading_to_a_folder_someone_else_owns_stops_the_install(tmp_path: Path) -> None:
-    # the link sits in a root-only folder, but where it leads is checked like any ancestor
     (tmp_path / "alice").mkdir()
     (tmp_path / "data").symlink_to(tmp_path / "alice")
     store = f"{tmp_path}/data/models"
-    calls, out = _run(tmp_path, store, owners={f"{tmp_path}/data": "1000 755"}, expect_rc=1)
-    _died(calls, out, store, f"{tmp_path}/data is not owned by root")
+    calls, out = _run(tmp_path, store, owners={f"{tmp_path}/alice": "1000 755"}, expect_rc=1)
+    _link_died(calls, out, store, f"{tmp_path}/data")
+
+
+def test_a_link_in_a_root_only_folder_to_a_root_only_folder_still_stops_the_install(
+        tmp_path: Path) -> None:
+    # like /home -> /var/home: every link is refused, wherever it sits and leads
+    (tmp_path / "var" / "home").mkdir(parents=True)
+    (tmp_path / "home").symlink_to(tmp_path / "var" / "home")
+    store = f"{tmp_path}/home/me/models"
+    calls, out = _run(tmp_path, store, expect_rc=1)
+    _link_died(calls, out, store, f"{tmp_path}/home")
+
+
+def test_a_store_that_is_itself_a_link_stops_the_install(tmp_path: Path) -> None:
+    (tmp_path / "real").mkdir()
+    (tmp_path / "models").symlink_to(tmp_path / "real")
+    store = f"{tmp_path}/models"
+    calls, out = _run(tmp_path, store, expect_rc=1)
+    _link_died(calls, out, store, store)
+
+
+def test_a_link_in_the_middle_stops_the_install(tmp_path: Path) -> None:
+    (tmp_path / "real" / "b").mkdir(parents=True)
+    (tmp_path / "a").symlink_to(tmp_path / "real")
+    store = f"{tmp_path}/a/b/models"
+    calls, out = _run(tmp_path, store, expect_rc=1)
+    _link_died(calls, out, store, f"{tmp_path}/a")
+
+
+def test_the_reviews_data_models_link_into_the_default_store_stops_the_install(
+        tmp_path: Path) -> None:
+    # root's convenience link /data/models -> /var/lib/hal0/models: the hal0
+    # account owns where it leads, so a document may not name it
+    var_dir = f"{tmp_path}/var/lib/hal0"
+    (tmp_path / "var" / "lib" / "hal0" / "models").mkdir(parents=True)
+    (tmp_path / "data").mkdir()
+    (tmp_path / "data" / "models").symlink_to(f"{var_dir}/models")
+    store = f"{tmp_path}/data/models"
+    calls, out = _run(tmp_path, store, var_dir=var_dir,
+                      owners={var_dir: f"{HAL0_UID} 2775", f"{var_dir}/models": f"{HAL0_UID} 2775"},
+                      expect_rc=1)
+    _link_died(calls, out, store, store)
 
 
 def test_a_dangling_link_stops_the_install(tmp_path: Path) -> None:
     (tmp_path / "models").symlink_to(tmp_path / "nowhere")
     for store in (f"{tmp_path}/models", f"{tmp_path}/models/deeper"):
         calls, out = _run(tmp_path, store, expect_rc=1)
-        _died(calls, out, store, f"{tmp_path}/models is a link that leads nowhere")
+        _link_died(calls, out, store, f"{tmp_path}/models")
         (tmp_path / "calls.log").unlink(missing_ok=True)
 
 
