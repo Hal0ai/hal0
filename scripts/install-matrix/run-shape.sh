@@ -171,7 +171,7 @@ if [[ "$DRY_RUN" == "1" ]]; then
     case "$cmd" in
       "free -g"*) printf 'Mem: 125 20 60 1 45 100\n' ;;
       "pveam list local") printf 'Volume Size\nlocal:vztmpl/%s_amd64.tar.zst 1\n' "$SHAPE_TEMPLATE" ;;
-      "pvesm status"*) printf 'Name Type Status\nlocal dir active\n' ;;
+      "pvesm status"*) printf 'Name Type Status Total Used Available %%\nlocal dir active 1000000000 1 500000000 1.0%%\n' ;;
       "pvesh get"*) printf '[]\n' ;;
       "if test -e"*) printf 'absent\n' ;;
       "bash -s -- gpu"*) printf 'dev /dev/dri/renderD128\nmajor 226\n' ;;
@@ -466,6 +466,7 @@ if [[ -n "$VMID" ]]; then
 else
   VMID="$picked"
 fi
+pve_storage "$SHAPE_DISK_GB" >/dev/null || die2 "refusing: the storage cannot hold the container's disk (see above)"
 log "shape ${SHAPE_ID} (row ${SHAPE_ROW}), container ${VMID}, source ${SOURCE}"
 
 if [[ "$DRY_RUN" == "1" ]]; then

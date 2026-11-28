@@ -47,7 +47,7 @@ case "$cmd" in
     printf 'Volume Size\nlocal:vztmpl/ubuntu-26.04-standard_26.04-1_amd64.tar.zst 1\nlocal:vztmpl/ubuntu-24.04-standard_24.04-1_amd64.tar.zst 1\n'
     exit 0 ;;
   "pvesm status"*)
-    printf 'Name Type Status\nlocal dir active\n'
+    printf 'Name Type Status Total Used Available %%\nlocal dir active 1000000000 1 %s 1.0%%\n' "${FAKE_STORAGE_AVAIL:-500000000}"
     exit 0 ;;
   "pvesh get"*)
     if [[ -e "$FAKE_STATE/range-guest" ]]; then
@@ -344,6 +344,18 @@ def test_a_dry_run_of_a_privileged_shape_still_prints_the_plan(host):
     assert "pct create 170" in plan and "--unprivileged 0" in plan
     assert "equal to root on the host" in r.stderr  # the warning is still shown
     assert host.calls() == []
+
+
+def test_refuses_when_the_storage_is_too_small_for_the_disk(host):
+    # 60 GB disk + 10: 69 GB free is not enough, 70 is
+    r = host.run("u2404-cpu", "--out", str(host.out), FAKE_STORAGE_AVAIL=str(69 * 1048576))
+    assert r.returncode == 2
+    assert "storage local: 69 GB free, need 70" in r.stderr
+    assert not any("pct create" in c for c in host.calls())
+    assert not host.out.exists()
+    ok = host.run("u2404-cpu", "--out", str(host.out), FAKE_STORAGE_AVAIL=str(70 * 1048576))
+    assert ok.returncode == 0, ok.stderr
+    assert "storage local: 70 GB free" in ok.stderr
 
 
 def test_refuses_a_vmid_outside_the_range(host):

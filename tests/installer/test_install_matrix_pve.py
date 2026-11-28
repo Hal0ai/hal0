@@ -456,7 +456,7 @@ STORAGE = (
 
 def test_storage_env_wins(fake):
     r = fake.run("pve_storage", env={"HAL0_MATRIX_STORAGE": "mystore"})
-    assert r.stdout.strip() == "mystore" and fake.calls() == []
+    assert r.stdout.strip() == "mystore" and fake.calls() == []  # no size to check
 
 
 def test_storage_first_active_rootdir(fake):
@@ -471,6 +471,57 @@ def test_storage_skips_inactive(fake):
         STORAGE.replace("local         dir     active", "local         dir   disabled"),
     )
     assert fake.run("pve_storage").stdout.strip() == "tank"
+
+
+def test_storage_checked_prints_name_and_free_space(fake):
+    fake.rule("pvesm status --content rootdir", STORAGE)
+    r = fake.run("pve_storage 60")
+    assert r.returncode == 0 and r.stdout.strip() == "local"
+    assert "storage local: 85 GB free, need 70" in r.stderr
+
+
+def test_storage_refuses_below_disk_plus_ten(fake):
+    fake.rule("pvesm status --content rootdir", STORAGE)
+    r = fake.run("pve_storage 76 2>&1; echo rc=$?")  # 85 free, 86 needed
+    assert "rc=1" in r.stdout and "need 86" in r.stdout
+    ok = fake.run("pve_storage 75; echo rc=$?")
+    assert ok.returncode == 0 and "rc=0" in ok.stdout
+
+
+def test_storage_from_env_is_checked_too(fake):
+    fake.rule("pvesm status --content rootdir", STORAGE)
+    ok = fake.run("pve_storage 60", env={"HAL0_MATRIX_STORAGE": "tank"})
+    assert ok.stdout.strip() == "tank" and "storage tank: 467 GB free" in ok.stderr
+    low = fake.run(
+        "pve_storage 500; echo rc=$?", env={"HAL0_MATRIX_STORAGE": "tank"}
+    )
+    assert "rc=1" in low.stdout and low.stdout.strip().splitlines()[0] != "tank"
+
+
+def test_storage_from_env_must_be_listed_and_active(fake):
+    fake.rule("pvesm status --content rootdir", STORAGE.replace("tank      zfspool     active", "tank      zfspool   disabled"))
+    for name in ("nowhere", "tank"):
+        r = fake.run("pve_storage 10; echo rc=$?", env={"HAL0_MATRIX_STORAGE": name})
+        assert "rc=1" in r.stdout
+
+
+@pytest.mark.parametrize("avail", ["-", "1;2", "x", ""])
+def test_storage_with_unreadable_free_space_is_refused(fake, avail):
+    fake.rule(
+        "pvesm status --content rootdir",
+        "Name Type Status Total Used Available %\n"
+        f"local dir active 100000000 1 {avail} 1.00%\n",
+    )
+    r = fake.run("pve_storage 10; echo rc=$?")
+    assert "rc=1" in r.stdout
+
+
+def test_create_checks_the_storage_space_too(fake):
+    fake.rule("pvesm status --content rootdir", STORAGE)
+    fake.rule("test -e /etc/pve/lxc/172.conf", "absent\n")
+    r = fake.run("ct_create 172 local:vztmpl/x.tar.zst 0 4 8192 80")  # 85 free, 90 needed
+    assert r.returncode == 90
+    assert [c for c in fake.calls() if "pct create" in c] == []
 
 
 def test_storage_rejects_hostile_env(fake):

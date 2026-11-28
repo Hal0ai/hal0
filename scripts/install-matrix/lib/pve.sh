@@ -195,17 +195,40 @@ pve_template_volid() {
   return 1
 }
 
-# pve_storage: HAL0_MATRIX_STORAGE, else the first active rootdir storage.
+# pve_storage [disk_gb]: HAL0_MATRIX_STORAGE, else the first active rootdir
+# storage. With disk_gb the chosen storage must be listed, active, and have at
+# least disk_gb + 10 GB available (`pvesm status` reports KiB); the storage and
+# its free space are printed. Without disk_gb only the name is returned.
 pve_storage() {
-  local name out
+  local want="${1:-}" name="" out avail status gb need
+  if [[ -n "$want" ]]; then
+    _pve_uint_ok "$want" || { _pve_err "bad disk size: ${want}"; return 1; }
+  fi
   if [[ -n "${HAL0_MATRIX_STORAGE:-}" ]]; then
     [[ "$HAL0_MATRIX_STORAGE" =~ ^[A-Za-z0-9._-]+$ ]] || { _pve_err "bad HAL0_MATRIX_STORAGE"; return 1; }
-    printf '%s\n' "$HAL0_MATRIX_STORAGE"
-    return 0
+    name="$HAL0_MATRIX_STORAGE"
+    if [[ -z "$want" ]]; then
+      printf '%s\n' "$name"
+      return 0
+    fi
   fi
   out="$(pve_run 'pvesm status --content rootdir')" || { _pve_err "cannot list storage"; return 1; }
-  name="$(awk 'NR > 1 && $3 == "active" {print $1; exit}' <<<"$out")"
-  [[ "$name" =~ ^[A-Za-z0-9._-]+$ ]] || { _pve_err "no active storage accepts container disks"; return 1; }
+  if [[ -z "$name" ]]; then
+    name="$(awk 'NR > 1 && $3 == "active" {print $1; exit}' <<<"$out")"
+    [[ "$name" =~ ^[A-Za-z0-9._-]+$ ]] || { _pve_err "no active storage accepts container disks"; return 1; }
+  fi
+  if [[ -z "$want" ]]; then
+    printf '%s\n' "$name"
+    return 0
+  fi
+  status="$(awk -v n="$name" 'NR > 1 && $1 == n {print $3; exit}' <<<"$out")"
+  [[ "$status" == "active" ]] || { _pve_err "storage ${name} is not listed as an active place for container disks"; return 1; }
+  avail="$(awk -v n="$name" 'NR > 1 && $1 == n {print $6; exit}' <<<"$out")"
+  [[ "$avail" =~ ^[0-9]{1,15}$ ]] || { _pve_err "cannot read the free space of storage ${name}"; return 1; }
+  gb=$((10#$avail / 1048576))
+  need=$((10#$want + 10))
+  _pve_err "storage ${name}: ${gb} GB free, need ${need} (disk ${want} GB + 10)"
+  ((gb >= need)) || { _pve_err "refusing: storage ${name} has too little free space"; return 1; }
   printf '%s\n' "$name"
 }
 
@@ -310,7 +333,7 @@ ct_create() {
     present) _pve_err "refusing: guest ${vmid} already exists"; return "$_CT_REFUSED" ;;
     *) _pve_err "refusing: cannot tell whether guest ${vmid} exists"; return "$_CT_REFUSED" ;;
   esac
-  storage="$(pve_storage)" || return "$_CT_REFUSED"
+  storage="$(pve_storage "$disk")" || return "$_CT_REFUSED"
   cmd="pct create $(_pve_q "$vmid") $(_pve_q "$volid")"
   cmd+=" --hostname $(_pve_q "${_PVE_HOST_PREFIX}${vmid}")"
   cmd+=" --tags $(_pve_q "$_PVE_TAG")"
