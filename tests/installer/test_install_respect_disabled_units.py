@@ -26,6 +26,8 @@ import shutil
 import subprocess
 from pathlib import Path
 
+import pytest
+
 REPO = Path(__file__).resolve().parents[2]
 TEXT = (REPO / "installer" / "install.sh").read_text(encoding="utf-8")
 
@@ -188,6 +190,10 @@ class Box:
     def run(
         self, body: str, *, venv: str | None = None, normalise_rc: int = 0
     ) -> subprocess.CompletedProcess[str]:
+        if body is HERMES_BLOCK and os.geteuid() == 0:
+            # facts.sh ignores HAL0_FACTS_AGENTS_DIR as root: the Hermes block
+            # would read, and on a lift remove, the real /etc/hal0/agents record.
+            pytest.skip("the record-path override is ignored as root: the real /etc/hal0 is used")
         venv = venv or (str(self.hal0_venv) if body is HERMES_BLOCK else "/usr/lib/hal0/venv")
         prelude = (
             'info() { echo "INFO: $*"; }\nwarn() { echo "WARN: $*"; }\n'
