@@ -19,8 +19,30 @@ _FAILURE_STATUSES = frozenset(
     {"build_failed", "snapshot_failed", "rolled_back", "activation_failed"}
 )
 _PENDING_STATUSES = frozenset(
-    {"pending", "stale", "build_failed", "snapshot_failed", "rolled_back", "activation_failed"}
+    {
+        "pending",
+        "stale",
+        "broken",
+        "build_failed",
+        "snapshot_failed",
+        "rolled_back",
+        "activation_failed",
+    }
 )
+
+#: ``systemctl is-enabled`` words that mean systemd starts the unit on its
+#: own. ``disabled``, ``masked``, ``static``, ``not-found`` and the rest mean
+#: the operator (or the installer's opt-out) left the component off.
+_ENABLED_STATES = frozenset({"enabled", "enabled-runtime"})
+
+_BROKEN_ERROR = "nothing is installed, but its service is enabled and cannot start"
+#: What reinstalls a component whose files are gone. The converge arms do not:
+#: each skips a component it finds absent (a fresh install is the installer's
+#: job), so the generic "run `hal0 update component <id>`" hint would be wrong.
+_REINSTALL_REMEDY = "re-run the installer (`sudo bash install.sh`) to reinstall it"
+_BROKEN_REMEDIES: dict[str, str] = {
+    "hermes": "run `sudo hal0 agent reprovision hermes --repair`",
+}
 
 log = structlog.get_logger(__name__)
 
@@ -88,6 +110,37 @@ def _hermes_override_state(override: str, installed: str | None) -> tuple[str, s
     return "pending", None
 
 
+def _unit_enabled(service_id: str | None) -> bool:
+    """Whether the component's systemd unit is enabled (#4065).
+
+    Asked only for a component whose install probe found nothing: an enabled
+    unit with nothing to start is a broken install, not an absent one. Any
+    failure to ask reads as "not enabled", so a box without systemd keeps
+    reporting ``not-installed``.
+    """
+    if service_id is None:
+        return False
+    import subprocess
+
+    from hal0.services.registry import service_by_id
+
+    sdef = service_by_id(service_id)
+    if sdef is None or not sdef.unit:
+        return False
+    try:
+        proc = subprocess.run(  # nosec B603 B607 - fixed argv, read-only
+            ["systemctl", "is-enabled", sdef.unit],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    words = (proc.stdout or "").split()
+    return bool(words) and words[0] in _ENABLED_STATES
+
+
 def component_status_snapshot() -> dict[str, Any]:
     recorded = load_component_state()
     rows: list[dict[str, Any]] = []
@@ -106,8 +159,15 @@ def component_status_snapshot() -> dict[str, Any]:
 
         override = _override(comp.id)
         derived_note: str | None = None
+        broken_remedy: str | None = None
         if last.get("status") in _FAILURE_STATUSES:
             derived = last["status"]
+        elif installed is None and _unit_enabled(comp.service_id):
+            # The unit is enabled and has nothing to start (a deleted venv):
+            # pending, with the repair. Not `hal0 update component <id>`: the
+            # converge arms skip a component that is not installed.
+            derived = "broken"
+            broken_remedy = _BROKEN_REMEDIES.get(comp.id, _REINSTALL_REMEDY)
         elif installed is None:
             derived = "not-installed"
         elif comp.id == "memory-decision" and installed == "unmanaged":
@@ -151,8 +211,8 @@ def component_status_snapshot() -> dict[str, Any]:
                 # until --clear-override (null when none is set).
                 "override": override,
                 "status": derived,
-                "error": last.get("error"),
-                "remedy": last.get("remedy"),
+                "error": _BROKEN_ERROR if broken_remedy else last.get("error"),
+                "remedy": broken_remedy or last.get("remedy"),
                 # An informational line from the last converge that is not a
                 # failure (e.g. Hermes config keys applied on a converged box).
                 "note": last.get("note") or derived_note,

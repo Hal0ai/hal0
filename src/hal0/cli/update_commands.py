@@ -1173,6 +1173,7 @@ def update(
 _COMPONENT_PENDING = (
     "pending",
     "stale",
+    "broken",
     "ahead",
     "build_failed",
     "snapshot_failed",
@@ -1238,7 +1239,10 @@ def _print_component_table(rows: list[dict]) -> bool:
     all_ok = True
     for row in rows:
         status_txt = row.get("status", "?")
-        if status_txt in _COMPONENT_PENDING:
+        if status_txt == "broken":
+            all_ok = False
+            status_txt = "[red]broken[/red]"
+        elif status_txt in _COMPONENT_PENDING:
             all_ok = False
             status_txt = f"[yellow]{status_txt}[/yellow]"
         elif status_txt == "converged":
@@ -1280,7 +1284,10 @@ def _print_component_table(rows: list[dict]) -> bool:
             console.print(
                 f"[yellow]![/yellow] {row['id']}: {row.get('error') or ''} [dim]{shown}[/dim]"
             )
-        if command not in shown:
+        # A broken row (#4065) is the exception: its files are gone, the
+        # converge verb skips an absent component, and the row's remedy
+        # already names what reinstalls it.
+        if command not in shown and row.get("status") != "broken":
             console.print(f"[yellow]![/yellow] {row['id']}: not converged — run `{command}`")
     return all_ok
 

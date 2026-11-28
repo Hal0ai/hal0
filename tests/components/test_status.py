@@ -188,3 +188,112 @@ def test_hermes_unvetted_override_is_pending_and_names_clear_override() -> None:
         row = _hermes_row(installed=_HPREV[:12], override=_HPREV)
     assert row["status"] == "pending"
     assert "--clear-override" in row["note"]
+
+
+# ── broken: nothing installed while the unit is enabled (#4065) ───────────────
+
+
+def _is_enabled_says(word: str, calls: list[list[str]] | None = None):
+    import subprocess
+
+    def fake_run(argv, **kwargs):
+        if calls is not None:
+            calls.append(list(argv))
+        rc = 0 if word.startswith("enabled") else 1
+        return subprocess.CompletedProcess(argv, rc, stdout=f"{word}\n", stderr="")
+
+    return fake_run
+
+
+def _row(component_id: str) -> tuple[dict, int]:
+    snap = status.component_status_snapshot()
+    return next(r for r in snap["components"] if r["id"] == component_id), snap["pending"]
+
+
+def test_missing_install_with_an_enabled_unit_is_broken_and_pending() -> None:
+    calls: list[list[str]] = []
+    with (
+        patch("hal0.components.registry._hindsight_installed", return_value=None),
+        patch("subprocess.run", _is_enabled_says("enabled", calls)),
+    ):
+        row, pending = _row("hindsight")
+    assert row["status"] == "broken"
+    assert pending >= 1
+    assert ["systemctl", "is-enabled", "hindsight-api.service"] in calls
+    assert "cannot start" in row["error"]
+    # The converge verb skips an absent engine, so the remedy must not name it.
+    assert "install.sh" in row["remedy"]
+    assert "hal0 update component" not in row["remedy"]
+
+
+def test_broken_hermes_names_the_reprovision_command() -> None:
+    with (
+        patch("hal0.components.registry._hermes_installed", return_value=None),
+        patch("subprocess.run", _is_enabled_says("enabled-runtime")),
+    ):
+        row, _ = _row("hermes")
+    assert row["status"] == "broken"
+    assert "hal0 agent reprovision hermes --repair" in row["remedy"]
+
+
+@pytest.mark.parametrize("word", ["disabled", "masked", "static", "not-found", "", "linked"])
+def test_a_unit_left_off_keeps_not_installed(word: str) -> None:
+    """Only "nothing installed and the unit enabled" is broken: a component
+    the operator skipped, disabled or masked is simply not installed."""
+    with (
+        patch("hal0.components.registry._hindsight_installed", return_value=None),
+        patch("hal0.components.registry._hermes_installed", return_value=None),
+        patch("subprocess.run", _is_enabled_says(word)),
+    ):
+        snap = status.component_status_snapshot()
+    rows = {r["id"]: r for r in snap["components"]}
+    assert rows["hindsight"]["status"] == "not-installed"
+    assert rows["hermes"]["status"] == "not-installed"
+    assert rows["hindsight"]["error"] is None
+
+
+def test_no_systemctl_reads_as_not_enabled() -> None:
+    def boom(argv, **kwargs):
+        raise FileNotFoundError("systemctl")
+
+    with (
+        patch("hal0.components.registry._hindsight_installed", return_value=None),
+        patch("subprocess.run", boom),
+    ):
+        row, _ = _row("hindsight")
+    assert row["status"] == "not-installed"
+
+
+def test_an_installed_component_never_asks_systemd() -> None:
+    calls: list[list[str]] = []
+    with (
+        patch("hal0.components.registry._hindsight_installed", return_value="0.9.2"),
+        patch("hal0.components.registry._hindsight_pinned", return_value="0.9.2"),
+        patch("hal0.components.registry._hermes_installed", return_value="abc"),
+        patch("hal0.components.registry._openwebui_installed", return_value="sha256:aa"),
+        patch("subprocess.run", _is_enabled_says("enabled", calls)),
+    ):
+        status.component_status_snapshot()
+    assert not [c for c in calls if c[:2] == ["systemctl", "is-enabled"]]
+
+
+def test_a_component_without_a_service_is_never_broken() -> None:
+    """Pi has no unit of its own; absent stays ``not-installed``."""
+    with (
+        patch("hal0.components.pi_arm.installed_pi", return_value=None, create=True),
+        patch("hal0.components.registry._pi_installed", return_value=None),
+        patch("subprocess.run", _is_enabled_says("enabled")),
+    ):
+        row, _ = _row("pi")
+    assert row["status"] == "not-installed"
+
+
+def test_a_recorded_failure_still_wins_over_broken() -> None:
+    state.record_component_result("hindsight", {"status": "rolled_back", "error": "postcheck"})
+    with (
+        patch("hal0.components.registry._hindsight_installed", return_value=None),
+        patch("subprocess.run", _is_enabled_says("enabled")),
+    ):
+        row, _ = _row("hindsight")
+    assert row["status"] == "rolled_back"
+    assert row["error"] == "postcheck"

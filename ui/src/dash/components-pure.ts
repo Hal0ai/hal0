@@ -34,7 +34,7 @@ export const RETRYABLE_STATUSES = [
   'activation_failed',
 ] as const
 
-const PENDING = new Set(['pending', 'stale', ...RETRYABLE_STATUSES])
+const PENDING = new Set(['pending', 'stale', 'broken', ...RETRYABLE_STATUSES])
 
 const short = (v: string | null | undefined, label?: string | null) =>
   label || (v && v.startsWith('sha256:') ? v.slice(7, 19) : v) || '—'
@@ -47,6 +47,8 @@ export function componentCell(row: ComponentRow): { label: string; tone: 'ok' | 
   if ((RETRYABLE_STATUSES as readonly string[]).includes(row.status))
     return { label: `${short(row.installed)} — ${row.status}`, tone: 'failed' }
   if (row.status === 'not-installed') return { label: 'not installed', tone: 'muted' }
+  // Nothing installed while its service is enabled (#4065): it cannot start.
+  if (row.status === 'broken') return { label: 'install missing', tone: 'failed' }
   if (row.status === 'converged' || row.status === 'override')
     return { label: `${short(row.installed, row.pin_label)} ✓`, tone: 'ok' }
   // Pi's advisory statuses: `hal0 update` cannot re-pin it, so none counts as pending.
