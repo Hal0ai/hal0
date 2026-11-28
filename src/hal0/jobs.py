@@ -21,12 +21,20 @@ from collections.abc import Collection, Iterable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
-from hal0.dispatcher._capability_resolve import (
-    _EMBED_PATHS,
-    _IMAGE_PATHS,
-    _RERANK_PATHS,
-    _STT_PATHS,
-    _TTS_PATHS,
+from hal0.capability_paths import (
+    EMBED_PATHS as _EMBED_PATHS,
+)
+from hal0.capability_paths import (
+    IMAGE_PATHS as _IMAGE_PATHS,
+)
+from hal0.capability_paths import (
+    RERANK_PATHS as _RERANK_PATHS,
+)
+from hal0.capability_paths import (
+    STT_PATHS as _STT_PATHS,
+)
+from hal0.capability_paths import (
+    TTS_PATHS as _TTS_PATHS,
 )
 from hal0.errors import Hal0Error
 
