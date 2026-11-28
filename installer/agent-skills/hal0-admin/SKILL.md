@@ -17,7 +17,8 @@ releases; this guide covers the common tasks. Ask the server for the rest.
 
 ## MCP Endpoint
 
-Local (on hal0): `http://127.0.0.1:8080/mcp/admin/mcp` (plain HTTP POST; the path ends in `/mcp`).
+Local (on hal0): `http://127.0.0.1:8080/mcp/admin/mcp` (MCP over the `http` transport, POST only; the
+path ends in `/mcp`; the generated `MCP-CLIENTS.md` says not to use `streamable-http` or SSE).
 When hal0's network auth is on (`hal0 auth status` says whether), the call needs the admin key as
 `Authorization: Bearer <key>`; `/mcp/admin` accepts the admin key only. From another machine use
 that host's address and the same path.
@@ -60,7 +61,8 @@ slot_resolved {name} → the resolved llama-server command, per-flag provenance
 ```
 
 ### Slots — Control
-Tell the person before you call these: they change what is serving.
+These change what is serving. **Ask and wait for a yes** before `slot_unload` and `model_swap`.
+Tell the person before `slot_load` and `slot_edit`, and wait for a yes if the slot is loaded or in use.
 ```
 slot_load {name}               → load a slot (optional model_id to assign first)   [no approval]
 slot_unload {name}             → unload gracefully                                   [no approval]
@@ -70,7 +72,13 @@ slot_restart {name}            → restart the slot's unit                      
 slot_create {name, model, ...} → write a new slot config (then slot_load to start)   [gated]
 slot_delete {name}             → delete a slot                                       [gated]
 ```
-A gated tool returns `pending_approval` and waits for the person. Prefer `slot_load` over
+**Never unload or swap the slot that is serving you.** Your own model is the one hal0 Hermes is
+configured with, normally `hal0/agent`, which is served by the slot named `agent`. Confirm with
+`slot_status {name: "agent"}` and the model your session reports. If you cannot tell which slot
+serves you, ask the person before touching any slot that is loaded.
+
+A gated tool returns `pending_approval` at once and nothing waits: tell the person, then re-check
+with a read tool (`slot_status`, `slot_list`) after they approve. Prefer `slot_load` over
 `slot_restart` for a slot in `error` state or after a config change: load regenerates the unit.
 
 ### Models
@@ -105,11 +113,13 @@ the slots, `model_list` (with `fields`) for the models, `upstream_list` for remo
 ## Rules for agents
 
 1. **Read-only first**: always probe state before mutating.
-2. **Gated operations wait for the person**: `slot_create`, `slot_delete`, `slot_restart`, `model_pull`,
-   `model_delete`, `service_action` and others return `pending_approval`. Report that and wait.
+2. **Gated operations need the person's approval**: `slot_create`, `slot_delete`, `slot_restart`,
+   `model_pull`, `model_delete`, `service_action` and others return `pending_approval` at once.
+   Nothing waits: tell the person, then re-check with a read after they approve.
 3. **Use `slot_list`** before load/unload to see the current state.
 4. **`model_swap`** changes the model on a slot and restarts its container; it is one call instead
-   of `slot_unload` plus `slot_load`, not a way around a load time.
+   of `slot_unload` plus `slot_load`, not a way around a load time. Ask and wait for a yes first,
+   and never on the slot that is serving you.
 5. **Check `slot_metrics`** after loading to confirm a healthy start.
 6. **Never edit TOML files** directly (for example `/etc/hal0/capabilities.toml` or a slot file); use the tools.
 7. **Prefer `doctor_report`** for a one-shot overview instead of chaining several reads.
