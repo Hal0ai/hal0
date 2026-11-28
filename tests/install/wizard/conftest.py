@@ -9,6 +9,7 @@ import os
 import pty
 import select
 import struct
+import subprocess
 import termios
 import time
 from collections.abc import Iterator
@@ -157,3 +158,41 @@ def read_all(master: int, quiet: float = 0.2) -> bytes:
 
 def set_winsize(master: int, rows: int, cols: int) -> None:
     fcntl.ioctl(master, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
+
+
+def wait_for_output(master: int, timeout: float = 10.0) -> bytes:
+    """Block until the terminal has written something, then return what it has so far.
+
+    A wizard in raw mode discards pending input, so a test writes its keys only
+    after this returns.
+    """
+    deadline = time.monotonic() + timeout
+    out = b""
+    while not out and time.monotonic() < deadline:
+        ready, _, _ = select.select([master], [], [], 0.2)
+        if ready:
+            try:
+                out += os.read(master, 4096)
+            except OSError:
+                break
+    assert out, "the wizard drew nothing"
+    return out + read_all(master, quiet=0.1)
+
+
+def wait_exit(proc: subprocess.Popen[str], master: int, timeout: float = 10.0) -> tuple[int, bytes]:
+    """Wait for the process to end while draining the terminal, so it never blocks on a write.
+
+    Returns the exit code and everything the terminal showed meanwhile.
+    """
+    deadline = time.monotonic() + timeout
+    shown = b""
+    while proc.poll() is None:
+        assert time.monotonic() < deadline, "the wizard did not exit"
+        ready, _, _ = select.select([master], [], [], 0.1)
+        if ready:
+            try:
+                shown += os.read(master, 4096)
+            except OSError:
+                break
+    code = proc.wait(timeout=5)
+    return code, shown + read_all(master, quiet=0.1)

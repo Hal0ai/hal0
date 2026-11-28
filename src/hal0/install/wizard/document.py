@@ -309,12 +309,17 @@ def load_document(path: Path) -> Document:
 
 def write_document(doc: Document, path: Path) -> None:
     """Write the document as JSON, mode 0600, through a temporary file and a rename."""
-    if path.is_symlink():
-        raise DocumentError(f"{path}: refusing to write through a symlink")
     try:
         text = json.dumps(doc, indent=2, sort_keys=True, allow_nan=False) + "\n"
     except (TypeError, ValueError, RecursionError) as exc:
         raise DocumentError(f"{path}: document cannot be written as JSON ({exc})") from None
+    write_private_text(text, path)
+
+
+def write_private_text(text: str, path: Path) -> None:
+    """Write text with mode 0600 through a temporary file and a rename; never through a symlink."""
+    if path.is_symlink():
+        raise DocumentError(f"{path}: refusing to write through a symlink")
     temp = path.with_name(f".{path.name}.{secrets.token_hex(6)}.tmp")
     try:
         fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
