@@ -1,5 +1,5 @@
 """The wizard's model list (installer/manifests/setup-models.json) must stay in
-step with the curated registry and with ``suggest_models``."""
+step with the installer's own model lists."""
 
 from __future__ import annotations
 
@@ -11,9 +11,10 @@ from pathlib import Path
 
 import pytest
 
+from hal0.comfyui.catalog import CATALOG
 from hal0.config.schema import GPUInfo, HardwareInfo
-from hal0.install.suggest import suggest_models
-from hal0.registry.curated import CURATED_MODELS
+from hal0.install.agent_model import AGENT_MODEL_IDS, agent_model_for_hardware
+from hal0.registry.curated import get_curated
 
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / "scripts" / "gen_setup_models.py"
@@ -43,13 +44,8 @@ def test_committed_file_is_current():
     assert proc.returncode == 0, proc.stdout + proc.stderr
 
 
-def test_starter_rows_match_registry():
-    want = {
-        m.id
-        for m in CURATED_MODELS
-        if m.capability == "chat" and not m.bundle_only and "npu" not in m.tags
-    }
-    assert {r["id"] for r in _rows("starter")} == want
+def test_starter_rows_are_the_installer_ladder():
+    assert [r["id"] for r in _rows("starter")] == list(AGENT_MODEL_IDS)
 
 
 def test_order_is_largest_first_within_role():
@@ -57,17 +53,25 @@ def test_order_is_largest_first_within_role():
         pools = [r["min_gpu_pool_gb"] for r in _rows(role)]
         assert pools == sorted(pools, reverse=True)
     roles = [r["role"] for r in json.loads(MANIFEST.read_text())["models"]]
-    assert roles == sorted(roles, key=("starter", "brain").index)
+    assert roles == sorted(roles, key=("starter", "brain", "image").index)
 
 
-@pytest.mark.parametrize("pool", [4, 8, 16, 24, 32, 64, 96, 128])
-def test_first_fitting_row_matches_suggest(pool):
-    fits = [r for r in _rows("starter") if r["min_gpu_pool_gb"] <= pool]
-    picks = suggest_models("chat", _hw(pool), limit=1)
-    assert fits and picks
-    assert fits[0]["id"] == picks[0].model_id
+@pytest.mark.parametrize("pool", [4, 8, 16, 24, 25, 32, 64, 96, 128])
+def test_first_fitting_row_is_what_the_installer_picks(pool):
+    fits = [r for r in _rows("starter") if r["min_gpu_pool_gb"] <= pool + 0.01]
+    picked = agent_model_for_hardware(_hw(pool))
+    assert (fits[0]["id"] if fits else None) == picked
+    if pool < min(r["min_gpu_pool_gb"] for r in _rows("starter")):
+        assert picked is None and not fits
 
 
-def test_no_npu_or_bundle_only_rows():
-    excluded = {m.id for m in CURATED_MODELS if m.bundle_only or "npu" in m.tags}
-    assert not excluded & {r["id"] for r in json.loads(MANIFEST.read_text())["models"]}
+def test_every_row_has_a_curated_entry():
+    for r in json.loads(MANIFEST.read_text())["models"]:
+        if r["role"] != "image":
+            assert get_curated(r["id"]) is not None, r["id"]
+
+
+def test_image_rows_match_the_installer_catalogue():
+    want = [m.id for m in CATALOG.values() if m.api_renderable]
+    assert [r["id"] for r in _rows("image")] == want
+    assert want
