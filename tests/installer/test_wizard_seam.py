@@ -787,6 +787,51 @@ echo DONE
             assert f"MKDIR -p" in proc.stdout and store in proc.stdout and "DONE" in proc.stdout
 
 
+@pytest.mark.parametrize("reason", ["chosen", "saved"])
+def test_a_store_inside_the_default_store_keeps_the_strict_rule(tmp_path: Path,
+                                                                 reason: str) -> None:
+    block = _slice('ui_step "Filesystem layout"', 'info "directories under')
+    var = tmp_path / "var"
+    (var / "models").mkdir(parents=True)
+    store = f"{var}/models/x"
+    script = f"""
+set -euo pipefail
+PREFIX=/p ETC_DIR=/e VAR_DIR="{var}" UNIT_DIR=/u DEV_MODE=0
+MODELS_DIR="{store}"
+MODELS_DIR_FROM_DOC=1
+_HAL0_WIZARD_CHOSEN_STORE="{store if reason == "chosen" else ""}"
+_HAL0_SAVED_STORE="{store if reason == "saved" else ""}"
+{_helpers()}
+ui_step() {{ :; }}
+info() {{ echo "INFO: $*"; }}
+die() {{ echo "DIE: $*"; exit 1; }}
+nofollow() {{ echo "NOFOLLOW $*"; return 0; }}
+mkdir() {{ echo "MKDIR $*"; }}
+for p in "{store}" "{store}/" "{var}/models" "{var}//models/./x/"; do
+    hal0_store_is_operator_choice "$p" && echo "OWN $p=yes" || echo "OWN $p=no"
+done
+_HAL0_WIZARD_CHOSEN_STORE="{var}/models" hal0_store_is_operator_choice "{var}/models/" \\
+    && echo "DEFAULT=yes" || echo "DEFAULT=no"
+_HAL0_SAVED_STORE="{var}/models2" hal0_store_is_operator_choice "{var}/models2" \\
+    && echo "BESIDE=yes" || echo "BESIDE=no"
+{block}
+echo DONE
+"""
+    proc = subprocess.run(["bash", "-c", script], capture_output=True, text=True, check=False)
+    out = proc.stdout
+    assert "DONE" in out, out + proc.stderr
+    for p in (store, f"{store}/", f"{var}/models", f"{var}//models/./x/"):
+        assert f"OWN {p}=no" in out, out
+    assert "DEFAULT=no" in out and "BESIDE=yes" in out, out
+    mkdirs = [ln for ln in out.splitlines() if ln.startswith("MKDIR")]
+    assert mkdirs and all(store not in ln for ln in mkdirs), mkdirs
+    assert f"{var}/models" in mkdirs[0]
+    calls = [ln for ln in out.splitlines() if ln.startswith("NOFOLLOW")]
+    assert calls and calls[-1].startswith("NOFOLLOW dir --create") and calls[-1].endswith(
+        f"--expect adopt {store}"), calls
+    assert "your own choice" not in out
+
+
 # ── the NPU folder from a document ──────────────────────────────────────────
 
 
@@ -947,18 +992,25 @@ def test_cpu_only_prompt_skipped_after_the_wizard() -> None:
 # ── a folder the flag or the environment chose stays theirs ─────────────────
 
 
-def _md(*, flag: int, explicit: int, models: str, doc: str, ran: int,
+def _md(*, args: tuple[str, ...] = (), env_models: str | None = None, doc: str, ran: int,
         pre_flm: str = "", doc_flm: str = "") -> str:
+    """The real flag loop of install.sh (from MODELS_DIR= to the banner), then the
+    answers-models-dir block, with what the seam leaves behind in between."""
+    loop = _slice('MODELS_DIR="${HAL0_MODELS_DIR:-}"', "# Banner first")
     block = _slice("# answers-models-dir: begin", "# answers-models-dir: end")
     exported = "HAL0_NONINTERACTIVE HAL0_MODELS_DIR" + (" HAL0_FLM_MODELS_DIR" if doc_flm else "")
     script = f"""
 set -euo pipefail
+REPO_ROOT="{ROOT}"
+DEV_MODE=0
+NO_START=0
 source "{ANSWERS_SH}"
+{_helpers()}
+info() {{ echo "INFO: $*"; }}
 warn() {{ echo "WARN: $*"; }}
-MODELS_DIR="{models}"
-MODELS_DIR_EXPLICIT={explicit}
-MODELS_DIR_FLAG_GIVEN={flag}
-MODELS_DIR_FROM_DOC=0
+err() {{ echo "ERR: $*"; }}
+{loop}
+echo "LOOP flag=${{MODELS_DIR_FLAG_GIVEN}} explicit=${{MODELS_DIR_EXPLICIT}}"
 HAL0_ANSWERS_APPLIED=1
 HAL0_WIZARD_RAN={ran}
 HAL0_ANSWERS_SAVED=abc
@@ -969,33 +1021,82 @@ HAL0_ANSWERS_EXPORTED=({exported})
 {block}
 echo "FROM_DOC=${{MODELS_DIR_FROM_DOC}} DIR=${{MODELS_DIR}} SAVED=${{HAL0_ANSWERS_SAVED}} EXPORTED=${{HAL0_ANSWERS_EXPORTED[*]}}"
 """
-    proc = subprocess.run(["bash", "-c", script], capture_output=True, text=True, check=False)
-    assert proc.returncode == 0, proc.stderr
+    env = {"PATH": os.environ["PATH"]}
+    if env_models is not None:
+        env["HAL0_MODELS_DIR"] = env_models
+    proc = subprocess.run(["bash", "-c", script, "bash", *args], capture_output=True, text=True,
+                          check=False, env=env)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
     return proc.stdout.strip()
 
 
-def test_a_folder_from_the_flag_or_environment_stays_the_operators() -> None:
-    # --models-dir is forwarded to the wizard, which writes it into the document
-    assert _md(flag=1, explicit=1, models="/home/a/m", doc="/home/a/m", ran=1) == (
-        "FROM_DOC=0 DIR=/home/a/m SAVED=abc EXPORTED=HAL0_NONINTERACTIVE HAL0_MODELS_DIR")
-    # HAL0_MODELS_DIR is read by the wizard too
-    assert _md(flag=0, explicit=1, models="/home/a/m", doc="/home/a/m", ran=1).startswith(
-        "FROM_DOC=0 DIR=/home/a/m")
-    # without the wizard, today's rule: the document's value is the document's
-    assert _md(flag=0, explicit=1, models="/home/a/m", doc="/home/a/m", ran=0).startswith(
-        "FROM_DOC=1")
-    # a different folder from the document is still the document's
-    assert _md(flag=0, explicit=1, models="/home/a/m", doc="/srv/m", ran=1).startswith(
-        "FROM_DOC=1 DIR=/srv/m")
+def test_models_dir_flag_alone_agreeing_with_the_document_keeps_the_saved_copy() -> None:
+    out = _md(args=("--models-dir=/home/a/m",), doc="/home/a/m", ran=1)
+    # what the script really produces for the flag alone
+    assert "LOOP flag=1 explicit=0" in out
+    assert "WARN" not in out, out
+    assert out.endswith(
+        "FROM_DOC=0 DIR=/home/a/m SAVED=abc EXPORTED=HAL0_NONINTERACTIVE HAL0_MODELS_DIR"), out
 
 
-def test_a_flag_that_overrides_the_document_keeps_no_saved_copy() -> None:
-    out = _md(flag=1, explicit=1, models="/flag", doc="/doc", ran=0)
+def test_models_dir_flag_alone_differing_from_the_document_warns_and_keeps_none() -> None:
+    out = _md(args=("--models-dir=/flag",), doc="/doc", ran=1)
+    assert "LOOP flag=1 explicit=0" in out
+    assert out.count("WARN: --models-dir was given") == 1, out
+    assert "FROM_DOC=0 DIR=/flag SAVED= " in out
+    # the same without the wizard
+    out = _md(args=("--models-dir=/flag",), doc="/doc", ran=0)
     assert "WARN:" in out and "FROM_DOC=0 DIR=/flag SAVED= " in out
 
 
-def test_an_npu_folder_from_the_environment_stays_the_environments() -> None:
-    out = _md(flag=0, explicit=0, models="/d", doc="/d", ran=1, pre_flm="/d/npu", doc_flm="/d/npu")
+def test_a_folder_from_the_environment_stays_the_operators() -> None:
+    # HAL0_MODELS_DIR is read by the wizard too
+    out = _md(env_models="/home/a/m", doc="/home/a/m", ran=1)
+    assert "LOOP flag=0 explicit=1" in out
+    assert "FROM_DOC=0 DIR=/home/a/m SAVED=abc" in out and "WARN" not in out
+    # without the wizard, today's rule: the document's value is the document's
+    assert "FROM_DOC=1" in _md(env_models="/home/a/m", doc="/home/a/m", ran=0)
+    # a different folder from the document is still the document's
+    assert "FROM_DOC=1 DIR=/srv/m" in _md(env_models="/home/a/m", doc="/srv/m", ran=1)
+
+
+def test_the_same_folder_is_compared_in_normal_form() -> None:
+    # the wizard hands back the folder without a trailing slash or a `.`
+    out = _md(env_models="/home/alice/models/", doc="/home/alice/models", ran=1)
+    assert "FROM_DOC=0 DIR=/home/alice/models/ SAVED=abc" in out and "WARN" not in out
+    out = _md(args=("--models-dir=/home//alice/./models/",), doc="/home/alice/models", ran=1)
+    assert "FROM_DOC=0 SAVED=abc" in out.replace("DIR=/home//alice/./models/ ", "") \
+        and "WARN" not in out, out
+    # a different folder in normal form is still different
+    out = _md(env_models="/home/alice/models/", doc="/home/alice/models2", ran=1)
+    assert "FROM_DOC=1 DIR=/home/alice/models2" in out
+    out = _md(args=("--models-dir=/home/alice/models/x/..",), doc="/home/alice/models", ran=1)
+    assert "WARN: --models-dir was given" in out
+    # the NPU folder from the environment too
+    out = _md(doc="/d", ran=1, pre_flm="/d//npu/", doc_flm="/d/npu")
     assert out.endswith("EXPORTED=HAL0_NONINTERACTIVE HAL0_MODELS_DIR"), out
-    out = _md(flag=0, explicit=0, models="/d", doc="/d", ran=1, pre_flm="", doc_flm="/d/npu")
+
+
+def test_path_norm_is_text_only() -> None:
+    script = f"""
+{_helpers()}
+for p in /home/alice/models/ //a//b/ /a/././b /a/./ /. / /a/. /a/.b/ /a/../b /a/b///; do
+    printf '%s=%s\\n' "$p" "$(hal0_path_norm "$p")"
+done
+"""
+    proc = subprocess.run(["bash", "-c", script], capture_output=True, text=True, check=False)
+    got = dict(line.split("=", 1) for line in proc.stdout.splitlines())
+    assert got == {"/home/alice/models/": "/home/alice/models", "//a//b/": "/a/b",
+                   "/a/././b": "/a/b", "/a/./": "/a", "/.": "/", "/": "/", "/a/.": "/a",
+                   "/a/.b/": "/a/.b", "/a/../b": "/a/../b", "/a/b///": "/a/b"}
+    fn = _helpers()[_helpers().index("hal0_path_norm() {"):]
+    fn = fn[: fn.index("\n}\n")]
+    for call in ("stat", "readlink", "realpath", "cd ", "-e ", "-d "):
+        assert call not in fn, call
+
+
+def test_an_npu_folder_from_the_environment_stays_the_environments() -> None:
+    out = _md(doc="/d", ran=1, pre_flm="/d/npu", doc_flm="/d/npu")
+    assert out.endswith("EXPORTED=HAL0_NONINTERACTIVE HAL0_MODELS_DIR"), out
+    out = _md(doc="/d", ran=1, pre_flm="", doc_flm="/d/npu")
     assert out.endswith("HAL0_FLM_MODELS_DIR"), out

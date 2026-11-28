@@ -386,6 +386,20 @@ nofollow() {
 # else (root's /data/models -> /var/lib/hal0/models hands the hal0 account the
 # choice of where root creates). Every component is looked at with lstat.
 #
+# hal0_path_norm PATH: print PATH in normal form, by text alone (no filesystem
+# call): repeated slashes collapsed, `.` components dropped, a trailing slash
+# dropped. `..` is left as it is. Used to tell whether two spellings name the
+# same folder (the setup screens hand back a folder without a trailing slash).
+hal0_path_norm() {
+    local p="${1:-}" two='//' one='/' dot='/./'
+    while [[ "${p}" == *//* ]]; do p="${p//"${two}"/"${one}"}"; done
+    while [[ "${p}" == */./* ]]; do p="${p//"${dot}"/"${one}"}"; done
+    while [[ "${p}" == */. ]]; do p="${p%/.}"; done
+    [[ -n "${p}" || "${1:-}" != /* ]] || p=/
+    while [[ "${p}" == ?*/ ]]; do p="${p%/}"; done
+    printf '%s' "${p}"
+}
+
 # _hal0_trusted_owner UID: "root" for these rules: uid 0, or the uid running
 # the installer (a non-root --dev run), the set src/hal0/security/nofollow.py
 # (_trusted_uids) follows links through. On a real install both are 0.
@@ -570,10 +584,17 @@ hal0_doc_store_prepare() {
 # Both values are set only by hal0_run_wizard in this process (answers.sh
 # unsets them when it is sourced), never taken from the environment, a document
 # or hal0.toml (/etc/hal0 is the service account's after an install).
+# Never for the installer's own store, ${VAR_DIR}/models, or a folder inside it
+# (compared in normal form, hal0_path_norm): that tree is the hal0 account's,
+# which can plant links in it, so a store there always takes the strict rule,
+# which handles it (made through `nofollow`, owned as the service needs).
 hal0_store_is_operator_choice() {
-    local store="${1:-}"
+    local store="${1:-}" norm default
     while [[ "${store}" == */ && "${store}" != / ]]; do store="${store%/}"; done
     [[ "${store}" == /?* ]] || return 1
+    norm="$(hal0_path_norm "${store}")"
+    default="$(hal0_path_norm "${VAR_DIR:-/var/lib/hal0}/models")"
+    [[ "${norm}" != "${default}" && "${norm}" != "${default}/"* ]] || return 1
     [[ -n "${_HAL0_WIZARD_CHOSEN_STORE:-}" && "${store}" == "${_HAL0_WIZARD_CHOSEN_STORE}" ]] && return 0
     [[ -n "${_HAL0_SAVED_STORE:-}" && "${store}" == "${_HAL0_SAVED_STORE}" ]] && return 0
     return 1
@@ -1015,13 +1036,15 @@ fi
 # default. HAL0_ANSWERS_EXPORTED says the document (not the environment) set it.
 # The setup screens are handed --models-dir and read HAL0_MODELS_DIR and
 # HAL0_FLM_MODELS_DIR, and write them into their document: a folder there that
-# is exactly what the flag or root's environment already chose stays that
+# is the same folder as the flag or root's environment already chose (compared
+# in normal form, hal0_path_norm: the screens drop a trailing slash) stays that
 # choice, with today's rules, and is not the document's.
 if [[ "${HAL0_ANSWERS_APPLIED:-0}" == "1" ]]; then
     for _answered in "${HAL0_ANSWERS_EXPORTED[@]+"${HAL0_ANSWERS_EXPORTED[@]}"}"; do
         if [[ "${_answered}" == "HAL0_MODELS_DIR" ]]; then
-            if [[ "${HAL0_WIZARD_RAN:-0}" == "1" && "${MODELS_DIR_EXPLICIT}" -eq 1 \
-                && "${HAL0_MODELS_DIR}" == "${MODELS_DIR}" ]]; then
+            if [[ "${HAL0_WIZARD_RAN:-0}" == "1" ]] \
+                && (( MODELS_DIR_FLAG_GIVEN || MODELS_DIR_EXPLICIT )) \
+                && [[ "$(hal0_path_norm "${HAL0_MODELS_DIR}")" == "$(hal0_path_norm "${MODELS_DIR}")" ]]; then
                 :
             elif [[ "${MODELS_DIR_FLAG_GIVEN}" -eq 1 ]]; then
                 warn "--models-dir was given, so the model folder in the answers document was ignored"
@@ -1038,8 +1061,8 @@ if [[ "${HAL0_ANSWERS_APPLIED:-0}" == "1" ]]; then
         fi
     done
     unset _answered
-    if [[ "${HAL0_WIZARD_RAN:-0}" == "1" && -n "${_pre_seam_flm:-}" \
-        && "${HAL0_FLM_MODELS_DIR:-}" == "${_pre_seam_flm}" ]]; then
+    if [[ "${HAL0_WIZARD_RAN:-0}" == "1" && -n "${_pre_seam_flm:-}" && -n "${HAL0_FLM_MODELS_DIR:-}" ]] \
+        && [[ "$(hal0_path_norm "${HAL0_FLM_MODELS_DIR}")" == "$(hal0_path_norm "${_pre_seam_flm}")" ]]; then
         hal0_answers_forget HAL0_FLM_MODELS_DIR
     fi
 fi
