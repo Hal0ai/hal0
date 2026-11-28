@@ -211,14 +211,19 @@ def models_enter(s: State) -> State:
     picked = next(
         (r for r in s.catalog.model_ladder if r.model == row.value and r.role == role), None
     )
-    if picked is not None and picked.needs_account and _question(s, "hf_token") is not None:
+    asks = picked is not None and picked.needs_account and _question(s, "hf_token") is not None
+    if asks and (s.step == 0 or s.token is None):
         return replace(s, editing="", field=_TOKEN, error=None)
-    return _models_next(replace(s, token=None))
+    # Only the chat step clears a token; the image step keeps what was typed.
+    return _models_next(replace(s, token=None) if s.step == 0 and not asks else s)
 
 
 def commit_token(s: State, text: str) -> State:
     """A blank token skips; the typed one is kept apart from the answers."""
-    done = replace(s, editing=None, field="", error=None, token=text or None)
+    # A blank Enter skips: on the chat step that leaves no token, on the image step
+    # it leaves the held one (none, since the field only opens when none is held).
+    token = text or (None if s.step == 0 else s.token)
+    done = replace(s, editing=None, field="", error=None, token=token)
     return _models_next(done)
 
 

@@ -363,15 +363,29 @@ def test_enter_on_an_unavailable_row_sets_the_error_and_stays(
     assert view(s).error == "needs 24 GB of GPU memory; this box has 8"
 
 
-def test_a_blank_token_clears_an_earlier_one_and_a_free_model_clears_it_too(
+def _typed_token(catalog: Catalog, facts: Facts) -> State:
+    s = run(_models(catalog, facts), "DOWN", "DOWN", "ENTER", *"hf_x", "ENTER")
+    assert secret(s) == "hf_x"
+    return s
+
+
+def test_a_blank_token_clears_an_earlier_one(
     ladder_catalog: Catalog, big_pool_facts: Facts
 ) -> None:
-    s = run(_models(ladder_catalog, big_pool_facts), "DOWN", "DOWN", "ENTER", *"hf_x", "ENTER")
-    assert secret(s) == "hf_x"
-    again = run(s, "b", "ENTER", "DOWN", "DOWN", "ENTER", "ENTER")
-    assert secret(again) is None
-    s = run(_models(ladder_catalog, big_pool_facts), "DOWN", "DOWN", "ENTER", *"hf_x", "ENTER")
-    free = run(s, "b", "ENTER", "DOWN", "ENTER")
+    s = _typed_token(ladder_catalog, big_pool_facts)
+    again = run(s, "b", "ENTER")  # cursor is back on big-1: its field reopens
+    assert view(again).editing == ""
+    assert secret(run(again, "ENTER")) is None
+
+
+def test_a_model_without_an_account_clears_an_earlier_token(
+    ladder_catalog: Catalog, big_pool_facts: Facts
+) -> None:
+    models = run(_typed_token(ladder_catalog, big_pool_facts), "b")
+    assert view(models).screen is Screen.MODELS
+    assert view(models).rows[view(models).cursor].id == "big-1"
+    free = run(models, "UP", "ENTER")
+    assert view(free).screen is Screen.STORAGE
     assert secret(free) is None
 
 
@@ -413,3 +427,52 @@ def test_the_empty_ladder_hint_does_not_offer_a_choice(
     catalog: Catalog, usable_facts: Facts
 ) -> None:
     assert "choose" not in view(_models(catalog, usable_facts)).hint
+
+
+def _image_catalog(ladder_catalog: Catalog, image_needs_account: bool) -> Catalog:
+    row = ModelRow("image", "img-1", "Image", "cpu", None, None, None, image_needs_account)
+    return replace(ladder_catalog, model_ladder=(*ladder_catalog.model_ladder, row))
+
+
+def _at_image_step(catalog: Catalog, facts: Facts) -> State:
+    """Images job on; big-1 (needs an account) picked on the chat step."""
+    s = run(custom(catalog, facts), "DOWN", "DOWN", "DOWN", "SPACE", "ENTER")
+    return run(s, "DOWN", "DOWN", "ENTER")
+
+
+def test_the_image_step_keeps_a_token_typed_for_the_chat_model(
+    ladder_catalog: Catalog, big_pool_facts: Facts
+) -> None:
+    catalog = _image_catalog(ladder_catalog, False)
+    s = run(_at_image_step(catalog, big_pool_facts), *"hf_x", "ENTER")
+    assert [r.id for r in view(s).rows] == ["img-1"]
+    done = press(s, "ENTER")
+    assert view(done).screen is Screen.STORAGE
+    assert secret(done) == "hf_x"
+
+
+def test_an_image_model_with_an_account_does_not_ask_again_when_a_token_is_held(
+    ladder_catalog: Catalog, big_pool_facts: Facts
+) -> None:
+    catalog = _image_catalog(ladder_catalog, True)
+    s = run(_at_image_step(catalog, big_pool_facts), *"hf_x", "ENTER")
+    done = press(s, "ENTER")
+    assert view(done).screen is Screen.STORAGE
+    assert view(done).editing is None
+    assert secret(done) == "hf_x"
+
+
+def test_an_image_model_with_an_account_asks_when_no_token_is_held(
+    ladder_catalog: Catalog, big_pool_facts: Facts
+) -> None:
+    catalog = _image_catalog(ladder_catalog, True)
+    s = run(custom(catalog, big_pool_facts), "DOWN", "DOWN", "DOWN", "SPACE", "ENTER", "ENTER")
+    assert [r.id for r in view(s).rows] == ["img-1"]
+    asked = press(s, "ENTER")
+    assert view(asked).editing == ""
+    done = run(asked, *"hf_y", "ENTER")
+    assert view(done).screen is Screen.STORAGE
+    assert secret(done) == "hf_y"
+    blank = run(asked, "ENTER")
+    assert view(blank).screen is Screen.STORAGE
+    assert secret(blank) is None
