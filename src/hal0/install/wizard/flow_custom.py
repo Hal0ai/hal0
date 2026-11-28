@@ -14,7 +14,6 @@ from dataclasses import replace
 from .catalog import Component, ModelRow, Question
 from .document import Document, get
 from .facts import satisfied
-from .flow_basic import validate_folder
 from .flow_model import (
     DEFAULT_HOST,
     DEFAULT_PORT,
@@ -38,6 +37,7 @@ from .flow_model import (
     record_answer,
     set_by,
 )
+from .paths import validate_folder
 
 _IMAGE_JOB = "images"
 _ASSISTANT_JOB = "hermes"

@@ -34,7 +34,6 @@ from .flow_basic import (
     type_cursor,
     type_enter,
     type_rows,
-    validate_folder,
 )
 from .flow_custom import (
     accept,
@@ -69,6 +68,7 @@ from .flow_model import (
     save_field_open,
     secret_field_open,
 )
+from .paths import validate_folder
 
 __all__ = [
     "SAVE_COPY_KEY",
