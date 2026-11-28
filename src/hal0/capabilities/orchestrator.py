@@ -1411,14 +1411,15 @@ async def ensure_seed_slot_registered(slot_manager: Any, name: str) -> SeedResul
     The copy takes the slot write lock itself, synchronously, so it runs in a
     worker thread and nothing is awaited while the lock is held. A tombstone is
     cleared (this is an explicit ask); an existing file or id-keyed slot is
-    never replaced. After a copy, ``fold_identity`` registers the new file the
-    way the boot seeding pass does (identity row, port claim).
+    never replaced. After a copy, ``register_seeded_slot`` gives the new slot its
+    identity row and a port claim (a free port, written into the file, when the
+    seed's own is taken) and raises when it cannot.
     """
     result = await asyncio.to_thread(
         ensure_seed_slot, name, existing_names=slot_manager.identity_names()
     )
     if result is SeedResult.CREATED:
-        await slot_manager.fold_identity()
+        await slot_manager.register_seeded_slot(name)
     return result
 
 

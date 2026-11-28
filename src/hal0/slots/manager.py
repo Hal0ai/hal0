@@ -3970,6 +3970,83 @@ class SlotManager:
 
     # ── slot CRUD ────────────────────────────────────────────────────────────
 
+    def _claim_port_and_write_back(
+        self, slot_name: str, cfg_dict: dict[str, Any], cfg_path: Path
+    ) -> tuple[Any | None, int | None]:
+        """Identity row + port claim for a slot whose TOML is on disk (``create``'s tail).
+
+        Runs under the caller's slot write lock. Returns ``(identity row, granted
+        port)``; the port is ``None`` when there is no authority or the acquire
+        failed. A granted port that differs from the TOML's is written back.
+        """
+        granted: int | None = None
+        # §11.1/§11.2: assign the opaque id + route the port through the
+        # single authority. The granted port is written back into the
+        # TOML (the field becomes the read-only mirror of the claim).
+        # Best-effort: an authority hiccup falls back to the TOML port.
+        ident = self._ensure_identity(slot_name, cfg_dict)
+        if ident is not None and self._port_authority is not None:
+            _, _, grp, _ = self._derive_identity_fields(slot_name, cfg_dict)
+            preferred = _cfg_port(cfg_dict) or None
+            try:
+                granted = self._port_authority.acquire(
+                    ident.id,
+                    preferred=preferred,
+                    coresident_group=grp,
+                    owner_label=f"slot:{slot_name}",
+                )
+            except Exception as exc:
+                log.warning(
+                    "slot.port_acquire_failed",
+                    extra={"slot": slot_name, "error": str(exc)},
+                )
+                granted = None
+            if granted is not None and granted != _cfg_port(cfg_dict):
+                cfg_dict["port"] = granted
+                with contextlib.suppress(OSError):
+                    write_slot_toml(cfg_path, cfg_dict)
+                    self._invalidate_cfg_cache(slot_name)
+        return ident, granted
+
+    async def register_seeded_slot(self, slot_name: str) -> None:
+        """Register a slot file that was just copied from its seed template.
+
+        Gives it an identity row and a port claim like :meth:`create` does: the
+        seed's own port when free, else a free one, written back into the file
+        under the slot write lock. Raises :class:`SlotConfigError` when the slot
+        ends without a claim for the port in its file (the file is left in place).
+        Never touches a slot other than ``slot_name``.
+        """
+        try:
+            import tomllib
+        except ImportError:  # py<3.11
+            import tomli as tomllib  # type: ignore[no-redef]
+
+        async with self._lock(slot_name):
+            with slot_write_lock():
+                cfg_path = self._config_file_for(slot_name)
+                try:
+                    cfg_dict = tomllib.loads(cfg_path.read_text(encoding="utf-8"))
+                except (OSError, ValueError) as exc:
+                    raise SlotConfigError(
+                        f"cannot read seeded slot config {cfg_path}: {exc}",
+                        details={"slot": slot_name},
+                    ) from exc
+                ident, granted = self._claim_port_and_write_back(slot_name, cfg_dict, cfg_path)
+                if self._port_authority is not None and (ident is None or granted is None):
+                    raise SlotConfigError(
+                        f"slot {slot_name!r} was created from its seed but no port could be "
+                        f"claimed for it; its file {cfg_path} was left in place",
+                        details={"slot": slot_name, "config": str(cfg_path)},
+                    )
+                on_disk = tomllib.loads(cfg_path.read_text(encoding="utf-8"))
+                if granted is not None and _cfg_port(on_disk) != granted:
+                    raise SlotConfigError(
+                        f"slot {slot_name!r} holds port {granted} but its file {cfg_path} "
+                        "could not be updated to match",
+                        details={"slot": slot_name, "config": str(cfg_path)},
+                    )
+
     async def create(
         self,
         slot_name: str,
@@ -4105,32 +4182,7 @@ class SlotManager:
                     ) from exc
                 self._invalidate_cfg_cache(slot_name)
 
-                # §11.1/§11.2: assign the opaque id + route the port through the
-                # single authority. The granted port is written back into the
-                # TOML (the field becomes the read-only mirror of the claim).
-                # Best-effort: an authority hiccup falls back to the TOML port.
-                ident = self._ensure_identity(slot_name, cfg_dict)
-                if ident is not None and self._port_authority is not None:
-                    _, _, grp, _ = self._derive_identity_fields(slot_name, cfg_dict)
-                    preferred = _cfg_port(cfg_dict) or None
-                    try:
-                        granted = self._port_authority.acquire(
-                            ident.id,
-                            preferred=preferred,
-                            coresident_group=grp,
-                            owner_label=f"slot:{slot_name}",
-                        )
-                    except Exception as exc:
-                        log.warning(
-                            "slot.port_acquire_failed",
-                            extra={"slot": slot_name, "error": str(exc)},
-                        )
-                        granted = None
-                    if granted is not None and granted != _cfg_port(cfg_dict):
-                        cfg_dict["port"] = granted
-                        with contextlib.suppress(OSError):
-                            write_slot_toml(cfg_path, cfg_dict)
-                            self._invalidate_cfg_cache(slot_name)
+                self._claim_port_and_write_back(slot_name, cfg_dict, cfg_path)
 
             # Initialise state.
             await self._transition(

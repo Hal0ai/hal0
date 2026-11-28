@@ -88,6 +88,46 @@ async def test_enabling_embed_creates_slot_from_seed(tmp_hal0_home: str) -> None
     assert "embed" in manager.identity_names()
 
 
+def _claimed_port(manager: SlotManager, name: str) -> int | None:
+    row = manager._identity.get_by_name(name)  # type: ignore[union-attr]
+    assert row is not None
+    return manager._port_authority.held_by(row.id)  # type: ignore[union-attr]
+
+
+async def test_new_slot_without_a_clash_keeps_the_seed_port_and_holds_a_claim(
+    tmp_hal0_home: str,
+) -> None:
+    home = Path(tmp_hal0_home)
+    manager = _manager(home)
+
+    await _orch(home, manager)._ensure_slot_exists("embed", _selection())
+
+    assert _read(_slot_file(home, "embed"))["port"] == _seed("embed")["port"]
+    assert _claimed_port(manager, "embed") == _seed("embed")["port"]
+
+
+async def test_seed_port_held_by_an_operator_slot_gets_a_free_port_with_a_claim(
+    tmp_hal0_home: str,
+) -> None:
+    home = Path(tmp_hal0_home)
+    manager = _manager(home)
+    seed_port = _seed("embed")["port"]
+    await manager.create(
+        "mine", {"name": "mine", "port": seed_port, "device": "cpu", "model": {"default": ""}}
+    )
+    operator_bytes = _slot_file(home, "mine").read_bytes()
+    operator_claim = _claimed_port(manager, "mine")
+    assert operator_claim == seed_port
+
+    await _orch(home, manager)._ensure_slot_exists("embed", _selection())
+
+    new_port = _read(_slot_file(home, "embed"))["port"]
+    assert new_port != seed_port
+    assert _claimed_port(manager, "embed") == new_port
+    assert _slot_file(home, "mine").read_bytes() == operator_bytes
+    assert _claimed_port(manager, "mine") == operator_claim
+
+
 async def test_enabling_after_delete_clears_tombstone(tmp_hal0_home: str) -> None:
     home = Path(tmp_hal0_home)
     slots = home / "etc" / "hal0" / "slots"
