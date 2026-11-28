@@ -47,6 +47,8 @@ _AFTER_CHECK = "chosen after hal0 has checked this box"
 _NO_MODELS = "no models to choose from yet; they are added after install"
 _TOKEN = "token"
 _FIELD = "q:"
+_TOKEN_TEXT = re.compile(r"[A-Za-z0-9_-]+")
+_BAD_TOKEN = "a token has only letters, digits, _ and -"
 _LABEL = re.compile(r"[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?")
 _STEPS = (("starter", "starter_model"), ("image", "image_model"))
 
@@ -231,10 +233,16 @@ def models_enter(s: State) -> State:
 
 
 def commit_token(s: State, text: str) -> State:
-    """A blank token skips; the typed one is kept apart from the answers."""
+    """A blank token skips; the typed one is trimmed, checked and kept apart from the answers.
+
+    A token is written unquoted into an environment file, so it may hold only
+    letters, digits, `_` and `-`. A refused one is cleared, never shown.
+    """
+    if text and not _TOKEN_TEXT.fullmatch(text.strip()):
+        return replace(s, editing="", error=_BAD_TOKEN)
     # A blank Enter skips: on the chat step that leaves no token, on the image step
     # it leaves the held one (none, since the field only opens when none is held).
-    token = text or (None if s.step == 0 else s.token)
+    token = text.strip() or (None if s.step == 0 else s.token)
     done = replace(s, editing=None, field="", error=None, token=token)
     return _models_next(done)
 

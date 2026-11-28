@@ -231,6 +231,14 @@ def folder_enter(s: State) -> State:
     return go_on(record_answer(s, key, row.value))
 
 
+def folder_space(s: State) -> State:
+    """Space opens the field on the other-folder row, as Enter does; elsewhere it does nothing."""
+    rows = folder_rows(s)
+    if fixed_override(s, key_of(s, "model_store")) is None and rows[s.cursor].id == "other":
+        return folder_enter(s)
+    return s
+
+
 def commit_folder(s: State, text: str) -> State:
     path, error = validate_folder(text)
     if error is not None:

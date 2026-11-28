@@ -758,3 +758,35 @@ def test_changing_the_type_keeps_the_folder_the_consent_and_the_copy_and_drops_t
         "_save_copy_to": copy,
     }
     assert secret(s) is None
+
+
+_BAD_TOKEN = "a token has only letters, digits, _ and -"
+
+
+def _token_field(catalog: Catalog, facts: Facts) -> State:
+    s = run(custom(catalog, facts), "ENTER", "DOWN", "DOWN", "ENTER")
+    assert view(s).editing == ""
+    return s
+
+
+@pytest.mark.parametrize("typed", ["hf_ab cd", "hf_$HOME", "hf_`id`", "hf_'x", 'hf_"x', "   "])
+def test_a_token_with_a_character_it_cannot_hold_is_refused_on_the_same_field(
+    ladder_catalog: Catalog, big_pool_facts: Facts, typed: str
+) -> None:
+    keys = ["SPACE" if c == " " else c for c in typed]
+    s = run(_token_field(ladder_catalog, big_pool_facts), *keys, "ENTER")
+    v = view(s)
+    assert (v.screen, v.error, v.editing) == (Screen.MODELS, _BAD_TOKEN, "")
+    assert secret(s) is None
+    if typed.strip():
+        assert typed.strip() not in json.dumps(chosen(s)) + repr(v) + repr(s)
+    again = run(s, *"hf_good", "ENTER")
+    assert (view(again).screen, secret(again)) == (Screen.STORAGE, "hf_good")
+
+
+def test_a_token_with_surrounding_spaces_is_kept_trimmed(
+    ladder_catalog: Catalog, big_pool_facts: Facts
+) -> None:
+    keys = ["SPACE", *"hf_abc", "SPACE", "SPACE"]
+    s = run(_token_field(ladder_catalog, big_pool_facts), *keys, "ENTER")
+    assert (view(s).screen, secret(s)) == (Screen.STORAGE, "hf_abc")

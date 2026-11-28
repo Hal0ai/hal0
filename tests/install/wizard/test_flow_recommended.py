@@ -640,3 +640,16 @@ def test_the_path_confirmed_earlier_in_this_run_is_accepted_again(
     s = run(s, "s", *str(copy), "ENTER")
     assert view(s).error is None and view(s).editing is None
     assert chosen(s)["_save_copy_to"] == str(copy)
+
+
+def test_space_on_the_other_folder_row_opens_the_field(
+    catalog: Catalog, two_disk_facts: Facts
+) -> None:
+    s = run(start(catalog, two_disk_facts), "ENTER", "DOWN", "DOWN")
+    assert view(s).rows[view(s).cursor].id == "other"
+    opened = press(s, "SPACE")
+    assert view(opened).editing == "" and view(opened).screen is Screen.FOLDER
+    assert view(run(opened, *"/srv/x", "ENTER")).screen is Screen.REVIEW
+    assert press(run(start(catalog, two_disk_facts), "ENTER"), "SPACE") == run(
+        start(catalog, two_disk_facts), "ENTER"
+    )

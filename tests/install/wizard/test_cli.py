@@ -5,6 +5,7 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import re
 import select
 import signal
 import stat
@@ -1087,3 +1088,59 @@ def test_a_session_writes_the_same_copy_again_when_it_is_confirmed_twice(
     Session(inp, term, document, plain=False).run()  # type: ignore[arg-type]
     assert json.loads(copy.read_text()) == {"written": 2}
     assert not any("already exists" in frame for frame in term.frames)
+
+
+def test_a_token_typed_with_spaces_around_it_is_kept_trimmed(
+    catalog_path: Path,
+    ladder_models_path: Path,
+    big_pool_facts_path: Path,
+    tmp_path: Path,
+    pty_pair: tuple[int, str],
+    spawn: Callable[..., subprocess.Popen[str]],
+) -> None:
+    master, slave = pty_pair
+    out, sec = tmp_path / "a.json", tmp_path / "s"
+    p = spawn(
+        "--catalog",
+        catalog_path,
+        "--models",
+        ladder_models_path,
+        "--facts",
+        big_pool_facts_path,
+        "--out",
+        out,
+        "--secret-out",
+        sec,
+        "--tty",
+        slave,
+    )
+    wait_for_output(master)
+    token = b"  hf_TRIMMED \t" + ENTER
+    os.write(master, DOWN + DOWN + ENTER + ENTER + DOWN + DOWN + ENTER + token + ENTER * 4)
+    assert wait_exit(p, master)[0] == 0
+    assert sec.read_bytes() == b"HF_TOKEN=hf_TRIMMED\n"
+
+
+def test_the_plain_form_can_type_another_folder(
+    catalog: Catalog,
+    catalog_path: Path,
+    tmp_path: Path,
+    pty_pair: tuple[int, str],
+    spawn: Callable[..., subprocess.Popen[str]],
+) -> None:
+    master, slave = pty_pair
+    out, folder = tmp_path / "a.json", tmp_path / "my models"
+    p = spawn("--catalog", catalog_path, "--out", out, "--tty", slave, env={"HAL0_PLAIN": "1"})
+    screens = _Screens(master)
+    screens.answer(catalog.questions["setup_type"].title, "")  # Recommended
+    screens.wait(catalog.questions["model_store"].title)
+    screens.wait("> ")
+    match = re.search(rb"(\d+)\) Type another folder\.\.\.", screens.seen)
+    assert match is not None
+    os.write(master, match.group(1) + b"\n")
+    screens.wait("Type the value and press Enter")
+    screens.wait("> ")
+    os.write(master, str(folder).encode() + b"\n")
+    screens.answer("Ready to install", "")
+    assert wait_exit(p, master)[0] == 0
+    assert json.loads(out.read_text())["model_store"]["path"] == str(folder)

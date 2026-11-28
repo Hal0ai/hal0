@@ -22,6 +22,7 @@ from .flow_basic import (
     folder_enter,
     folder_intro,
     folder_rows,
+    folder_space,
     gpu_cursor,
     gpu_enter,
     gpu_intro,
@@ -139,6 +140,7 @@ _SCREENS: dict[Screen, _Spec] = {
         _no_cursor,
         folder_enter,
         lambda s: "model_store",
+        folder_space,
     ),
     Screen.REVIEW: _Spec(
         lambda s: "Ready to install",
