@@ -104,6 +104,14 @@ def gpu_enter(s: State) -> State:
 # ----------------------------------------------------------- TYPE screen
 
 
+def _podman_word(f: Facts, unknown: str) -> str:
+    if f.podman_present is False:
+        return "will be installed"
+    if f.podman_runs is None:
+        return "installed" if f.podman_present else unknown
+    return "installed" if f.podman_runs else "installed but not working"
+
+
 def facts_lines(f: Facts) -> tuple[str, ...]:
     card = [
         x
@@ -116,7 +124,7 @@ def facts_lines(f: Facts) -> tuple[str, ...]:
     if f.gpu_outcome != "usable":
         card = [*card[:1], "not usable"] if card else []
     unknown = "not detected"
-    podman = unknown if f.podman_runs is None else ("running" if f.podman_runs else "not running")
+    podman = _podman_word(f, unknown)
     return (
         "This box:",
         f"  Graphics card: {', '.join(card) or unknown}",

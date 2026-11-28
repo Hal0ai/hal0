@@ -69,7 +69,9 @@ def ladder_catalog(catalog_path: Path, ladder_models_path: Path) -> Catalog:
 
 def _facts(**changes: object) -> Facts:
     base = load_facts(None, disks=[Disk("/", 100.0, 500.0)], ram_gb=32.0)
-    return replace(base, podman_runs=True, memory_python=True, npu_device=False, **changes)
+    return replace(
+        base, podman_present=True, podman_runs=True, memory_python=True, npu_device=False, **changes
+    )
 
 
 @pytest.fixture

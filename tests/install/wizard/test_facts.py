@@ -178,3 +178,32 @@ def test_satisfied_on_the_sample(tmp_path: Path, need: str) -> None:
 
 def test_satisfied_is_none_when_the_fact_is_unknown() -> None:
     assert satisfied("podman", load_facts(None, disks=[], ram_gb=None)) is None
+
+
+@pytest.mark.parametrize(
+    ("podman", "present", "runs", "met"),
+    [
+        ({"present": False}, False, None, True),
+        ({"present": False, "runs": False}, False, False, True),
+        ({"present": True, "runs": True}, True, True, True),
+        ({"present": True, "runs": False}, True, False, False),
+        ({"runs": False}, None, False, False),
+        ({"runs": True}, None, True, True),
+        ({}, None, None, None),
+    ],
+)
+def test_podman_facts_and_the_podman_need(
+    tmp_path: Path,
+    podman: dict[str, bool],
+    present: bool | None,
+    runs: bool | None,
+    met: bool | None,
+) -> None:
+    f = load_facts(write(tmp_path, {"version": 1, "podman": podman}), disks=[], ram_gb=None)
+    assert (f.podman_present, f.podman_runs) == (present, runs)
+    assert satisfied("podman", f) is met
+
+
+def test_podman_present_must_be_a_flag(tmp_path: Path) -> None:
+    with pytest.raises(FactsError, match=r"podman\.present"):
+        load_facts(write(tmp_path, {"podman": {"present": "yes"}}), disks=[], ram_gb=None)

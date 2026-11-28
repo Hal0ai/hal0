@@ -94,7 +94,13 @@ def make_row(
 
 
 def fmt_gb(value: float) -> str:
-    return f"{value:.0f}" if float(value).is_integer() else f"{value:.1f}"
+    """A size in GB: a whole number from 10 up, else one decimal unless it is whole."""
+    if value >= 10:
+        return f"{value:.0f}"
+    tenths = round(value, 1)
+    if tenths >= 10 or tenths.is_integer():
+        return f"{tenths:.0f}"
+    return f"{tenths:.1f}"
 
 
 def disk_of(path: str, disks: Sequence[Disk]) -> Disk | None:

@@ -57,6 +57,7 @@ class Disk:
 @dataclass(frozen=True)
 class Facts:
     container: str | None
+    podman_present: bool | None
     podman_runs: bool | None
     gpu_outcome: str
     gpu_reason: str | None
@@ -189,6 +190,7 @@ def load_facts(
     install = _section(data, "install")
     return Facts(
         container=_opt(data, "container", "container", str),
+        podman_present=_opt(podman, "podman.present", "present", bool),
         podman_runs=_opt(podman, "podman.runs", "runs", bool),
         gpu_outcome=_choice(gpu, "gpu.outcome", "outcome", GPU_OUTCOMES, "usable"),
         gpu_reason=_opt(gpu, "gpu.reason", "reason", str),
@@ -207,7 +209,8 @@ def load_facts(
 def satisfied(need: str, facts: Facts) -> bool | None:
     """Whether a component's need holds on this box; ``None`` means unknown."""
     if need == "podman":
-        return facts.podman_runs
+        # No podman yet means the installer will put it there.
+        return True if facts.podman_present is False else facts.podman_runs
     if need == "gpu":
         return facts.gpu_outcome == "usable"
     if need == "npu_device":

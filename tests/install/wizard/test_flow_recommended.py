@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -374,3 +375,50 @@ def test_review_model_line_for_auto_with_no_row_that_fits(
 
 def test_review_model_line_for_a_model_id(ladder_catalog: Catalog, usable_facts: Facts) -> None:
     assert _model_line(ladder_catalog, usable_facts, "big-1") == "Big"
+
+
+@pytest.mark.parametrize(
+    ("present", "runs", "word"),
+    [
+        (False, None, "will be installed"),
+        (True, True, "installed"),
+        (True, False, "installed but not working"),
+        (None, None, "not detected"),
+    ],
+)
+def test_the_box_line_says_what_podman_will_do(
+    catalog: Catalog, usable_facts: Facts, present: bool | None, runs: bool | None, word: str
+) -> None:
+    facts = replace(usable_facts, podman_present=present, podman_runs=runs)
+    lines = view(start(catalog, facts)).intro
+    assert f"  Podman: {word}" in lines
+    assert not any("running" in line for line in lines)
+
+
+def test_a_box_without_podman_still_offers_web_chat(catalog: Catalog, usable_facts: Facts) -> None:
+    facts = replace(usable_facts, podman_present=False, podman_runs=None)
+    jobs = view(run(start(catalog, facts), "DOWN", "DOWN", "ENTER"))
+    assert jobs.screen is Screen.JOBS
+    chat = next(r for r in jobs.rows if r.id == "openwebui")
+    assert chat.state == "open" and chat.value is True
+    review = {r.id: r for r in view(run(start(catalog, facts), "ENTER", "ENTER")).rows}
+    assert "Chat in your browser" in review["install"].detail
+
+
+@pytest.mark.parametrize(
+    ("value", "text"),
+    [
+        (135.04, "135"),
+        (46.9, "47"),
+        (10.0, "10"),
+        (9.96, "10"),
+        (2.0, "2"),
+        (2.5, "2.5"),
+        (2.04, "2"),
+        (0.5, "0.5"),
+    ],
+)
+def test_sizes_read_plainly(value: float, text: str) -> None:
+    from hal0.install.wizard.flow_model import fmt_gb
+
+    assert fmt_gb(value) == text
