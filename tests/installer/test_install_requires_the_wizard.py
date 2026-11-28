@@ -22,7 +22,7 @@ INSTALLER = REPO / "installer"
 
 MISSING_LINE = (
     "this release tree is incomplete: the setup screens are missing "
-    "(src/hal0/install/wizard/__main__.py, installer/manifests/setup-catalog.json)"
+    "(src/hal0/install/wizard/__main__.py, installer/manifests/setup-catalog.json, installer/manifests/setup-models.json)"
 )
 
 

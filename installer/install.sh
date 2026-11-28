@@ -73,7 +73,7 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=lib/answers.sh
 source "$(dirname "${BASH_SOURCE[0]}")/lib/answers.sh"
 if ! hal0_wizard_present 2>/dev/null; then
-    err "this release tree is incomplete: the setup screens are missing (src/hal0/install/wizard/__main__.py, installer/manifests/setup-catalog.json)"
+    err "this release tree is incomplete: the setup screens are missing (src/hal0/install/wizard/__main__.py, installer/manifests/setup-catalog.json, installer/manifests/setup-models.json)"
     exit 1
 fi
 
