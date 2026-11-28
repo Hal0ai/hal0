@@ -2144,13 +2144,19 @@ async def _resolved_context_length(request: Request, model: Any) -> int | None:
     if not isinstance(model, str) or not model:
         return None
     try:
-        from hal0.api.routes.v1 import _normalize_loaded_models, _normalize_slot_views
+        from hal0.api.routes.v1 import (
+            _normalize_configured_slot_names,
+            _normalize_loaded_models,
+            _normalize_slot_views,
+        )
         from hal0.normalize.resolver import LiveSlotResolver
 
         views = await _normalize_slot_views(request)
+        configured = await _normalize_configured_slot_names(request)
         resolver = LiveSlotResolver(
             slot_views_provider=lambda: views,
             loaded_models_provider=lambda: _normalize_loaded_models(request),
+            configured_names_provider=lambda: configured,
         )
         res = await resolver.resolve(model)
     except Exception:
@@ -2182,15 +2188,21 @@ async def _resolved_slot_image(request: Request, model: Any) -> str | None:
         if sm is None:
             return None
 
-        from hal0.api.routes.v1 import _normalize_loaded_models, _normalize_slot_views
+        from hal0.api.routes.v1 import (
+            _normalize_configured_slot_names,
+            _normalize_loaded_models,
+            _normalize_slot_views,
+        )
         from hal0.normalize.resolver import LiveSlotResolver, _configured_primary
         from hal0.profiles import ProfileCatalog
         from hal0.providers.container import _resolve_image_ref
 
         views = await _normalize_slot_views(request)
+        configured = await _normalize_configured_slot_names(request)
         resolver = LiveSlotResolver(
             slot_views_provider=lambda: views,
             loaded_models_provider=lambda: _normalize_loaded_models(request),
+            configured_names_provider=lambda: configured,
         )
         res = await resolver.resolve(model)
         if res is None:

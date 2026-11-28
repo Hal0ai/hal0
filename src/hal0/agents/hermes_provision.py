@@ -7135,7 +7135,8 @@ def _slots_serving_model(
         for row, view in zip(bound, views, strict=True)
         if is_dispatchable_state(_slot_state(row))
     }
-    res = resolve_chain(model_id, views, loaded)
+    configured = {str(row["name"]) for row in llm}
+    res = resolve_chain(model_id, views, loaded, configured)
     if res is not None:
         if res.fallback or not res.matched_name:
             if not bound:

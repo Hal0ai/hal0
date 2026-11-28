@@ -600,6 +600,24 @@ async def _normalize_slot_views(request: Request) -> list:
     ]
 
 
+async def _normalize_configured_slot_names(request: Request) -> frozenset[str] | None:
+    """Names of every configured slot, model-less and disabled ones included.
+
+    The resolver's slot views hold only model-bound llm slots, so they cannot
+    say whether a box has a ``utility`` slot the operator left without a model.
+    ``None`` when the slot list cannot be read: the resolver then keeps the
+    chains it had before ``memory`` replaced ``utility``.
+    """
+    sm = getattr(request.app.state, "slot_manager", None)
+    if sm is None:
+        return None
+    try:
+        cfgs = await sm.iter_configs()
+    except Exception:
+        return None
+    return frozenset(str(c.get("name") or "").strip().lower() for c in cfgs) - {""}
+
+
 def _is_remote_model(request: Request, model_id: str) -> bool:
     """True if model_id maps to a kind=='remote' upstream (skip thinking injection)."""
     upstreams = getattr(request.app.state, "upstreams", None)
@@ -813,9 +831,11 @@ async def _normalize_chat_body(request: Request, body: dict[str, Any]) -> dict[s
             body = {**body, "messages": canonical}
 
     views = await _normalize_slot_views(request)
+    configured = await _normalize_configured_slot_names(request)
     resolver = LiveSlotResolver(
         slot_views_provider=lambda: views,
         loaded_models_provider=lambda: _normalize_loaded_models(request),
+        configured_names_provider=lambda: configured,
     )
     raw_model = body.get("model")
     pinned: str | None = None
@@ -1648,9 +1668,11 @@ async def _resolve_virtual_model_entry(
     from hal0.normalize.resolver import LiveSlotResolver
 
     views = await _normalize_slot_views(request)
+    configured = await _normalize_configured_slot_names(request)
     resolver = LiveSlotResolver(
         slot_views_provider=lambda: views,
         loaded_models_provider=lambda: _normalize_loaded_models(request),
+        configured_names_provider=lambda: configured,
     )
     try:
         res = await resolver.resolve(model_id)

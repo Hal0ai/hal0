@@ -209,37 +209,101 @@ def _views(*names: str) -> list[SlotView]:
     ]
 
 
+def _names(*names: str) -> list[str]:
+    return list(names)
+
+
 def test_hal0_utility_resolves_with_and_without_a_utility_slot() -> None:
     loaded = {"agent-model", "memory-model", "utility-model"}
 
     # A box with a utility slot: exactly today's chain, utility first.
-    with_utility = resolve_chain("hal0/utility", _views("agent", "memory", "utility"), loaded)
+    with_utility = resolve_chain(
+        "hal0/utility",
+        _views("agent", "memory", "utility"),
+        loaded,
+        _names("agent", "memory", "utility"),
+    )
     assert with_utility is not None
     assert (with_utility.model_id, with_utility.matched_name) == ("utility-model", "utility")
 
     # A box without one resolves what hal0/memory resolves on that box.
     for names in (("agent", "memory"), ("agent",), ("agent", "brain")):
         slots = _views(*names)
-        util = resolve_chain("hal0/utility", slots, loaded)
-        mem = resolve_chain("hal0/memory", slots, loaded)
+        util = resolve_chain("hal0/utility", slots, loaded, _names(*names))
+        mem = resolve_chain("hal0/memory", slots, loaded, _names(*names))
         assert util == mem, names
-    bound = resolve_chain("hal0/utility", _views("agent", "memory"), loaded)
+    bound = resolve_chain(
+        "hal0/utility", _views("agent", "memory"), loaded, _names("agent", "memory")
+    )
     assert bound is not None and bound.matched_name == "memory"
 
-    # Today's chain for a box whose utility slot has no model stays the agent.
-    assert resolve_chain("hal0/utility", _views("agent"), loaded).matched_name == "agent"
+    # A caller that cannot name the configured slots keeps the chain as it was.
+    unknown = resolve_chain("hal0/utility", _views("agent", "memory"), loaded)
+    assert unknown is not None and unknown.matched_name == "agent"
+    assert unknown.model_id == "agent-model"
+
+
+def test_model_less_utility_slot_still_resolves_to_the_agent() -> None:
+    """A utility slot with no model is still the operator's slot (I1)."""
+    loaded = {"agent-model", "memory-model"}
+    # The views hold only model-bound slots; the configured names hold them all.
+    views = _views("agent", "memory")
+    res = resolve_chain("hal0/utility", views, loaded, _names("agent", "memory", "utility"))
+    assert res is not None
+    assert (res.model_id, res.matched_name) == ("agent-model", "agent")
+
+
+def test_disabled_utility_slot_still_resolves_to_the_agent() -> None:
+    """Same for a disabled slot: it is configured, so the chain is unchanged."""
+    loaded = {"agent-model", "memory-model"}
+    res = resolve_chain(
+        "hal0/utility", _views("agent", "memory"), loaded, _names("Agent", "Memory", "UTILITY")
+    )
+    assert res is not None
+    assert (res.model_id, res.matched_name) == ("agent-model", "agent")
+
+
+def test_fresh_box_without_a_utility_slot_gets_the_memory_chain() -> None:
+    loaded = {"agent-model", "memory-model"}
+    res = resolve_chain(
+        "hal0/utility", _views("agent", "memory"), loaded, _names("agent", "memory")
+    )
+    assert res is not None
+    assert (res.model_id, res.matched_name) == ("memory-model", "memory")
+
+
+def test_bound_utility_slot_still_wins() -> None:
+    loaded = {"agent-model", "memory-model", "utility-model"}
+    names = _names("agent", "memory", "utility")
+    res = resolve_chain("hal0/utility", _views(*names), loaded, names)
+    assert res is not None
+    assert (res.model_id, res.matched_name) == ("utility-model", "utility")
 
 
 def test_hal0_npu_chain_drops_utility_only_when_there_is_no_utility_slot() -> None:
     loaded: set[str] = set()
     npu = SlotView(name="npu", device="npu", model_id="npu-model", context_length=1)
-    without = resolve_chain("hal0/npu", [*_views("agent", "memory"), npu], loaded)
+    without = resolve_chain(
+        "hal0/npu", [*_views("agent", "memory"), npu], loaded, _names("agent", "memory", "npu")
+    )
     assert without is not None and without.matched_name == "npu"
     # No npu slot and no utility slot: the agent, never the memory slot.
-    only_agent = resolve_chain("hal0/npu", _views("agent", "memory"), loaded)
+    only_agent = resolve_chain(
+        "hal0/npu", _views("agent", "memory"), loaded, _names("agent", "memory")
+    )
     assert only_agent is not None and only_agent.matched_name == "agent"
+    # A model-less utility slot cannot match either way: still the agent.
+    model_less = resolve_chain(
+        "hal0/npu", _views("agent", "memory"), loaded, _names("agent", "memory", "utility")
+    )
+    assert model_less is not None and model_less.matched_name == "agent"
     # With a utility slot the chain is today's (npu, utility, agent).
-    with_utility = resolve_chain("hal0/npu", _views("agent", "memory", "utility"), loaded)
+    with_utility = resolve_chain(
+        "hal0/npu",
+        _views("agent", "memory", "utility"),
+        loaded,
+        _names("agent", "memory", "utility"),
+    )
     assert with_utility is not None and with_utility.matched_name == "utility"
 
 

@@ -25,6 +25,7 @@ class _ColdSlotManager:
 
     def __init__(self) -> None:
         self.loaded: list[str] = []
+        self.names: list[str] = []
 
     async def load(self, slot_name: str, model_id: str | None = None) -> None:
         self.loaded.append(slot_name)
@@ -33,7 +34,7 @@ class _ColdSlotManager:
         return SlotState.OFFLINE
 
     async def iter_configs(self) -> list[dict[str, Any]]:
-        return []
+        return [{"name": n} for n in self.names]
 
 
 def _run(
@@ -58,6 +59,7 @@ def _run(
     monkeypatch.setattr(hal0_api, "hal0_llm_slot_views", _views)
 
     sm = _ColdSlotManager()
+    sm.names = list(slots)
     app = create_app()
     with TestClient(app) as client:
         app.state.slot_manager = sm
