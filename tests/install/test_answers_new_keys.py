@@ -90,3 +90,12 @@ def test_existing_documents_unchanged(tmp_path):
         _hw(),
     )
     assert plain == with_new
+
+
+@pytest.mark.parametrize("key", _NEW_KEYS)
+def test_null_new_key_is_an_empty_mapping(tmp_path, key):
+    body = _BASE + f"strict: true\n{key}:\n"
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        sel = load_answers(_write(tmp_path, body), _hw())
+    assert sel.storage_dir == "/var/lib/hal0/models"
